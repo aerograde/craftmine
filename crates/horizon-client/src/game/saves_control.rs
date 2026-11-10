@@ -12,6 +12,7 @@ pub(super) const HELP: &[&str] = &[
     "world-rename FOLDER NAME       rename a world (Edit World; its folder stays)",
     "world-backup FOLDER            zip a world into backups/ (Edit World > Make Backup)",
     "world-delete FOLDER --confirm  delete a world for good (Select World > Delete)",
+    "world-import PATH [NAME]       import a world ZIP (a backup or another launcher's export)",
     "servers                        the multiplayer server list (servers.dat): name and address",
 ];
 
@@ -109,6 +110,30 @@ impl Game<'_> {
                     let _ = reply.send(answer.to_string());
                 });
                 return Ok(Some(None));
+            }
+            "world-import" => {
+                on_title()?;
+                let path = words
+                    .get(1)
+                    .copied()
+                    .ok_or("world-import PATH [NAME]: missing the archive")?;
+                let name = words
+                    .get(2..)
+                    .filter(|rest| !rest.is_empty())
+                    .map(|rest| rest.join(" "));
+                let saves = saves()?;
+                let stem = std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("Imported World");
+                let file = horizon_os::fs::File::open(path)
+                    .map_err(|e| format!("world-import {path}: {e}"))?;
+                let folder =
+                    title::world_import::import(file, name.as_deref().unwrap_or(stem), &saves)?;
+                if let Some(title) = self.title.as_mut() {
+                    title.worlds_changed();
+                }
+                json!({ "ok": true, "folder": folder })
             }
             "servers" => {
                 let file = horizon_client::multiplayer::servers_file(&saves()?);

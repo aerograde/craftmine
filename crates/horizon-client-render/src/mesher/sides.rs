@@ -114,7 +114,7 @@ impl Sides {
 /// The bucket of a quad: the axis plane it lies in and the side its
 /// triangles (corners 0, 1, 2 and 0, 2, 3, as the renderer draws them) face.
 fn bucket(quad: &[TerrainVertex; 4]) -> usize {
-    let p = quad.map(|v| v.pos);
+    let p = quad.map(|v| v.position());
     for axis in 0..3 {
         if p.iter().any(|v| v[axis] != p[0][axis]) {
             continue;
@@ -152,7 +152,7 @@ pub fn sort(solid: &mut Vec<TerrainVertex>) -> Sides {
     for (quad, &b) in quads.iter().zip(&buckets) {
         let b = usize::from(b);
         if let Bucket::Side(axis, positive) = BUCKETS[b] {
-            let p = quad[0].pos[axis];
+            let p = quad[0].position()[axis];
             planes[b] = match (counts[b], positive) {
                 (0, _) => p,
                 (_, true) => planes[b].min(p),
@@ -182,8 +182,8 @@ pub fn sort(solid: &mut Vec<TerrainVertex>) -> Sides {
                 let slice = &mut sorted[start..end];
                 if let Bucket::Side(axis, positive) = *bucket {
                     slice.sort_by(|a, b| {
-                        let a = a[0].pos[axis];
-                        let b = b[0].pos[axis];
+                        let a = a[0].position()[axis];
+                        let b = b[0].position()[axis];
                         if positive {
                             b.total_cmp(&a)
                         } else {
@@ -240,13 +240,13 @@ mod tests {
             .iter()
             .filter(|q| {
                 [[0, 1, 2], [0, 2, 3]].iter().any(|t| {
-                    let (e1, e2) = (sub(q[t[1]].pos, q[t[0]].pos), sub(q[t[2]].pos, q[t[0]].pos));
+                    let (e1, e2) = (sub(q[t[1]].position(), q[t[0]].position()), sub(q[t[2]].position(), q[t[0]].position()));
                     let n = [
                         e1[1] * e2[2] - e1[2] * e2[1],
                         e1[2] * e2[0] - e1[0] * e2[2],
                         e1[0] * e2[1] - e1[1] * e2[0],
                     ];
-                    let to_eye = sub(eye, q[t[0]].pos);
+                    let to_eye = sub(eye, q[t[0]].position());
                     n[0] * to_eye[0] + n[1] * to_eye[1] + n[2] * to_eye[2] > 0.0
                 })
             })

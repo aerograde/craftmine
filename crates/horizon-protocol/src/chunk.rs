@@ -305,6 +305,15 @@ impl ChunkData {
             .map(|_| Section::read(&mut r, block_bits, biome_bits))
             .collect()
     }
+    /// Every section in the buffer, for a packet that does not say how many.
+    pub fn all_sections(&self) -> Result<Vec<Section>> {
+        let mut r = Reader::new(&self.buffer);
+        let mut sections = Vec::new();
+        while r.remaining() > 0 {
+            sections.push(Section::read(&mut r, 0, 0)?);
+        }
+        Ok(sections)
+    }
     pub fn from_sections(sections: &[Section]) -> Vec<u8> {
         let mut w = Writer::new();
         for s in sections {

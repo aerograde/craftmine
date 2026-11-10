@@ -24,6 +24,7 @@ mod onboarding;
 mod profile_screen;
 #[cfg(test)]
 mod tests;
+pub mod world_import;
 pub mod world_management;
 pub use create_world::{DIFFICULTIES, WorldOptions};
 pub use flat::{FlatLayer, FlatSettings, State as FlatEditor};
@@ -1077,11 +1078,29 @@ impl Title {
             alert: None,
         };
     }
+    /// A world archive picked in the browser (Select World > Import World):
+    /// unpacked into a new save. The archive's bytes are already in memory;
+    /// unpacking runs once, on the poll after the player picked it.
+    fn poll_world_import(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.mode, Mode::Select { .. })
+            && let Some((kind, bytes)) = horizon_os::web::take_picked_file()
+        {
+            if kind != "world" {
+                return;
+            }
+            match world_import::import(std::io::Cursor::new(bytes), "Imported World", &self.saves) {
+                Ok(_) => self.worlds_changed(),
+                Err(error) => self.failed(error),
+            }
+        }
+    }
     /// Polling is done once per rendered frame so filesystem work never blocks drawing.
     pub fn poll_backup(&mut self) {
         self.poll_onboarding(horizon_os::time::Instant::now());
         // Edit Profile's imported pictures come in on the same frames.
         self.poll_profile_file();
+        self.poll_world_import();
         self.poll_account();
         self.poll_optimize();
         if !self.backup_shown.get() {
@@ -1671,7 +1690,7 @@ impl Title {
                 } else {
                     lang::get_or("selectWorld.select", "Play Selected World")
                 };
-                vec![
+                let buttons = vec![
                     b(
                         (w / 2.0).floor() - 154.0,
                         h - 52.0,
@@ -1720,7 +1739,23 @@ impl Title {
                         true,
                         12,
                     ),
-                ]
+                ];
+                // The browser can load a world ZIP (a backup, or another
+                // launcher's export); the control socket covers the rest.
+                #[cfg(target_arch = "wasm32")]
+                let buttons = {
+                    let mut buttons = buttons;
+                    buttons.push(b(
+                        w - 108.0,
+                        21.0,
+                        100.0,
+                        &lang::get_or("selectWorld.import", "Import World"),
+                        true,
+                        16,
+                    ));
+                    buttons
+                };
+                buttons
             }
             Mode::Create {
                 creative, options, ..
@@ -3266,6 +3301,10 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             (Mode::Main, Some(3)) => Action::Options,
             (Mode::Main, Some(7)) => Action::Accessibility,
             (Mode::Main, Some(6)) => Action::Language,
+            (Mode::Select { .. }, Some(16)) => {
+                world_import::pick();
+                Action::None
+            }
             (Mode::Select { worlds, selected }, Some(10)) => {
                 match selected.and_then(|i| worlds.get(i)).cloned() {
                     Some(world) => self.play(world),

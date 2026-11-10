@@ -2233,6 +2233,14 @@ struct Game<'a> {
     luminance: Option<horizon_client::dynamic_light::Luminance>,
     /// Name tags drawn over everything (`RenderPipelines.TEXT_SEE_THROUGH`).
     see_through_vertices: Vec<Vertex>,
+    /// Entity shadow casters this frame, pooled like `entity_vertices`.
+    shadow_casters: Vec<(glam::DVec3, f32, f32)>,
+    /// Rain and snow vertices, pooled across frames.
+    weather_vertices: Vec<horizon_client::weather::Vertex>,
+    /// The first-person hand's vertices, pooled across frames.
+    hand_vertices: Vec<Vertex>,
+    /// The sun, moon and End flash vertices, pooled across frames.
+    celestial_vertices: Vec<Vertex>,
     /// The first-person player's model, which only a native pack's shadow pass draws.
     shadow_only_vertices: std::cell::RefCell<Vec<Vertex>>,
     /// Runs of `entity_vertices` by entity, for a shader pack's per-entity draws; recorded only
@@ -2628,6 +2636,16 @@ struct Game<'a> {
     native_net: native_net::NativeNet,
     /// Meshed sections waiting for an upload budget (Horizon settings).
     pending_uploads: Vec<((i32, i32, i32), horizon_client::mesher::SectionMesh)>,
+    /// `pending_uploads`' keys, so "does this section wait for its upload?"
+    /// is a lookup rather than a scan of the list (`entity_culling`,
+    /// `moving_pistons`).
+    pending_upload_keys: horizon_client::fast_hash::FxHashSet<(i32, i32, i32)>,
+    /// The centre `pending_uploads` was last sorted for: with no new meshes
+    /// the list keeps its order and need not be sorted again.
+    pending_uploads_sorted_at: Option<(i32, i32)>,
+    /// This frame's block entities, copied once out of the renderer (which
+    /// lists them per meshed section) for the two passes that draw them.
+    block_entity_draw_list: Vec<([i32; 3], u32)>,
     /// This frame's view frustum, for culling entities and block entities.
     view_frustum: Option<horizon_client::gfx::Frustum>,
     entity_culler: Option<horizon_client::entity_culling::Culler>,
@@ -10283,6 +10301,8 @@ impl Game<'_> {
         let shadow_sprite = (self.settings.entity_shadows && !pack_shadows)
             .then(|| self.gui.atlas.sprites.get("misc/shadow").copied())
             .flatten();
+        let mut casters = std::mem::take(&mut self.shadow_casters);
+        casters.clear();
         if let Some(sprite) = shadow_sprite {
             // DimensionType.ambientLight: the_nether 0.1, the_end 0.25.
             let ambient = match self.dim {
@@ -10299,8 +10319,7 @@ impl Game<'_> {
                     p.z + (q.z - p.z) * a,
                 )
             };
-            let mut casters: Vec<(glam::DVec3, f32, f32)> =
-                horizon_client::shadows::mob_casters(&self.mobs, a).collect();
+            casters.extend(horizon_client::shadows::mob_casters(&self.mobs, a));
             let item = horizon_client::shadows::shadow_params("minecraft:item");
             casters.extend(
                 self.dropped
@@ -10315,7 +10334,7 @@ impl Game<'_> {
             );
             // Text, block and item displays (DisplayRenderer's shadow radius).
             casters.extend(self.text_displays.values().filter_map(|d| d.shadow(a)));
-            for (pos, radius, strength) in casters {
+            for (pos, radius, strength) in casters.drain(..) {
                 horizon_client::shadows::shadow(
                     &self.world,
                     self.res.facts(),
@@ -10339,7 +10358,11 @@ impl Game<'_> {
                 );
             }
         }
+        self.shadow_casters = casters;
         // Block entities (BlockEntityRenderers): chests, shulker boxes, banners, skulls...
+        // Taken before the renderers' closures borrow the game, restored after.
+        let mut block_entities = std::mem::take(&mut self.block_entity_draw_list);
+        block_entities.clear();
         if let Some(r) = &self.renderer {
             let lid = |p: [i32; 3]| self.chest_lid(p, alpha as f32);
             let anim = |p: [i32; 3]| self.block_anim(p, alpha as f32);
@@ -10387,12 +10410,13 @@ impl Game<'_> {
                     v.intersects(o - glam::Vec3::ONE, o + glam::Vec3::splat(2.0))
                 })
             };
-            let visible =
-                r.visible_block_entities(self.settings.chunk_fade)
-                    .filter(|(p, state)| {
-                        self.res.block_entity_render().renders(*state)
-                            && (off_screen(*state) || in_view(p))
-                    });
+            // One walk of the renderer's per-section block-entity lists for
+            // both the built-in renderers and the mods' (they used to walk
+            // them twice a frame).
+            block_entities.extend(r.visible_block_entities(self.settings.chunk_fade).copied());
+            let visible = block_entities.iter().filter(|(p, state)| {
+                self.res.block_entity_render().renders(*state) && (off_screen(*state) || in_view(p))
+            });
             if self.entity_culler.is_some() || self.pack_ids.is_some() {
                 for block in visible {
                     let start = out.len();
@@ -10411,8 +10435,8 @@ impl Game<'_> {
             }
             // Mod block entities: their mods draw them (`native_block_entity_submit`),
             // culled by the bounds they give.
-            let mods = r
-                .visible_block_entities(self.settings.chunk_fade)
+            let mods = block_entities
+                .iter()
                 .filter(|(_, state)| !self.res.block_entity_render().renders(*state));
             self.mod_block_entity_geometry(mods, camera, alpha as f32, &mut out);
             self.mark_stage(out.len(), "DESTROY");
@@ -10423,6 +10447,7 @@ impl Game<'_> {
                     .render_breaking(&scene, pos, state.0, stage, &mut out);
             }
         }
+        self.block_entity_draw_list = block_entities;
         // Experience orbs (ExperienceOrbRenderer): pulsing billboards from a 4x4 icon sheet.
         self.mark_entity(out.len(), "minecraft:experience_orb");
         if let Some(r) = self
@@ -11138,10 +11163,10 @@ impl Game<'_> {
         &self,
         sky: &horizon_client::environment::Sky,
         rain: f32,
+        mut out: Vec<Vertex>,
     ) -> (Vec<Vertex>, Option<(glam::Mat4, f32)>) {
         let body_color =
             0x00FF_FFFF | (((1.0 - rain).clamp(0.0, 1.0) * 255.0).round() as u32) << 24;
-        let mut out = Vec::new();
         let atlas = &self.gui.atlas;
         let frame = |angle: f32| {
             glam::Mat4::from_rotation_y((-90.0f32).to_radians())
@@ -11535,6 +11560,7 @@ impl Game<'_> {
         self.title = None;
         self.clear_lod();
         self.pending_uploads.clear();
+        self.pending_upload_keys.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
         }
@@ -11639,6 +11665,7 @@ impl Game<'_> {
         self.mining = None;
         self.clear_lod();
         self.pending_uploads.clear();
+        self.pending_upload_keys.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
         }
@@ -11864,6 +11891,7 @@ impl Game<'_> {
         self.screen = Screen::Playing;
         self.clear_lod();
         self.pending_uploads.clear();
+        self.pending_upload_keys.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
         }
@@ -13036,8 +13064,7 @@ impl Game<'_> {
     }
     /// FirstPersonHandsAndItemsRenderer: the right arm or the held items of
     /// both hands in view space, converted to camera-relative world space.
-    fn hand_geometry(&mut self, alpha: f64) -> Vec<Vertex> {
-        let mut out = Vec::new();
+    fn hand_geometry(&mut self, alpha: f64, mut out: Vec<Vertex>) -> Vec<Vertex> {
         // GameRenderer.renderItemInHand: F1 hides the hand with the HUD.
         if self.spectator()
             || self.ui.hide_gui
@@ -13345,18 +13372,19 @@ impl Game<'_> {
         &mut self,
         camera: glam::DVec3,
         alpha: f64,
+        mut out: Vec<horizon_client::weather::Vertex>,
     ) -> Vec<horizon_client::weather::Vertex> {
         use horizon_client::weather;
         let (intensity, _) = self.world.weather.levels(alpha as f32);
         if intensity <= 0.0 {
-            return Vec::new();
+            return out;
         }
         let atlas = &self.gui.atlas;
         let (Some(rain_tex), Some(snow_tex)) = (
             atlas.sprites.get("environment/rain").copied(),
             atlas.sprites.get("environment/snow").copied(),
         ) else {
-            return Vec::new();
+            return out;
         };
         let (cx, cy, cz) = (
             camera.x.floor() as i32,
@@ -13366,7 +13394,6 @@ impl Game<'_> {
         // The 32x32 direction table supports at most a 15-block radius.
         let radius = self.settings.weather_radius.clamp(0, 15);
         let eye = camera.to_array();
-        let mut rain = Vec::new();
         let mut snow_vertices = Vec::new();
         // Saturation keeps extreme camera coordinates from overflowing the loop.
         for z in cz.saturating_sub(radius)..=cz.saturating_add(radius) {
@@ -13412,13 +13439,13 @@ impl Game<'_> {
                 if snow {
                     snow_vertices.extend(vertices);
                 } else {
-                    rain.extend(vertices);
+                    out.extend(vertices);
                 }
             }
         }
         // Vanilla draws every rain column before the snow ones.
-        rain.extend(snow_vertices);
-        rain
+        out.extend(snow_vertices);
+        out
     }
     /// A translated message for the player the game acts for: `overlay` is
     /// `sendOverlayMessage` (the action bar), else `sendSystemMessage` (chat).
@@ -14756,24 +14783,29 @@ impl Game<'_> {
             self.dragon_fireball_geometry(camera, alpha, &mut dragon);
             entities.extend(dragon);
         }
-        let (celestial, stars) = if title {
-            (Vec::new(), None)
+        let mut celestial = std::mem::take(&mut self.celestial_vertices);
+        celestial.clear();
+        let stars = if title {
+            None
         } else if self.dim == Dim::Overworld
             && self.potions.effects.get("darkness").is_none()
             && self.potions.effects.get("blindness").is_none()
         {
             // Camera.doesMobEffectBlockSky: no sun, moon or stars.
-            self.celestial_geometry(&sky, rain)
+            let (built, stars) = self.celestial_geometry(&sky, rain, celestial);
+            celestial = built;
+            stars
         } else if self.dim == Dim::End && self.settings.horizon.sky {
-            (self.end_flash_geometry(), None)
+            celestial = self.end_flash_geometry();
+            None
         } else {
-            (Vec::new(), None)
+            None
         };
-        let mut hand = if title || self.scoping() {
-            Vec::new()
-        } else {
-            self.hand_geometry(camera_alpha)
-        };
+        let mut hand = std::mem::take(&mut self.hand_vertices);
+        hand.clear();
+        if !title && !self.scoping() {
+            hand = self.hand_geometry(camera_alpha, hand);
+        }
         // GameRenderer.render3dHud: the screen effects after the hand, in
         // its pass (the hand pass draws with `bob * view`).
         if !title {
@@ -14794,11 +14826,13 @@ impl Game<'_> {
         if !title {
             self.end_geometry(camera, &mut entities);
         }
-        let weather = if !title && self.dim == Dim::Overworld && self.settings.horizon.weather {
-            horizon_client::spans::time("weather", || self.weather_geometry(camera, alpha))
-        } else {
-            Vec::new()
-        };
+        let mut weather = std::mem::take(&mut self.weather_vertices);
+        weather.clear();
+        if !title && self.dim == Dim::Overworld && self.settings.horizon.weather {
+            weather = horizon_client::spans::time("weather", || {
+                self.weather_geometry(camera, alpha, weather)
+            });
+        }
         let border = (!title)
             .then(|| self.border_draw(camera.to_array(), alpha as f32))
             .flatten();
@@ -14982,6 +15016,9 @@ impl Game<'_> {
         *self.glowing_vertices.get_mut() = glowing;
         *self.shadow_only_vertices.get_mut() = shadow_only;
         self.see_through_vertices = see_through;
+        self.weather_vertices = weather;
+        self.hand_vertices = hand;
+        self.celestial_vertices = celestial;
         result
     }
     /// The frame shows the title's panorama, not a level: the title screen, or a
@@ -15569,6 +15606,7 @@ impl Game<'_> {
                 let pending = &mut self.pending_uploads;
                 let fresh: horizon_client::fast_hash::FxHashSet<(i32, i32, i32)> =
                     uploads.iter().map(|(k, _)| *k).collect();
+                let added = !uploads.is_empty();
                 let chunks = &self.world.chunks;
                 let loaded = |k: &(i32, i32, i32)| chunks.contains_key(&(k.0, k.2));
                 let mut spent: Vec<_> = pending
@@ -15582,8 +15620,14 @@ impl Game<'_> {
                     }
                 }
                 let centre = self.streaming.center;
-                let far = |k: &(i32, i32, i32)| (k.0 - centre.0).pow(2) + (k.2 - centre.1).pow(2);
-                pending.sort_unstable_by_key(|(k, _)| std::cmp::Reverse(far(k)));
+                // The order survives drains and removals: only new meshes or
+                // a moved centre can need another sort.
+                if added || self.pending_uploads_sorted_at != Some(centre) {
+                    let far =
+                        |k: &(i32, i32, i32)| (k.0 - centre.0).pow(2) + (k.2 - centre.1).pow(2);
+                    pending.sort_unstable_by_key(|(k, _)| std::cmp::Reverse(far(k)));
+                    self.pending_uploads_sorted_at = Some(centre);
+                }
                 let (limit, budget) = if budgeted {
                     (
                         g.chunk_updates as usize,
@@ -15616,6 +15660,10 @@ impl Game<'_> {
                     count += 1;
                     bytes += size;
                 }
+                // The list changed: refresh the key index the culling queries.
+                self.pending_upload_keys.clear();
+                self.pending_upload_keys
+                    .extend(pending.iter().map(|(key, _)| *key));
                 self.streaming.free(spent);
             }
             renderer.remove_columns(unloaded.iter().map(|c| (c.x, c.z)));
@@ -17371,6 +17419,10 @@ impl<'a> Game<'a> {
             dynamic_lights: Vec::new(),
             luminance: None,
             see_through_vertices: Vec::new(),
+            shadow_casters: Vec::new(),
+            weather_vertices: Vec::new(),
+            hand_vertices: Vec::new(),
+            celestial_vertices: Vec::new(),
             shadow_only_vertices: Default::default(),
             entity_spans: Default::default(),
             glowing_vertices: Default::default(),
@@ -17609,6 +17661,9 @@ impl<'a> Game<'a> {
             entity_culler: None,
             pack_shadow_casters: (false, false),
             pending_uploads: Vec::new(),
+            pending_upload_keys: Default::default(),
+            pending_uploads_sorted_at: None,
+            block_entity_draw_list: Vec::new(),
             frame_graph: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
@@ -18524,7 +18579,10 @@ fn load_resources(
     // cannot detach a tail worker that races the next pack-loader generation.
     let prepared_at = Instant::now();
     let game_cpu = menu.then(|| GameCpuResources::load(&root)).transpose()?;
-    let renderer_cpu = menu.then(|| prepare_renderer_textures(&pack));
+    let renderer_cpu = menu.then(|| {
+        let pixels = pack.render.pixels();
+        prepare_renderer_textures(&pack, &pixels)
+    });
     if menu {
         log::info!(
             "Horizon: handoff CPU resources prepared on worker in {} ms",
@@ -18738,10 +18796,13 @@ fn load_world_rest(
 }
 
 /// CPU mip chains for the block sprites and world border.
-fn prepare_renderer_textures(pack: &PackResources) -> horizon_client::gfx::PreparedTextures {
+fn prepare_renderer_textures(
+    pack: &PackResources,
+    pixels: &[u8],
+) -> horizon_client::gfx::PreparedTextures {
     let assets = &pack.render;
     horizon_client::gfx::PreparedTextures::new(
-        &assets.pixels,
+        pixels,
         assets.sprite_size,
         assets.texture_layers,
         &assets.sprite_mips,
@@ -18766,6 +18827,7 @@ fn build_renderer(
     api: horizon_client::graphics::GraphicsApi,
 ) -> Result<Renderer> {
     let assets = &pack.render;
+    let pixels = assets.pixels();
     let atlas = &gui.atlas;
     // The new renderer's atlas texture starts from `HudAtlas.pixels`, which
     // holds the textures but never a glyph rasterized at run time. The font's
@@ -18776,11 +18838,11 @@ fn build_renderer(
     // over to the game.
     atlas.font.reset_cache();
     // Made here when the worker did not: the renderer's own fallback has no LabPBR maps.
-    let prepared = Some(prepared.unwrap_or_else(|| prepare_renderer_textures(pack)));
+    let prepared = Some(prepared.unwrap_or_else(|| prepare_renderer_textures(pack, &pixels)));
     let mut renderer = horizon_os::block_on(Renderer::new(
         window,
         offscreen,
-        &assets.pixels,
+        &pixels,
         assets.sprite_size,
         assets.sprite_minimum_size,
         assets.texture_layers,

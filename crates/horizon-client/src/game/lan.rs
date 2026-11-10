@@ -1407,6 +1407,43 @@ impl Game<'_> {
             tag
         });
         let lan = Lan::start_with(sync.clone(), net)?;
+        // Old guests' block states and chunks are translated through the
+        // world's registry and build range.
+        lan.set_legacy_blocks(self.pack.assets.registry);
+        let shape = self.world.shape;
+        lan.set_legacy_shape(horizon_protocol::translate::legacy::play::ChunkShape::new(
+            usize::try_from(shape.height / 16).unwrap_or(24),
+            shape.min_y,
+            self.pack.assets.registry.len(),
+            self.res.biomes().list.len(),
+            shape.sky_light,
+        ));
+        let biomes: Vec<u8> = self
+            .res
+            .biomes()
+            .registry_order()
+            .iter()
+            .map(|name| horizon_protocol::translate::legacy::biome(name))
+            .collect();
+        lan.set_legacy_biomes(std::sync::Arc::new(move |id: u32| {
+            biomes.get(id as usize).copied().unwrap_or(1)
+        }));
+        let builtin = sync.builtin.clone();
+        lan.set_legacy_entities(std::sync::Arc::new(move |id: u32| {
+            let id = i32::try_from(id).ok()?;
+            builtin
+                .get("minecraft:entity_type")?
+                .name(id)
+                .map(str::to_owned)
+        }));
+        let builtin_items = sync.builtin.clone();
+        lan.set_legacy_items(std::sync::Arc::new(move |id: u32| {
+            let id = i32::try_from(id).ok()?;
+            builtin_items
+                .get("minecraft:item")?
+                .name(id)
+                .map(str::to_owned)
+        }));
         if let Some(uuid) = host {
             lan.reserve(uuid);
         }

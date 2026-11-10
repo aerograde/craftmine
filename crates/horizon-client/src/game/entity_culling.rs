@@ -53,7 +53,7 @@ impl Game<'_> {
                 .is_some_and(|r| r.has_section(section))
                 && !self.world.dirty_sections.contains(&section)
                 && !self.streaming.is_meshing(section)
-                && !self.pending_uploads.iter().any(|(key, _)| *key == section)
+                && !self.pending_upload_keys.contains(&section)
         });
         // A shader pack's shadow pass still draws what the camera cannot see.
         if hidden && !(self.pack_shadow_casters.0 && self.hide_spans_from(start, vertices.len())) {

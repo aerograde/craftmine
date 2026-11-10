@@ -114,17 +114,76 @@ impl Write for Pipe {
     }
 }
 
+/// A shared world's data channel as an Eaglercraft message socket.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+struct WebMessages {
+    socket: horizon_os::net::WebSocket,
+    /// The message read to tell an Eaglercraft guest from a Horizon page.
+    first: std::sync::Mutex<Option<crate::eagler::Message>>,
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+impl WebMessages {
+    fn new(socket: horizon_os::net::WebSocket) -> Self {
+        Self {
+            socket,
+            first: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn with_first(socket: horizon_os::net::WebSocket, first: crate::eagler::Message) -> Self {
+        Self {
+            socket,
+            first: std::sync::Mutex::new(Some(first)),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+impl crate::eagler::Messages for WebMessages {
+    fn send(&self, message: crate::eagler::Message) -> std::io::Result<()> {
+        let message = match message {
+            crate::eagler::Message::Binary(data) => horizon_os::net::Message::Binary(data),
+            crate::eagler::Message::Text(text) => horizon_os::net::Message::Text(text),
+        };
+        self.socket.send(message)
+    }
+    fn recv(&self) -> std::io::Result<Option<crate::eagler::Message>> {
+        if let Some(first) = self.first.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Ok(Some(first));
+        }
+        Ok(self.socket.recv()?.map(|message| match message {
+            horizon_os::net::Message::Binary(data) => crate::eagler::Message::Binary(data),
+            horizon_os::net::Message::Text(text) => crate::eagler::Message::Text(text),
+        }))
+    }
+    fn set_read_timeout(&self, timeout: Option<horizon_os::time::Duration>) {
+        self.socket.set_read_timeout(timeout);
+    }
+    fn shutdown(&self) {
+        self.socket.shutdown();
+    }
+    fn try_clone(&self) -> std::io::Result<Box<dyn crate::eagler::Messages>> {
+        Ok(Box::new(WebMessages::new(self.socket.try_clone())))
+    }
+}
+
 /// What a connection runs over.
 enum Stream {
     Tcp(TcpStream),
     Memory(Pipe),
     /// A browser's connection to this server.
     WebSocket(crate::websocket::ServerSocket),
+    /// A browser's connection whose first message was read already (to tell
+    /// an Eaglercraft guest from a vanilla client).
+    WebSocketPrefixed(crate::websocket::Prefixed),
     /// This page's connection to a server.
     #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
     Web(horizon_os::net::WebSocket),
     /// This page's connection to an Eaglercraft server.
     Eagler(crate::eagler::EaglerSocket),
+    /// A shared world's connection to an Eaglercraft guest.
+    EaglerServer(crate::eagler_server::EaglerServerSocket),
 }
 impl Stream {
     fn try_clone(&self) -> std::io::Result<Self> {
@@ -132,9 +191,11 @@ impl Stream {
             Self::Tcp(s) => Self::Tcp(s.try_clone()?),
             Self::Memory(p) => Self::Memory(p.try_clone()),
             Self::WebSocket(s) => Self::WebSocket(s.try_clone()?),
+            Self::WebSocketPrefixed(s) => Self::WebSocketPrefixed(s.try_clone()?),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             Self::Web(s) => Self::Web(s.try_clone()),
             Self::Eagler(s) => Self::Eagler(s.try_clone()?),
+            Self::EaglerServer(s) => Self::EaglerServer(s.try_clone()?),
         })
     }
     fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
@@ -145,12 +206,17 @@ impl Stream {
                 Ok(())
             }
             Self::WebSocket(s) => s.stream().set_read_timeout(timeout),
+            Self::WebSocketPrefixed(s) => s.set_read_timeout(timeout),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             Self::Web(s) => {
                 s.set_read_timeout(timeout);
                 Ok(())
             }
             Self::Eagler(s) => {
+                s.set_read_timeout(timeout);
+                Ok(())
+            }
+            Self::EaglerServer(s) => {
                 s.set_read_timeout(timeout);
                 Ok(())
             }
@@ -163,9 +229,11 @@ impl Stream {
             }
             Self::Memory(p) => p.shutdown(),
             Self::WebSocket(s) => s.shutdown(),
+            Self::WebSocketPrefixed(s) => s.shutdown(),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             Self::Web(s) => s.shutdown(),
             Self::Eagler(s) => s.shutdown(),
+            Self::EaglerServer(s) => s.shutdown(),
         }
     }
 }
@@ -175,9 +243,11 @@ impl Read for Stream {
             Self::Tcp(s) => s.read(out),
             Self::Memory(p) => p.read(out),
             Self::WebSocket(s) => s.read(out),
+            Self::WebSocketPrefixed(s) => s.read(out),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             Self::Web(s) => s.read(out),
             Self::Eagler(s) => s.read(out),
+            Self::EaglerServer(s) => s.read(out),
         }
     }
 }
@@ -187,9 +257,11 @@ impl Write for Stream {
             Self::Tcp(s) => s.write(data),
             Self::Memory(p) => p.write(data),
             Self::WebSocket(s) => s.write(data),
+            Self::WebSocketPrefixed(s) => s.write(data),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             Self::Web(s) => s.write(data),
             Self::Eagler(s) => s.write(data),
+            Self::EaglerServer(s) => s.write(data),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -197,9 +269,11 @@ impl Write for Stream {
             Self::Tcp(s) => s.flush(),
             Self::Memory(p) => p.flush(),
             Self::WebSocket(s) => s.flush(),
+            Self::WebSocketPrefixed(s) => s.flush(),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             Self::Web(s) => s.flush(),
             Self::Eagler(s) => s.flush(),
+            Self::EaglerServer(s) => s.flush(),
         }
     }
 }
@@ -374,9 +448,99 @@ impl Connection {
     pub fn from_web(socket: horizon_os::net::WebSocket) -> Result<Self> {
         Self::over(Stream::Web(socket))
     }
+    /// A player who joined a world this page shares, opening with the
+    /// Eaglercraft plugin handshake instead of the game's.
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    pub fn eagler_server_web(
+        socket: horizon_os::net::WebSocket,
+        first: crate::eagler::Message,
+        brand: &str,
+        version: &str,
+    ) -> Result<Self> {
+        Self::over(Stream::EaglerServer(
+            crate::eagler_server::EaglerServerSocket::new(
+                Box::new(WebMessages::with_first(socket, first)),
+                brand,
+                version,
+            ),
+        ))
+    }
     /// A connection through the Eaglercraft plugin over a message socket.
     pub fn eagler(socket: Box<dyn crate::eagler::Messages>) -> Result<Self> {
         Self::over(Stream::Eagler(crate::eagler::EaglerSocket::new(socket)))
+    }
+    /// A shared world's end of an Eaglercraft connection: the guest's plugin
+    /// handshake, then the game protocol as messages (`EaglerServerSocket`).
+    pub fn eagler_server(
+        socket: Box<dyn crate::eagler::Messages>,
+        brand: &str,
+        version: &str,
+    ) -> Result<Self> {
+        Self::over(Stream::EaglerServer(
+            crate::eagler_server::EaglerServerSocket::new(socket, brand, version),
+        ))
+    }
+    /// A shared world's end of an Eaglercraft connection for a 1.8 guest.
+    pub fn eagler_server_legacy(
+        socket: Box<dyn crate::eagler::Messages>,
+        brand: &str,
+        version: &str,
+        resolve: std::sync::Arc<dyn Fn(u32) -> crate::translate::legacy::LegacyState + Send + Sync>,
+    ) -> Result<Self> {
+        Self::over(Stream::EaglerServer(
+            crate::eagler_server::EaglerServerSocket::legacy(socket, brand, version, resolve),
+        ))
+    }
+    /// The level's shape, for translating chunks to a legacy guest.
+    pub fn set_legacy_chunk_shape(&self, shape: crate::translate::legacy::play::ChunkShape) {
+        if let Stream::EaglerServer(socket) = &self.writer.stream {
+            socket.set_chunk_shape(shape);
+        }
+    }
+    /// The world's biomes by network id, for translating chunks to a legacy
+    /// guest.
+    pub fn set_legacy_biomes(&self, biomes: std::sync::Arc<dyn Fn(u32) -> u8 + Send + Sync>) {
+        if let Stream::EaglerServer(socket) = &self.writer.stream {
+            socket.set_biomes(biomes);
+        }
+    }
+    /// The world's entity types by network id, for translating spawn packets
+    /// to a legacy guest.
+    pub fn set_legacy_entities(
+        &self,
+        entities: std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>,
+    ) {
+        if let Stream::EaglerServer(socket) = &self.writer.stream {
+            socket.set_entities(entities);
+        }
+    }
+    /// The world's item types by network id, for translating stacks to a
+    /// legacy guest.
+    pub fn set_legacy_items(
+        &self,
+        items: std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>,
+    ) {
+        if let Stream::EaglerServer(socket) = &self.writer.stream {
+            socket.set_items(items);
+        }
+    }
+    /// The same, over a shared world's data channel (the browser build).
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    pub fn eagler_server_web_legacy(
+        socket: horizon_os::net::WebSocket,
+        first: crate::eagler::Message,
+        brand: &str,
+        version: &str,
+        resolve: std::sync::Arc<dyn Fn(u32) -> crate::translate::legacy::LegacyState + Send + Sync>,
+    ) -> Result<Self> {
+        Self::over(Stream::EaglerServer(
+            crate::eagler_server::EaglerServerSocket::legacy(
+                Box::new(WebMessages::with_first(socket, first)),
+                brand,
+                version,
+                resolve,
+            ),
+        ))
     }
     /// A browser's connection, whose HTTP upgrade request is still to read
     /// ([`crate::websocket::is_http`] told it apart).
@@ -385,6 +549,16 @@ impl Connection {
         Self::over(Stream::WebSocket(crate::websocket::ServerSocket::accept(
             stream,
         )?))
+    }
+    /// A browser's connection whose upgrade is done and whose first message
+    /// was read, to tell an Eaglercraft guest from a vanilla client.
+    pub fn from_websocket_prefetched(
+        socket: crate::websocket::ServerSocket,
+        first: Vec<u8>,
+    ) -> Result<Self> {
+        Self::over(Stream::WebSocketPrefixed(crate::websocket::Prefixed::new(
+            socket, first,
+        )))
     }
     pub fn from_stream(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;

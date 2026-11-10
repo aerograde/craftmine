@@ -649,6 +649,15 @@ impl WebSocket {
         Ok(state.incoming.pop_front())
     }
 
+    /// Puts a message back in front of the incoming ones, after a peek read
+    /// told an Eaglercraft guest from a Horizon page.
+    pub fn unrecv(&self, message: Message) {
+        crate::sync::lock(&self.handle.shared.state)
+            .unwrap_or_else(|e| e.into_inner())
+            .incoming
+            .push_front(message);
+    }
+
     /// The state once a message came or the socket closed.
     fn wait(&self) -> io::Result<std::sync::MutexGuard<'_, State>> {
         let shared = &self.handle.shared;

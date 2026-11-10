@@ -99,7 +99,7 @@ pub struct Sprites {
 pub const SPRITE_SIZE: u32 = 16;
 /// The largest sprite array (all layers of the top mip level) when the settings leave it to
 /// Horizon: resource packs with bigger textures are sampled down to fit.
-pub const DEFAULT_TEXTURE_BUDGET: u64 = 256 << 20;
+pub const DEFAULT_TEXTURE_BUDGET: u64 = 128 << 20;
 /// The budget in bytes the next resource load keeps to (`set_texture_budget`).
 static TEXTURE_BUDGET: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(DEFAULT_TEXTURE_BUDGET);

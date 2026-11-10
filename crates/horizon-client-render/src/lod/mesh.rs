@@ -744,24 +744,24 @@ mod refinement_tests {
         let [fx, _, fz] = fine.origin();
         let mut area = 0.0;
         for quad in mesh.solid.as_chunks::<4>().0 {
-            if !quad.iter().all(|v| v.pos[1] == 8.0) {
+            if !quad.iter().all(|v| v.position()[1] == 8.0) {
                 continue;
             }
-            let a = glam::Vec3::from(quad[0].pos);
-            let b = glam::Vec3::from(quad[1].pos);
-            let c = glam::Vec3::from(quad[2].pos);
+            let a = glam::Vec3::from(quad[0].position());
+            let b = glam::Vec3::from(quad[1].position());
+            let c = glam::Vec3::from(quad[2].position());
             let normal = (b - a).cross(c - a);
             area += normal.y;
-            let min_x = quad.iter().map(|v| v.pos[0]).fold(f32::INFINITY, f32::min) + ox as f32;
+            let min_x = quad.iter().map(|v| v.position()[0]).fold(f32::INFINITY, f32::min) + ox as f32;
             let max_x = quad
                 .iter()
-                .map(|v| v.pos[0])
+                .map(|v| v.position()[0])
                 .fold(f32::NEG_INFINITY, f32::max)
                 + ox as f32;
-            let min_z = quad.iter().map(|v| v.pos[2]).fold(f32::INFINITY, f32::min) + oz as f32;
+            let min_z = quad.iter().map(|v| v.position()[2]).fold(f32::INFINITY, f32::min) + oz as f32;
             let max_z = quad
                 .iter()
-                .map(|v| v.pos[2])
+                .map(|v| v.position()[2])
                 .fold(f32::NEG_INFINITY, f32::max)
                 + oz as f32;
             assert!(
@@ -1201,13 +1201,13 @@ mod tests {
         let mut area = 0.0;
         for q in mesh.solid.as_chunks::<4>().0 {
             let x =
-                |f: fn(f32, f32) -> f32, i: usize| q.iter().map(|v| v.pos[i]).reduce(f).unwrap();
+                |f: fn(f32, f32) -> f32, i: usize| q.iter().map(|v| v.position()[i]).reduce(f).unwrap();
             area += (x(f32::max, 0) - x(f32::min, 0)) * (x(f32::max, 2) - x(f32::min, 2));
             for v in q {
                 // UVs follow the world position modulo a block.
                 let uv = tiled_uv(v);
-                assert_eq!((uv[0] - v.pos[0]).rem_euclid(1.0), 0.0);
-                assert_eq!((uv[1] + v.pos[2]).rem_euclid(1.0), 0.0);
+                assert_eq!((uv[0] - v.position()[0]).rem_euclid(1.0), 0.0);
+                assert_eq!((uv[1] + v.position()[2]).rem_euclid(1.0), 0.0);
                 assert!(uv[0] <= MAX_FACE + 1.0 && uv[1] <= MAX_FACE + 1.0);
             }
         }
@@ -1276,9 +1276,13 @@ mod tests {
             },
         );
         assert_eq!(mesh.solid.len(), 4);
-        let corners: Vec<[f32; 3]> = mesh.solid.iter().map(|v| v.pos).collect();
+        let corners: Vec<[f32; 3]> = mesh.solid.iter().map(|v| v.position()).collect();
+        // World-sized LOD faces use the 128-block position grid; the face is
+        // still one quad and its UVs fit.
         assert!(
-            corners.iter().any(|p| p[0] == size && p[2] == size / 2.0),
+            corners
+                .iter()
+                .any(|p| (p[0] - size).abs() <= 128.0 && (p[2] - size / 2.0).abs() <= 128.0),
             "{corners:?}"
         );
         let top = mesh
@@ -1293,7 +1297,7 @@ mod tests {
         );
     }
     fn normal(q: &[TerrainVertex; 4]) -> glam::Vec3 {
-        let p = |i: usize| glam::Vec3::from(q[i].pos);
+        let p = |i: usize| glam::Vec3::from(q[i].position());
         (p(1) - p(0)).cross(p(2) - p(0))
     }
     #[test]
@@ -1308,7 +1312,7 @@ mod tests {
         for q in mesh.solid.as_chunks::<4>().0.iter() {
             let center = q
                 .iter()
-                .map(|v| glam::Vec3::from(v.pos))
+                .map(|v| glam::Vec3::from(v.position()))
                 .sum::<glam::Vec3>()
                 / 4.0;
             assert!(normal(q).dot(center - glam::Vec3::splat(8.0)) > 0.0);
@@ -1341,14 +1345,14 @@ mod tests {
         assert!(
             mesh.solid
                 .iter()
-                .all(|v| (3.0..=5.0).contains(&v.pos[1]) || (8.0..=9.0).contains(&v.pos[1]))
+                .all(|v| (3.0..=5.0).contains(&v.position()[1]) || (8.0..=9.0).contains(&v.position()[1]))
         );
         assert!(
             mesh.solid
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .any(|q| q.iter().all(|v| v.pos[1] == 8.0) && normal(q).y < 0.0)
+                .any(|q| q.iter().all(|v| v.position()[1] == 8.0) && normal(q).y < 0.0)
         );
     }
     #[test]
@@ -1362,20 +1366,20 @@ mod tests {
             .as_chunks::<4>()
             .0
             .iter()
-            .filter(|q| q.iter().all(|v| v.pos[0] == 1.0) && normal(q).x > 0.0)
+            .filter(|q| q.iter().all(|v| v.position()[0] == 1.0) && normal(q).x > 0.0)
             .collect();
         assert_eq!(opening.len(), 1);
         assert_eq!(
             opening[0]
                 .iter()
-                .map(|v| v.pos[1])
+                .map(|v| v.position()[1])
                 .fold(f32::INFINITY, f32::min),
             3.0
         );
         assert_eq!(
             opening[0]
                 .iter()
-                .map(|v| v.pos[1])
+                .map(|v| v.position()[1])
                 .fold(f32::NEG_INFINITY, f32::max),
             7.0
         );
@@ -1395,7 +1399,7 @@ mod tests {
         let mesh = mesh(&columns);
         let quads = mesh.solid.as_chunks::<4>().0;
         let bounds = |q: &[TerrainVertex; 4]| {
-            let ys = q.iter().map(|v| v.pos[1]);
+            let ys = q.iter().map(|v| v.position()[1]);
             (
                 ys.clone().fold(f32::INFINITY, f32::min),
                 ys.fold(0.0, f32::max),
@@ -1404,7 +1408,7 @@ mod tests {
         // Over the lower neighbour: open air, lit like its top.
         let open: Vec<_> = quads
             .iter()
-            .filter(|q| q.iter().all(|v| v.pos[0] == 1.0 && v.pos[2] <= 1.0) && normal(q).x > 0.0)
+            .filter(|q| q.iter().all(|v| v.position()[0] == 1.0 && v.position()[2] <= 1.0) && normal(q).x > 0.0)
             .collect();
         assert_eq!(open.len(), 1);
         assert_eq!(bounds(open[0]), (4.0, 10.0));
@@ -1412,7 +1416,7 @@ mod tests {
         // Into the cave: its recorded light.
         let cave: Vec<_> = quads
             .iter()
-            .filter(|q| q.iter().all(|v| v.pos[2] == 1.0 && v.pos[0] <= 1.0) && normal(q).z > 0.0)
+            .filter(|q| q.iter().all(|v| v.position()[2] == 1.0 && v.position()[0] <= 1.0) && normal(q).z > 0.0)
             .collect();
         assert_eq!(cave.len(), 1);
         assert_eq!(bounds(cave[0]), (2.0, 6.0));
@@ -1473,7 +1477,7 @@ mod tests {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .filter(|q| q.iter().all(|v| v.pos[1] == y))
+                .filter(|q| q.iter().all(|v| v.position()[1] == y))
                 .count()
         };
         // Closed on every side: filled, no floor or ceiling.
@@ -1483,7 +1487,7 @@ mod tests {
             closed
                 .solid
                 .iter()
-                .all(|v| v.pos[1] == 0.0 || v.pos[1] == 20.0)
+                .all(|v| v.position()[1] == 0.0 || v.position()[1] == 20.0)
         );
         // A lower neighbour's open air looks in: the cave stays.
         columns[cave + 1].spans = vec![span(0, 10, 1)].into();
@@ -1499,7 +1503,7 @@ mod tests {
             water
                 .translucent
                 .iter()
-                .all(|v| v.pos[1] != 7.0 && v.pos[1] != 8.0)
+                .all(|v| v.position()[1] != 7.0 && v.position()[1] != 8.0)
         );
         let uniform = mesh(&vec![columns[0].clone(); CELLS * CELLS]);
         assert_eq!(water.translucent.len(), uniform.translucent.len());
@@ -1526,7 +1530,7 @@ mod tests {
         assert_eq!(tops.iter().filter(|q| q[0].layer == 3).count(), 2);
         assert_eq!(tops.iter().filter(|q| q[0].light == 16).count(), 1);
         assert!(!mesh.solid.as_chunks::<4>().0.iter().any(|q| {
-            normal(q).x != 0.0 && q.iter().all(|v| v.pos[0] == 1.0 || v.pos[0] == 2.0)
+            normal(q).x != 0.0 && q.iter().all(|v| v.position()[0] == 1.0 || v.position()[0] == 2.0)
         }));
     }
     #[test]
@@ -1540,18 +1544,18 @@ mod tests {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .any(|q| q.iter().all(|v| v.pos[1] == 3.0) && normal(q).y > 0.0)
+                .any(|q| q.iter().all(|v| v.position()[1] == 3.0) && normal(q).y > 0.0)
         );
         assert!(
             mesh.translucent
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .all(|q| !(q.iter().all(|v| v.pos[0] == 1.0) && normal(q).x != 0.0))
+                .all(|q| !(q.iter().all(|v| v.position()[0] == 1.0) && normal(q).x != 0.0))
         );
         assert!(mesh.translucent.as_chunks::<4>().0.iter().any(|q| {
             q.iter()
-                .all(|v| (v.pos[1] - (6.0 - 1.0 / 9.0)).abs() < 0.001)
+                .all(|v| (v.position()[1] - (6.0 - 1.0 / 9.0)).abs() < 0.07)
                 && normal(q).y > 0.0
         }));
     }
@@ -1615,9 +1619,9 @@ mod tests {
             .collect();
         assert_eq!(walls.len(), 1);
         let wall = walls[0];
-        assert!(wall.iter().all(|v| v.pos[0] == 0.0
-            && (1.0..=2.0).contains(&v.pos[2])
-            && (8.0..=16.0).contains(&v.pos[1])));
+        assert!(wall.iter().all(|v| v.position()[0] == 0.0
+            && (1.0..=2.0).contains(&v.position()[2])
+            && (8.0..=16.0).contains(&v.position()[1])));
         assert_eq!(normal(wall).length(), 8.0);
     }
     #[test]
@@ -1664,8 +1668,8 @@ mod tests {
             .collect();
         assert_eq!(sides.len(), 2);
         for q in sides {
-            let min = q.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min);
-            let max = q.iter().map(|v| v.pos[1]).fold(f32::NEG_INFINITY, f32::max);
+            let min = q.iter().map(|v| v.position()[1]).fold(f32::INFINITY, f32::min);
+            let max = q.iter().map(|v| v.position()[1]).fold(f32::NEG_INFINITY, f32::max);
             if normal(q).x > 0.0 {
                 assert_eq!((min, max), (8.0, 16.0));
             } else {
@@ -1701,7 +1705,7 @@ mod tests {
             }
             let center = q
                 .iter()
-                .map(|v| glam::Vec3::from(v.pos))
+                .map(|v| glam::Vec3::from(v.position()))
                 .sum::<glam::Vec3>()
                 / 4.0;
             !(center.x < 16.0 && center.z < 16.0)
@@ -1712,14 +1716,14 @@ mod tests {
             .0
             .iter()
             .filter(|q| {
-                (q.iter().all(|v| v.pos[0] == 16.0) && normal(q).x < 0.0)
-                    || (q.iter().all(|v| v.pos[2] == 16.0) && normal(q).z < 0.0)
+                (q.iter().all(|v| v.position()[0] == 16.0) && normal(q).x < 0.0)
+                    || (q.iter().all(|v| v.position()[2] == 16.0) && normal(q).z < 0.0)
             })
             .collect();
         assert_eq!(cuts.len(), 2);
         assert!(
             cuts.iter()
-                .all(|q| q.iter().all(|v| (10.0..=12.0).contains(&v.pos[1]))),
+                .all(|q| q.iter().all(|v| (10.0..=12.0).contains(&v.position()[1]))),
             "cut faces keep finite voxel bounds"
         );
     }

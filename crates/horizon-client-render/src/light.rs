@@ -565,7 +565,7 @@ fn pack_lighting(
             if data.iter().all(|&v| v == data[0]) {
                 Light::Uniform(data[0])
             } else {
-                Light::Full(data)
+                Light::from_packed(&data)
             }
         })
         .collect()
@@ -647,7 +647,7 @@ pub fn light_from_layers<L: AsRef<[u8]>>(
         for (i, a) in above.iter_mut().enumerate() {
             *a = data[i] >> 4;
         }
-        section.light = Light::Full(data);
+        section.light = Light::from_packed(&data);
         section.compact();
     }
     crate::chunk::share_uniform(&mut chunk.sections);
@@ -682,7 +682,7 @@ pub fn update_light_layers<L: AsRef<[u8]>>(
             continue;
         }
         let section = Arc::make_mut(&mut chunk.sections[si]);
-        section.light = Light::Full(data);
+        section.light = Light::from_packed(&data);
         section.compact();
         changed.push(si);
     }
@@ -712,6 +712,57 @@ impl<S: std::hash::BuildHasher> LightWorld for HashMap<(i32, i32), Arc<Chunk>, S
     fn set_section_light(&mut self, cx: i32, s: usize, cz: i32, light: Light) {
         if let Some(chunk) = self.get_mut(&(cx, cz)) {
             Arc::make_mut(&mut Arc::make_mut(chunk).sections[s]).light = light;
+        }
+    }
+}
+/// The lit sections a block-edit relight may touch, taken out of the world for
+/// a worker (`Streaming::relight_edits`): every column within one of an edited
+/// column, whole, as the sky-source scan and the flood fill read them. The
+/// sections are shared with the world (a light job's writes copy them instead
+/// of changing them), and `changes` hands the old and new light of each
+/// changed section back to the frame, which applies them only where the
+/// section still holds the old light.
+pub struct RelightSnapshot {
+    layout: ColumnLayout,
+    sections: FxHashMap<(i32, i32, i32), Arc<Section>>,
+    changes: Vec<((i32, i32, i32), Light, Light)>,
+}
+impl RelightSnapshot {
+    pub fn new(layout: ColumnLayout) -> Self {
+        Self {
+            layout,
+            sections: FxHashMap::default(),
+            changes: Vec::new(),
+        }
+    }
+    /// Adds one column's sections, unless it is not lit (as `LightWorld`).
+    pub fn add_column(&mut self, chunk: &Chunk) {
+        if !chunk.lit {
+            return;
+        }
+        for (s, section) in chunk.sections.iter().enumerate() {
+            self.sections
+                .insert((chunk.x, s as i32, chunk.z), section.clone());
+        }
+    }
+    /// The old and new light of every section the relight changed.
+    pub fn changes(self) -> Vec<((i32, i32, i32), Light, Light)> {
+        self.changes
+    }
+}
+impl LightWorld for RelightSnapshot {
+    fn layout(&self) -> ColumnLayout {
+        self.layout
+    }
+    fn section(&self, cx: i32, s: usize, cz: i32) -> Option<&Arc<Section>> {
+        self.sections.get(&(cx, s as i32, cz))
+    }
+    fn set_section_light(&mut self, cx: i32, s: usize, cz: i32, light: Light) {
+        // The relight's writes all come at its end (`Region::finish`), so
+        // recording them is enough: the snapshot itself is not read again.
+        let key = (cx, s as i32, cz);
+        if let Some(section) = self.sections.get(&key) {
+            self.changes.push((key, section.light.clone(), light));
         }
     }
 }
@@ -807,10 +858,9 @@ impl<'w> Region<'w> {
             return;
         };
         let slot = &mut self.slots[slot];
-        let light = slot.light.get_or_insert_with(|| match &slot.section.light {
-            Light::Uniform(v) => Box::new([*v; 4096]),
-            Light::Full(a) => a.clone(),
-        });
+        let light = slot
+            .light
+            .get_or_insert_with(|| slot.section.light.to_packed());
         let i = index(x, y, z);
         light[i] = f(light[i]);
     }
@@ -827,7 +877,7 @@ impl<'w> Region<'w> {
             drop(slot.section);
             let (cx, s, cz) = slot.key;
             self.world
-                .set_section_light(cx, s as usize, cz, Light::Full(light));
+                .set_section_light(cx, s as usize, cz, Light::from_packed(&light));
         }
     }
 }
@@ -1235,6 +1285,21 @@ mod tests {
         assert_eq!(block(&w, 8, 3, 8), 11);
         assert_eq!(block(&w, 8, -1, 8), 0);
     }
+    /// A section lit only by the sky keeps no block half: the same 4096
+    /// values take 2048 bytes.
+    #[test]
+    fn a_section_without_block_light_stores_only_its_sky_half() {
+        let w = world(|c| {
+            c.set(8, 8, 8, STONE);
+        });
+        let lit = &w[&(0, 0)];
+        let section = &lit.sections[((8 - MIN_Y) >> 4) as usize];
+        assert!(section.light.any(true), "the block's shadow varies the sky");
+        assert!(!section.light.any(false), "nothing emits block light");
+        assert_eq!(section.light.heap_bytes(), crate::chunk::LIGHT_HALF);
+        assert_eq!(sky(&w, 8, 7, 8), 14, "beside and under the block's shade");
+        assert_eq!(sky(&w, 8, 9, 8), 15);
+    }
     #[test]
     fn bottom_slab_takes_sky_from_above_but_not_through_its_bottom() {
         // A slab roof over a closed stone room at y 0..2.
@@ -1580,7 +1645,7 @@ mod tests {
         let Light::Full(data) = &lights[0] else {
             panic!("torch light varies");
         };
-        let result_storage = data.as_ptr();
+        let result_storage = data.layer(true).expect("sky light stored").as_ptr();
         let snapshot = current.clone();
         current.set(8, MIN_Y, 8, STONE);
         Arc::make_mut(&mut current.sections[0]).biomes.set(0, 3);
@@ -1591,7 +1656,7 @@ mod tests {
         };
         assert_eq!(
             result_storage,
-            data.as_ptr(),
+            data.layer(true).expect("sky light stored").as_ptr(),
             "returned light storage moves without cloning"
         );
         current.lit = true;
@@ -1662,6 +1727,66 @@ mod tests {
             .filter(|(old, new)| **old != Arc::as_ptr(new))
             .count();
         assert!(copied <= 3, "{copied} sections copied");
+    }
+
+    /// A relight on a worker's snapshot changes the same light as one on the
+    /// world's chunks, and reports it as old and new values the frame applies
+    /// only where the world still holds the old light.
+    #[test]
+    fn a_snapshot_relight_matches_the_world_and_reports_its_changes() {
+        let mut chunk = Chunk::empty(1, -1);
+        chunk.set(3, MIN_Y + 20, 5, TORCH);
+        let light = {
+            let region = [[None; 3], [None, Some(&chunk), None], [None; 3]];
+            light_chunk(&region, &tables(), true)
+        };
+        apply_lighting(&mut chunk, light);
+        chunk.lit = true;
+        chunk.set(3, MIN_Y + 20, 5, STONE);
+        let before = chunk.clone();
+        let mut world = HashMap::from([((1, -1), Arc::new(chunk.clone()))]);
+        let mut snapshot = RelightSnapshot::new(chunk.layout());
+        snapshot.add_column(&chunk);
+        let section = chunk.layout().section_index(MIN_Y + 20).unwrap();
+        assert!(chunk.lit);
+        assert_ne!(
+            before.sections[section].light(index(3, MIN_Y + 20, 5)),
+            0,
+            "torch light missing"
+        );
+        assert!(LightWorld::section(&world, 1, section, -1).is_some());
+        assert_eq!(snapshot.sections.len(), chunk.sections.len());
+        // Chunk (1, -1) holds these blocks: the relight takes world positions.
+        let positions = [(16 + 3, MIN_Y + 20, -16 + 5)];
+        let mut world_changed = LightChanges::default();
+        relight(
+            &mut world,
+            &tables(),
+            true,
+            &positions,
+            false,
+            &mut world_changed,
+        );
+        let mut snapshot_changed = LightChanges::default();
+        relight(
+            &mut snapshot,
+            &tables(),
+            true,
+            &positions,
+            false,
+            &mut snapshot_changed,
+        );
+        assert_eq!(world_changed, snapshot_changed);
+        assert!(!snapshot_changed.is_empty());
+        let changes = snapshot.changes();
+        assert_eq!(changes.len(), snapshot_changed.sections().count());
+        let world_chunk = &world[&(1, -1)];
+        for (key, old, new) in changes {
+            assert_eq!((key.0, key.2), (1, -1));
+            let s = key.1 as usize;
+            assert_eq!(old, before.sections[s].light);
+            assert_eq!(new, world_chunk.sections[s].light);
+        }
     }
 
     #[test]
@@ -1803,7 +1928,7 @@ mod tests {
                         }
                     }
                 }
-                out.light = Light::Full(data);
+                out.light = Light::from_packed(&data);
             }
             out.compact();
             sections.push(Arc::new(out));
@@ -1832,7 +1957,7 @@ mod tests {
             for i in 0..64 {
                 section.biomes.set(i, (i % 4) as u32);
             }
-            section.light = Light::Full(Box::new([0x87; 4096]));
+            section.light = Light::from_packed(&[0x87; 4096]);
         }
         let h = HEIGHT as usize;
         let sky: Vec<_> = (0..W * W * h).map(|i| (i % 16) as u8).collect();

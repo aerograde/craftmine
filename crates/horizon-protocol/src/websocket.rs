@@ -52,6 +52,8 @@ pub struct ServerSocket {
     left: u64,
     mask: [u8; 4],
     offset: usize,
+    /// Whether the data frame being read is text (a status query).
+    text: bool,
 }
 
 impl ServerSocket {
@@ -104,6 +106,7 @@ impl ServerSocket {
             left: 0,
             mask: [0; 4],
             offset: 0,
+            text: false,
         })
     }
 
@@ -114,6 +117,7 @@ impl ServerSocket {
             left: 0,
             mask: [0; 4],
             offset: 0,
+            text: false,
         })
     }
 
@@ -123,6 +127,39 @@ impl ServerSocket {
 
     pub fn shutdown(&self) {
         let _ = self.stream.shutdown(Shutdown::Both);
+    }
+
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.stream.set_read_timeout(timeout)
+    }
+
+    /// The next whole data message (`None`: the client closed).
+    pub fn recv_message(&mut self) -> io::Result<Option<crate::eagler::Message>> {
+        if self.left == 0 && self.next_frame()?.is_none() {
+            return Ok(None);
+        }
+        let len = usize::try_from(self.left).unwrap_or(usize::MAX);
+        let mut data = vec![0; len];
+        self.stream.read_exact(&mut data)?;
+        for b in &mut data {
+            *b ^= self.mask[self.offset % 4];
+            self.offset += 1;
+        }
+        self.left = 0;
+        self.offset = 0;
+        Ok(Some(if self.text {
+            crate::eagler::Message::Text(String::from_utf8_lossy(&data).into_owned())
+        } else {
+            crate::eagler::Message::Binary(data)
+        }))
+    }
+
+    /// One whole message to the browser.
+    pub fn send_message(&self, message: crate::eagler::Message) -> io::Result<()> {
+        match message {
+            crate::eagler::Message::Binary(data) => self.send_frame(2, &data),
+            crate::eagler::Message::Text(text) => self.send_frame(1, text.as_bytes()),
+        }
     }
 
     fn send_frame(&self, opcode: u8, data: &[u8]) -> io::Result<()> {
@@ -167,6 +204,7 @@ impl ServerSocket {
             match opcode {
                 // Continuation, text, binary: all bytes of the stream.
                 0..=2 => {
+                    self.text = opcode == 1;
                     (self.left, self.mask, self.offset) = (len, mask, 0);
                     return Ok(Some(()));
                 }
@@ -229,6 +267,120 @@ impl Write for ServerSocket {
     }
 }
 
+/// A server WebSocket as an Eaglercraft [`Messages`](crate::eagler::Messages)
+/// socket: whole messages in and out, as the plugin's protocol is.
+pub struct ServerMessages {
+    socket: Mutex<ServerSocket>,
+    /// The message read to tell an Eaglercraft guest from a vanilla client.
+    first: Mutex<Option<crate::eagler::Message>>,
+}
+
+impl ServerMessages {
+    pub fn new(socket: ServerSocket) -> Self {
+        Self {
+            socket: Mutex::new(socket),
+            first: Mutex::new(None),
+        }
+    }
+
+    /// For the first message the caller already read.
+    pub fn with_first(socket: ServerSocket, first: crate::eagler::Message) -> Self {
+        Self {
+            socket: Mutex::new(socket),
+            first: Mutex::new(Some(first)),
+        }
+    }
+}
+
+impl crate::eagler::Messages for ServerMessages {
+    fn send(&self, message: crate::eagler::Message) -> io::Result<()> {
+        self.socket
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_message(message)
+    }
+    fn recv(&self) -> io::Result<Option<crate::eagler::Message>> {
+        if let Some(first) = self.first.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Ok(Some(first));
+        }
+        self.socket
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recv_message()
+    }
+    fn set_read_timeout(&self, timeout: Option<std::time::Duration>) {
+        let _ = self
+            .socket
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_read_timeout(timeout);
+    }
+    fn shutdown(&self) {
+        self.socket
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown();
+    }
+    fn try_clone(&self) -> io::Result<Box<dyn crate::eagler::Messages>> {
+        let socket = self
+            .socket
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_clone()?;
+        Ok(Box::new(ServerMessages::new(socket)))
+    }
+}
+
+/// A server WebSocket whose first message has already been read: its bytes
+/// are served as stream bytes first, then the socket's. A vanilla client's
+/// first message is its handshake frame, read to tell the two apart.
+pub struct Prefixed {
+    socket: ServerSocket,
+    first: Vec<u8>,
+}
+
+impl Prefixed {
+    pub fn new(socket: ServerSocket, first: Vec<u8>) -> Self {
+        Self { socket, first }
+    }
+
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            socket: self.socket.try_clone()?,
+            first: self.first.clone(),
+        })
+    }
+
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.socket.set_read_timeout(timeout)
+    }
+
+    pub fn shutdown(&self) {
+        self.socket.shutdown();
+    }
+}
+
+impl Read for Prefixed {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if !self.first.is_empty() {
+            let n = self.first.len().min(out.len());
+            out[..n].copy_from_slice(&self.first[..n]);
+            self.first.drain(..n);
+            return Ok(n);
+        }
+        self.socket.read(out)
+    }
+}
+
+impl Write for Prefixed {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.socket.write(data)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.socket.flush()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +406,56 @@ mod tests {
         // A handshake frame 71 bytes long ('G'), packet id 0.
         assert!(!is_http(&[b'G', 0, 0xF7, 5]));
         assert!(!is_http(&[0xFE, 1]));
+    }
+
+    /// Whole messages keep their boundaries and their kind, as the
+    /// Eaglercraft transport reads them.
+    #[test]
+    fn whole_messages_keep_their_boundaries() {
+        use crate::eagler::Message;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = horizon_os::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = ServerSocket::accept(stream).unwrap();
+            assert_eq!(
+                socket.recv_message().unwrap(),
+                Some(Message::Binary(vec![1, 2]))
+            );
+            assert_eq!(
+                socket.recv_message().unwrap(),
+                Some(Message::Text("hi".into()))
+            );
+            socket.send_message(Message::Binary(vec![9])).unwrap();
+        });
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(
+            b"GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .unwrap();
+        let mut reply = Vec::new();
+        let mut byte = [0];
+        while !reply.ends_with(b"\r\n\r\n") {
+            s.read_exact(&mut byte).unwrap();
+            reply.push(byte[0]);
+        }
+        let masked = |opcode: u8, data: &[u8]| {
+            let mask = [1, 2, 3, 4];
+            let mut frame = vec![0x80 | opcode, 0x80 | data.len() as u8];
+            frame.extend_from_slice(&mask);
+            frame.extend(data.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+            frame
+        };
+        s.write_all(&masked(2, &[1, 2])).unwrap();
+        s.write_all(&masked(1, b"hi")).unwrap();
+        let mut head = [0; 2];
+        s.read_exact(&mut head).unwrap();
+        assert_eq!(head, [0x82, 1]);
+        let mut body = [0; 1];
+        s.read_exact(&mut body).unwrap();
+        assert_eq!(body, [9]);
+        server.join().unwrap();
     }
 
     /// A browser's side: the upgrade, then masked binary frames, split

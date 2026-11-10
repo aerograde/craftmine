@@ -2851,11 +2851,11 @@ mod tests {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .filter(|quad| quad.iter().all(|v| (v.pos[1] - y).abs() < 0.001))
+                .filter(|quad| quad.iter().all(|v| (v.position()[1] - y).abs() < 0.001))
                 .map(|quad| {
-                    let a = glam::Vec3::from(quad[0].pos);
-                    let b = glam::Vec3::from(quad[1].pos);
-                    let c = glam::Vec3::from(quad[2].pos);
+                    let a = glam::Vec3::from(quad[0].position());
+                    let b = glam::Vec3::from(quad[1].position());
+                    let c = glam::Vec3::from(quad[2].position());
                     let normal = (b - a).cross(c - a);
                     assert!(normal.y > 0.0, "surface must face the camera from above");
                     let center = (a + c) * 0.5;
@@ -2883,28 +2883,28 @@ mod tests {
                 .0
                 .iter()
                 .filter(|quad| {
-                    quad.iter().all(|v| v.pos[axis] == plane)
-                        && quad.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min)
+                    quad.iter().all(|v| v.position()[axis] == plane)
+                        && quad.iter().map(|v| v.position()[1]).fold(f32::INFINITY, f32::min)
                             == MIN_Y as f32
                         && quad
                             .iter()
-                            .map(|v| v.pos[1])
+                            .map(|v| v.position()[1])
                             .fold(f32::NEG_INFINITY, f32::max)
                             == 70.0
                         && quad
                             .iter()
-                            .map(|v| v.pos[other])
+                            .map(|v| v.position()[other])
                             .fold(f32::INFINITY, f32::min)
                             == low
                         && quad
                             .iter()
-                            .map(|v| v.pos[other])
+                            .map(|v| v.position()[other])
                             .fold(f32::NEG_INFINITY, f32::max)
                             == high
                 })
                 .map(move |quad| {
-                    let a = glam::Vec3::from(quad[0].pos);
-                    (glam::Vec3::from(quad[1].pos) - a).cross(glam::Vec3::from(quad[2].pos) - a)
+                    let a = glam::Vec3::from(quad[0].position());
+                    (glam::Vec3::from(quad[1].position()) - a).cross(glam::Vec3::from(quad[2].position()) - a)
                         [axis]
                 })
                 .collect::<Vec<_>>()

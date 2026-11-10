@@ -902,6 +902,7 @@ impl Game<'_> {
         self.dim = Dim::Overworld;
         self.clear_lod();
         self.pending_uploads.clear();
+        self.pending_upload_keys.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
         }
@@ -1125,6 +1126,7 @@ impl Game<'_> {
         self.container = None;
         self.clear_lod();
         self.pending_uploads.clear();
+        self.pending_upload_keys.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
         }
@@ -2048,6 +2050,7 @@ impl Game<'_> {
             }
             self.clear_lod();
             self.pending_uploads.clear();
+            self.pending_upload_keys.clear();
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.clear_sections(self.world.layout());
             }

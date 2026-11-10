@@ -450,6 +450,28 @@ fn serve_legacy(mut stream: TcpStream, shared: &Shared) -> Result<(), String> {
     Ok(())
 }
 
+/// The world's block states as 1.8's, for a guest older than its protocol.
+#[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
+fn legacy_resolver(
+    shared: &Shared,
+) -> std::sync::Arc<dyn Fn(u32) -> horizon_protocol::translate::legacy::LegacyState + Send + Sync> {
+    use horizon_protocol::translate::legacy::{FALLBACK, LegacyState};
+    match shared.legacy_blocks() {
+        Some(registry) => std::sync::Arc::new(move |id: u32| {
+            let Some(state) = registry.state(horizon_world::registry::BlockStateId(id)) else {
+                return FALLBACK;
+            };
+            let properties: Vec<(&str, &str)> = state
+                .properties
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            LegacyState::of(&state.name, &properties)
+        }),
+        None => std::sync::Arc::new(|_: u32| FALLBACK),
+    }
+}
+
 pub fn serve(
     stream: TcpStream,
     address: std::net::SocketAddr,
@@ -471,8 +493,65 @@ pub fn serve(
         .peek(&mut head)
         .is_ok_and(|n| horizon_protocol::websocket::is_http(&head[..n]))
     {
+        let mut socket =
+            horizon_protocol::websocket::ServerSocket::accept(stream).map_err(|e| e.to_string())?;
+        let first = socket
+            .recv_message()
+            .map_err(|e| e.to_string())?
+            .ok_or("the browser closed before its first message")?;
+        // An Eaglercraft guest opens with CLIENT_VERSION (0x01, legacy 2);
+        // a Horizon page opens with its framed handshake (a length, then 0).
+        let protocols = match &first {
+            horizon_protocol::eagler::Message::Binary(data) => {
+                horizon_protocol::eagler_server::client_protocols(data)
+            }
+            horizon_protocol::eagler::Message::Text(_) => None,
+        };
+        if matches!(
+            &first,
+            horizon_protocol::eagler::Message::Binary(data) if data.starts_with(&[0x01, 0x02])
+        ) {
+            let modern = u16::try_from(horizon_protocol::PROTOCOL_VERSION).unwrap_or(u16::MAX);
+            let legacy = protocols.is_some_and(|offered| {
+                offered.contains(&horizon_protocol::translate::legacy::PROTOCOL_1_8)
+                    && !offered.contains(&modern)
+            });
+            let messages = horizon_protocol::websocket::ServerMessages::with_first(socket, first);
+            if legacy {
+                let c = Connection::eagler_server_legacy(
+                    Box::new(messages),
+                    "Horizon",
+                    env!("CARGO_PKG_VERSION"),
+                    legacy_resolver(&shared),
+                )
+                .map_err(e)?;
+                if let Some(shape) = shared.legacy_shape() {
+                    c.set_legacy_chunk_shape(shape);
+                }
+                if let Some(biomes) = shared.legacy_biomes() {
+                    c.set_legacy_biomes(biomes);
+                }
+                if let Some(entities) = shared.legacy_entities() {
+                    c.set_legacy_entities(entities);
+                }
+                if let Some(items) = shared.legacy_items() {
+                    c.set_legacy_items(items);
+                }
+                return serve_connection(c, address, shared);
+            }
+            return serve_connection(
+                Connection::eagler_server(Box::new(messages), "Horizon", env!("CARGO_PKG_VERSION"))
+                    .map_err(e)?,
+                address,
+                shared,
+            );
+        }
+        let first = match first {
+            horizon_protocol::eagler::Message::Binary(data) => data,
+            horizon_protocol::eagler::Message::Text(text) => text.into_bytes(),
+        };
         return serve_connection(
-            Connection::from_websocket(stream).map_err(e)?,
+            Connection::from_websocket_prefetched(socket, first).map_err(e)?,
             address,
             shared,
         );
@@ -495,6 +574,62 @@ pub fn serve_web(
     address: std::net::SocketAddr,
     shared: Arc<Shared>,
 ) -> Result<(), String> {
+    // The first message tells an Eaglercraft guest (its CLIENT_VERSION) from
+    // a Horizon page (its framed handshake).
+    let first = socket
+        .recv()
+        .map_err(|e| e.to_string())?
+        .ok_or("the guest closed before its first message")?;
+    let protocols = match &first {
+        horizon_os::net::Message::Binary(data) => {
+            horizon_protocol::eagler_server::client_protocols(data)
+        }
+        horizon_os::net::Message::Text(_) => None,
+    };
+    let eagler = matches!(
+        &first,
+        horizon_os::net::Message::Binary(data) if data.starts_with(&[0x01, 0x02])
+    );
+    if eagler {
+        let modern = u16::try_from(horizon_protocol::PROTOCOL_VERSION).unwrap_or(u16::MAX);
+        let legacy = protocols.is_some_and(|offered| {
+            offered.contains(&horizon_protocol::translate::legacy::PROTOCOL_1_8)
+                && !offered.contains(&modern)
+        });
+        let first = match first {
+            horizon_os::net::Message::Binary(data) => {
+                horizon_protocol::eagler::Message::Binary(data)
+            }
+            horizon_os::net::Message::Text(text) => horizon_protocol::eagler::Message::Text(text),
+        };
+        let c = if legacy {
+            Connection::eagler_server_web_legacy(
+                socket,
+                first,
+                "Horizon",
+                env!("CARGO_PKG_VERSION"),
+                legacy_resolver(&shared),
+            )
+            .map_err(|e| e.to_string())?
+        } else {
+            Connection::eagler_server_web(socket, first, "Horizon", env!("CARGO_PKG_VERSION"))
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(shape) = shared.legacy_shape() {
+            c.set_legacy_chunk_shape(shape);
+        }
+        if let Some(biomes) = shared.legacy_biomes() {
+            c.set_legacy_biomes(biomes);
+        }
+        if let Some(entities) = shared.legacy_entities() {
+            c.set_legacy_entities(entities);
+        }
+        if let Some(items) = shared.legacy_items() {
+            c.set_legacy_items(items);
+        }
+        return serve_connection(c, address, shared);
+    }
+    socket.unrecv(first);
     let c = Connection::from_web(socket).map_err(|e| e.to_string())?;
     serve_connection(c, address, shared)
 }

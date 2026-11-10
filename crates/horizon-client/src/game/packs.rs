@@ -353,6 +353,7 @@ impl Game<'_> {
         self.clear_lod();
         self.streaming.reload_resources(&mut self.world, context);
         self.pending_uploads.clear();
+        self.pending_upload_keys.clear();
         // New GPU textures: a renderer built from the reloaded resources; the
         // sections are uploaded again as they are meshed.
         if let Some(mut renderer) = renderer {
@@ -422,7 +423,8 @@ pub(super) fn stage_pack(
         context.biomes.clone(),
         context.light.clone(),
     )?;
-    let textures = prepare_renderer_textures(&pack);
+    let pixels = pack.render.pixels();
+    let textures = prepare_renderer_textures(&pack, &pixels);
     progress.set(3);
     Ok(StagedPack {
         root,

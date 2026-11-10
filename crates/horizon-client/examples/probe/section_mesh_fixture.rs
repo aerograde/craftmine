@@ -94,10 +94,10 @@ fn scene(
         let s = ((y - MIN_Y) >> 4) as usize;
         let section = Arc::make_mut(&mut chunks[i].sections[s]);
         if let Light::Uniform(v) = section.light {
-            section.light = Light::Full(Box::new([v; 4096]));
+            section.light = Light::from_packed(&[v; 4096]);
         }
         if let Light::Full(values) = &mut section.light {
-            values[index(x, y, z)] = packed(int(&cell[3])?, int(&cell[4])?);
+            values.set(index(x, y, z), packed(int(&cell[3])?, int(&cell[4])?));
         }
     }
     let (mut zoom, mut blend_radius) = (BiomeZoom::new(0), 2);

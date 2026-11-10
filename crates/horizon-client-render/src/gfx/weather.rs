@@ -221,11 +221,19 @@ struct HorizonWeatherOut {
 }
 ";
 
+/// The browser-uniformity directive `entity_shader` starts with.
+const ENTITY_DIAGNOSTIC: &str = "diagnostic(off, derivative_uniformity);\n";
+
 /// The shader of a native pack's weather stage `source`.
 fn native_source(source: &str) -> String {
+    // The stage source before the entity shader declares globals, so the
+    // entity shader's directive must come before it: WGSL allows global
+    // directives only ahead of every declaration.
+    let entity = super::entity_shader();
+    let entity = entity.strip_prefix(ENTITY_DIAGNOSTIC).unwrap_or(&entity);
     format!(
-        "{source}\n// Horizon's weather (entity.wgsl)\n{}{NATIVE_ENTRIES}",
-        super::wgsl_prefix::prefixed(&super::entity_shader(), "horizon_entity_")
+        "{ENTITY_DIAGNOSTIC}{source}\n// Horizon's weather (entity.wgsl)\n{}{NATIVE_ENTRIES}",
+        super::wgsl_prefix::prefixed(entity, "horizon_entity_")
     )
 }
 

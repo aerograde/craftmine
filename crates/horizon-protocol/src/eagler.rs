@@ -133,6 +133,14 @@ impl EaglerSocket {
     fn handle(&mut self, body: Vec<u8>) -> io::Result<()> {
         let phase = self.shared().phase;
         if phase == Phase::Play {
+            let body = if self.shared().protocol == crate::translate::modern::PROTOCOL_26_2 {
+                match crate::translate::modern::rewrite_serverbound_from_26_3(&body) {
+                    Some(body) => body,
+                    None => return Ok(()),
+                }
+            } else {
+                body
+            };
             return self.socket.send(Message::Binary(body));
         }
         let mut r = Reader::new(&body);
@@ -234,14 +242,16 @@ impl EaglerSocket {
     fn log_in(&self, name: &str) -> Result<(String, u128), String> {
         let protocol = self.shared().protocol;
         // CLIENT_VERSION: the "legacy" marker 2, the Eagler protocols, the
-        // Minecraft ones, brand, version, no password, the name.
+        // Minecraft ones (this world's 777 first, then 26.2's 776 so a 26.2
+        // host can take us), brand, version, no password, the name.
         let mut w = Writer::new();
         w.u8(0x01);
         w.u8(0x02);
         w.u16(1);
         w.u16(EAGLER_PROTOCOL);
-        w.u16(1);
+        w.u16(2);
         w.u16(u16::try_from(protocol).unwrap_or(u16::MAX));
+        w.u16(u16::try_from(crate::translate::modern::PROTOCOL_26_2).unwrap_or(u16::MAX));
         str8(&mut w, "Horizon");
         str8(&mut w, env!("CARGO_PKG_VERSION"));
         w.u8(0);
@@ -252,6 +262,24 @@ impl EaglerSocket {
         if reply[0] != 0x02 {
             return Err(text("Unexpected reply from the Eaglercraft server"));
         }
+        // SERVER_VERSION carries the Eagler and Minecraft protocols the host
+        // chose; accept only this world's or 26.2's, and remember which.
+        let selected = (|| {
+            let mut r = Reader::new(&reply);
+            r.u8().ok()?;
+            r.u16().ok()?;
+            r.u16().ok()
+        })()
+        .ok_or_else(|| text("Unexpected reply from the Eaglercraft server"))?;
+        if selected != u16::try_from(protocol).unwrap_or(u16::MAX)
+            && selected
+                != u16::try_from(crate::translate::modern::PROTOCOL_26_2).unwrap_or(u16::MAX)
+        {
+            return Err(text(
+                "The Eaglercraft server chose an unsupported Minecraft protocol",
+            ));
+        }
+        self.shared().protocol = i32::from(selected);
         // REQUEST_LOGIN: the name, the default server, no password, no
         // cookie, no capabilities.
         let mut w = Writer::new();
@@ -721,6 +749,15 @@ impl Read for EaglerSocket {
                     plugin_messages(&data[1..]);
                 }
                 Some(Message::Binary(data)) if !data.is_empty() => {
+                    let data = if self.shared().protocol == crate::translate::modern::PROTOCOL_26_2
+                    {
+                        match crate::translate::modern::rewrite_clientbound_from_26_2(&data) {
+                            Some(data) => data,
+                            None => continue,
+                        }
+                    } else {
+                        data
+                    };
                     let framed = frame::prefixed(&data);
                     self.shared().incoming.extend_from_slice(&framed);
                 }
@@ -829,9 +866,9 @@ mod tests {
         let Message::Binary(hello) = &sent[0] else {
             panic!()
         };
-        // Eagler 5 offered with Minecraft 777 (0x0309).
-        assert_eq!(&hello[..8], &[0x01, 0x02, 0, 1, 0, 5, 0, 1]);
-        assert_eq!(&hello[8..10], &[0x03, 0x09]);
+        // Eagler 5 offered with Minecraft 777 (0x0309) then 776 (0x0308).
+        assert_eq!(&hello[..10], &[0x01, 0x02, 0, 1, 0, 5, 0, 2, 0x03, 0x09]);
+        assert_eq!(&hello[10..12], &[0x03, 0x08]);
         assert_eq!(
             sent[1..],
             [
@@ -843,6 +880,53 @@ mod tests {
                 // its own message, without its length.
                 Message::Binary(vec![2, 1, 2, 3]),
             ]
+        );
+    }
+
+    #[test]
+    fn joins_a_26_2_host_and_translates_both_directions() {
+        let uuid = crate::crypto::offline_uuid("Steve");
+        let mut allow = vec![0x05, 5];
+        allow.extend_from_slice(b"Steve");
+        allow.extend_from_slice(&uuid.to_be_bytes());
+        allow.extend_from_slice(&[0, 0]);
+        let (mut c, server) = connection(vec![
+            // SERVER_VERSION: Eagler 5, Minecraft 776, brand, version.
+            Message::Binary(vec![0x02, 0, 5, 0x03, 0x08, 1, b'E', 1, b'1', 0, 0, 0, 0]),
+            Message::Binary(allow),
+            Message::Binary(vec![0x09]),
+            // A 26.2 play packet whose id 26.3 shifted by one.
+            Message::Binary(vec![37, 0xAA]),
+        ]);
+        c.send(&intention(handshake::LOGIN)).unwrap();
+        c.send(
+            &login::Serverbound::Hello(login::ServerHello {
+                name: "Steve".into(),
+                uuid,
+            })
+            .encode(),
+        )
+        .unwrap();
+        let (id, payload) = c.recv().unwrap();
+        assert!(matches!(
+            login::Clientbound::decode(id, &payload).unwrap(),
+            login::Clientbound::LoginFinished(_)
+        ));
+        c.send(&login::Serverbound::LoginAcknowledged(crate::packets::Empty).encode())
+            .unwrap();
+        assert_eq!(
+            server.replies.lock().unwrap().len(),
+            1,
+            "the play reply is still queued"
+        );
+        // 26.2's id 37 is this world's 38.
+        assert_eq!(c.recv().unwrap(), (38, vec![0xAA]));
+
+        // 26.3's punch reaches the 26.2 host as a swing of the main hand.
+        c.send(&[46]).unwrap();
+        assert_eq!(
+            server.sent.lock().unwrap().last(),
+            Some(&Message::Binary(vec![63, 0]))
         );
     }
 

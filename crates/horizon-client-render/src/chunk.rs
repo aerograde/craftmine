@@ -285,18 +285,210 @@ fn forget_shared() {
         *shared = None;
     }
 }
+/// Cells in one section's light (16x16x16).
+pub const LIGHT_CELLS: usize = 4096;
+/// One nibble half of a section's light: two cells a byte, the even one in the
+/// low nibble, as vanilla's `DataLayer` holds them.
+pub const LIGHT_HALF: usize = LIGHT_CELLS / 2;
+
+/// A section's light that is not one value everywhere: sky light and block
+/// light in halves of their own, each left out while it is all zero. With
+/// both present they hold exactly the packed cells.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FullLight {
+    /// The high nibbles (sky light), `None` when every one is zero.
+    sky: Option<Box<[u8; LIGHT_HALF]>>,
+    /// The low nibbles (block light), `None` when every one is zero.
+    block: Option<Box<[u8; LIGHT_HALF]>>,
+}
+impl FullLight {
+    /// Every cell `value`; a zero half is not stored.
+    pub fn filled(value: u8) -> Self {
+        let half = |nibble: u8| (nibble != 0).then(|| Box::new([nibble | nibble << 4; LIGHT_HALF]));
+        Self {
+            sky: half(value >> 4),
+            block: half(value & 15),
+        }
+    }
+    /// From packed cells: `packed[i]` is cell `i`'s sky light in the high
+    /// nibble and block light in the low one.
+    pub fn from_packed(packed: &[u8; LIGHT_CELLS]) -> Self {
+        let mut sky = Box::new([0u8; LIGHT_HALF]);
+        let mut block = Box::new([0u8; LIGHT_HALF]);
+        let (mut any_sky, mut any_block) = (false, false);
+        for (i, cell) in packed.as_chunks::<2>().0.iter().enumerate() {
+            let [even, odd] = *cell;
+            sky[i] = even >> 4 | odd & 0xF0;
+            block[i] = even & 15 | odd << 4;
+            any_sky |= sky[i] != 0;
+            any_block |= block[i] != 0;
+        }
+        Self {
+            sky: any_sky.then_some(sky),
+            block: any_block.then_some(block),
+        }
+    }
+    /// The packed cells, as the light arrays of a save or a packet hold them.
+    pub fn to_packed(&self) -> Box<[u8; LIGHT_CELLS]> {
+        let mut out = Box::new([0u8; LIGHT_CELLS]);
+        for (i, cell) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let sky = self.sky.as_ref().map_or(0, |a| a[i]);
+            let block = self.block.as_ref().map_or(0, |a| a[i]);
+            cell[0] = (sky & 15) << 4 | (block & 15);
+            cell[1] = sky & 0xF0 | block >> 4;
+        }
+        out
+    }
+    #[inline]
+    pub fn get(&self, i: usize) -> u8 {
+        let (byte, shift) = (i >> 1, (i & 1) * 4);
+        let sky = self.sky.as_ref().map_or(0, |a| a[byte] >> shift & 15);
+        let block = self.block.as_ref().map_or(0, |a| a[byte] >> shift & 15);
+        sky << 4 | block
+    }
+    /// Sets one cell, keeping the others; a half left all zero gives its
+    /// bytes back.
+    pub fn set(&mut self, i: usize, value: u8) {
+        let (byte, shift) = (i >> 1, (i & 1) * 4);
+        set_nibble(&mut self.sky, byte, shift, value >> 4);
+        set_nibble(&mut self.block, byte, shift, value & 15);
+    }
+    /// The one value every cell has, when they all agree.
+    pub fn uniform(&self) -> Option<u8> {
+        let half = |half: &Option<Box<[u8; LIGHT_HALF]>>| -> Option<u8> {
+            let Some(a) = half else {
+                return Some(0);
+            };
+            let first = a[0];
+            (first & 15 == first >> 4 && a.iter().all(|&v| v == first)).then_some(first & 15)
+        };
+        Some(half(&self.sky)? << 4 | half(&self.block)?)
+    }
+    /// Whether the sky or the block half holds any light (a stored half of
+    /// zero nibbles is dropped, so a half present is a half with light).
+    pub fn any(&self, sky: bool) -> bool {
+        if sky {
+            self.sky.is_some()
+        } else {
+            self.block.is_some()
+        }
+    }
+    /// Whether every cell of the sky or the block half has light `level`.
+    pub fn all(&self, level: u8, sky: bool) -> bool {
+        let half = if sky { &self.sky } else { &self.block };
+        match half {
+            Some(a) => a.iter().all(|&v| v == level << 4 | level),
+            None => level == 0,
+        }
+    }
+    /// The half's `DataLayer` bytes (two cells a byte, the even one in the low
+    /// nibble), `None` while it is all zero.
+    pub fn layer(&self, sky: bool) -> Option<&[u8; LIGHT_HALF]> {
+        if sky {
+            self.sky.as_deref()
+        } else {
+            self.block.as_deref()
+        }
+    }
+    /// Heap bytes held: 2048 per stored half.
+    pub fn heap_bytes(&self) -> usize {
+        (self.sky.is_some() as usize + self.block.is_some() as usize) * LIGHT_HALF
+    }
+}
+
+/// Writes one nibble of `half`, storing the half when it was all zero and
+/// dropping it again when this made it all zero.
+fn set_nibble(half: &mut Option<Box<[u8; LIGHT_HALF]>>, byte: usize, shift: usize, nibble: u8) {
+    match half {
+        Some(a) => a[byte] = a[byte] & !(15 << shift) | nibble << shift,
+        None if nibble != 0 => {
+            let mut a = Box::new([0u8; LIGHT_HALF]);
+            a[byte] = nibble << shift;
+            *half = Some(a);
+        }
+        None => return,
+    }
+    if nibble == 0
+        && let Some(a) = half
+        && a.iter().all(|&v| v == 0)
+    {
+        *half = None;
+    }
+}
+
 /// Packed light per block: sky light in the high nibble, block light in the low one.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Light {
     Uniform(u8),
-    Full(Box<[u8; 4096]>),
+    Full(FullLight),
 }
 impl Light {
+    /// Light from packed cells (sky light `>> 4`, block light `& 15`), the
+    /// form a save or a packet holds.
+    pub fn from_packed(packed: &[u8; LIGHT_CELLS]) -> Self {
+        Self::Full(FullLight::from_packed(packed))
+    }
+    /// The cells as packed bytes: exactly the values `get` gives.
+    pub fn to_packed(&self) -> Box<[u8; LIGHT_CELLS]> {
+        match self {
+            Self::Uniform(v) => Box::new([*v; LIGHT_CELLS]),
+            Self::Full(f) => f.to_packed(),
+        }
+    }
     #[inline]
     pub fn get(&self, i: usize) -> u8 {
         match self {
             Self::Uniform(v) => *v,
-            Self::Full(a) => a[i],
+            Self::Full(f) => f.get(i),
+        }
+    }
+    /// Sets one cell, keeping the others.
+    pub fn set(&mut self, i: usize, value: u8) {
+        match self {
+            Self::Uniform(v) => {
+                if *v == value {
+                    return;
+                }
+                let mut full = FullLight::filled(*v);
+                full.set(i, value);
+                *self = Self::Full(full);
+            }
+            Self::Full(f) => f.set(i, value),
+        }
+    }
+    /// Whether the sky or the block half holds any light.
+    pub fn any(&self, sky: bool) -> bool {
+        match self {
+            Self::Uniform(v) => {
+                if sky {
+                    v >> 4 != 0
+                } else {
+                    v & 15 != 0
+                }
+            }
+            Self::Full(f) => f.any(sky),
+        }
+    }
+    /// Whether every cell of the sky or the block half has light `level`.
+    pub fn all(&self, level: u8, sky: bool) -> bool {
+        match self {
+            Self::Uniform(v) => (if sky { v >> 4 } else { v & 15 }) == level,
+            Self::Full(f) => f.all(level, sky),
+        }
+    }
+    /// The half's `DataLayer` bytes, `None` for a uniform section or an all
+    /// zero half (both all zero).
+    pub fn layer(&self, sky: bool) -> Option<&[u8; LIGHT_HALF]> {
+        match self {
+            Self::Uniform(_) => None,
+            Self::Full(f) => f.layer(sky),
+        }
+    }
+    /// Heap bytes held: 0 when uniform, 2048 per stored half.
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Uniform(_) => 0,
+            Self::Full(f) => f.heap_bytes(),
         }
     }
 }
@@ -349,12 +541,7 @@ impl Section {
     }
     /// Heap bytes held by the block, biome and light storage (benchmark accounting).
     pub fn heap_bytes(&self) -> usize {
-        self.blocks.heap_bytes()
-            + self.biomes.heap_bytes()
-            + match &self.light {
-                Light::Uniform(_) => 0,
-                Light::Full(_) => 4096,
-            }
+        self.blocks.heap_bytes() + self.biomes.heap_bytes() + self.light.heap_bytes()
     }
     /// Collapse storage that became uniform, and drop palette entries no
     /// block uses any more.
@@ -366,10 +553,10 @@ impl Section {
                 *container = PalettedContainer::new(container.strategy(), v);
             }
         }
-        if let Light::Full(a) = &self.light
-            && a.iter().all(|&b| b == a[0])
+        if let Light::Full(f) = &self.light
+            && let Some(v) = f.uniform()
         {
-            self.light = Light::Uniform(a[0]);
+            self.light = Light::Uniform(v);
         }
     }
 }
@@ -660,6 +847,108 @@ pub struct ChunkExtras {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bytes from a deterministic xorshift64: the tests need no RNG crate.
+    fn random_bytes(mut seed: u64, out: &mut [u8]) {
+        for byte in out {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *byte = (seed >> 33) as u8;
+        }
+    }
+
+    /// Packed cells, `(i * step) % 16` per nibble so each value occurs.
+    fn packed(sky_step: u32, block_step: u32) -> [u8; LIGHT_CELLS] {
+        std::array::from_fn(|i| {
+            let sky = (i as u32 * sky_step % 16) as u8;
+            let block = (i as u32 * block_step % 16) as u8;
+            sky << 4 | block
+        })
+    }
+
+    #[test]
+    fn packed_light_round_trips_exactly() {
+        for seed in [1, 0x2545_F491_4F6C_DD1D, 0x9E37_79B9_7F4A_7C15] {
+            let mut cells = [0u8; LIGHT_CELLS];
+            random_bytes(seed, &mut cells);
+            let light = Light::from_packed(&cells);
+            assert_eq!(&light.to_packed()[..], &cells[..], "seed {seed:#x}");
+            let full = FullLight::from_packed(&cells);
+            assert_eq!(&full.to_packed()[..], &cells[..], "seed {seed:#x}");
+            for i in 0..LIGHT_CELLS {
+                assert_eq!(light.get(i), cells[i], "seed {seed:#x} cell {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_half_takes_no_memory() {
+        let sky_only = packed(7, 0);
+        let light = Light::from_packed(&sky_only);
+        let Light::Full(full) = &light else {
+            panic!("sky light varies");
+        };
+        assert!(full.any(true) && !full.any(false));
+        assert_eq!(light.heap_bytes(), LIGHT_HALF);
+        assert_eq!(&light.to_packed()[..], &sky_only[..]);
+
+        let block_only = packed(0, 11);
+        let light = Light::from_packed(&block_only);
+        assert!(light.any(false) && !light.any(true));
+        assert_eq!(light.heap_bytes(), LIGHT_HALF);
+        assert_eq!(&light.to_packed()[..], &block_only[..]);
+
+        let both = packed(3, 5);
+        let light = Light::from_packed(&both);
+        assert!(light.any(true) && light.any(false));
+        assert_eq!(light.heap_bytes(), LIGHT_CELLS);
+        assert_eq!(&light.to_packed()[..], &both[..]);
+
+        assert_eq!(Light::from_packed(&[0; LIGHT_CELLS]).heap_bytes(), 0);
+        assert_eq!(Light::Uniform(0xF0).heap_bytes(), 0);
+
+        // Setting one cell of an all-zero section stores only the half it needs.
+        let mut light = Light::from_packed(&[0; LIGHT_CELLS]);
+        light.set(1000, 0x70);
+        assert_eq!(light.heap_bytes(), LIGHT_HALF);
+        assert_eq!(light.get(1000), 0x70);
+    }
+
+    #[test]
+    fn setting_a_half_to_zero_gives_it_back() {
+        let mut light = Light::from_packed(&packed(7, 0));
+        assert_eq!(light.heap_bytes(), LIGHT_HALF);
+        for i in 0..LIGHT_CELLS {
+            light.set(i, 0);
+        }
+        assert_eq!(light.heap_bytes(), 0);
+        assert_eq!(&light.to_packed()[..], &[0u8; LIGHT_CELLS][..]);
+    }
+
+    #[test]
+    fn get_and_set_match_a_packed_oracle() {
+        let mut cells = [0u8; LIGHT_CELLS];
+        random_bytes(0x5DEE_CE66_D1CE, &mut cells);
+        let mut light = Light::from_packed(&cells);
+        let mut oracle = cells;
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        for _ in 0..4000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let i = (seed >> 32) as usize % LIGHT_CELLS;
+            let value = (seed >> 8) as u8;
+            light.set(i, value);
+            oracle[i] = value;
+            assert_eq!(light.get(i), oracle[i], "cell {i}");
+        }
+        for i in 0..LIGHT_CELLS {
+            assert_eq!(light.get(i), oracle[i], "cell {i}");
+        }
+        assert_eq!(&light.to_packed()[..], &oracle[..]);
+    }
+
     #[test]
     fn highest_skips_only_sections_that_cannot_match() {
         let (air, cave_air, stone) = (0, 7, 1);

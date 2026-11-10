@@ -40,6 +40,76 @@ pub const CURRENT: i32 = crate::DATA_VERSION;
 /// server fix is, down to the saves of 1.8, which have no DataVersion (read as -1).
 pub const OLDEST_SUPPORTED: i32 = -1;
 
+/// The legacy `(block id, data)` a modern block state flattens from: how a
+/// guest that predates the flattening (1.8's protocol 47) carries it. `props`
+/// may be empty for the block's default variant. `None` for a state the table
+/// never had (a block added after 1.12, or one renamed since).
+pub fn legacy_block(name: &str, props: &[(&str, &str)]) -> Option<(u8, u8)> {
+    let data = block_state_data::data();
+    let state = block_state_data::State::new(name, props);
+    if let Some(id) = data.legacy(&state) {
+        return Some(id);
+    }
+    // The fixes after the flattening renamed these; the table knows their
+    // 1.13 names.
+    let old = renamed_back(name)?;
+    data.legacy(&block_state_data::State::new(old, props))
+}
+
+/// A modern block name as the 1.13 name the flattening table carries, for the
+/// blocks later fixes renamed.
+fn renamed_back(name: &str) -> Option<&'static str> {
+    Some(match name.rsplit(':').next().unwrap_or(name) {
+        "nether_portal" => "minecraft:portal",
+        "oak_wood" => "minecraft:oak_bark",
+        "spruce_wood" => "minecraft:spruce_bark",
+        "birch_wood" => "minecraft:birch_bark",
+        "jungle_wood" => "minecraft:jungle_bark",
+        "acacia_wood" => "minecraft:acacia_bark",
+        "dark_oak_wood" => "minecraft:dark_oak_bark",
+        "stripped_oak_wood" => "minecraft:stripped_oak_bark",
+        "stripped_spruce_wood" => "minecraft:stripped_spruce_bark",
+        "stripped_birch_wood" => "minecraft:stripped_birch_bark",
+        "stripped_jungle_wood" => "minecraft:stripped_jungle_bark",
+        "stripped_acacia_wood" => "minecraft:stripped_acacia_bark",
+        "stripped_dark_oak_wood" => "minecraft:stripped_dark_oak_bark",
+        "spawner" => "minecraft:mob_spawner",
+        "smooth_stone_slab" => "minecraft:stone_slab",
+        "oak_sign" => "minecraft:sign",
+        "oak_wall_sign" => "minecraft:wall_sign",
+        "beehive" => "minecraft:bee_hive",
+        "short_grass" => "minecraft:grass",
+        "dirt_path" => "minecraft:grass_path",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::legacy_block;
+
+    #[test]
+    fn later_renames_map_to_their_1_13_names() {
+        for (modern, old) in [
+            ("minecraft:short_grass", "minecraft:grass"),
+            ("minecraft:mob_spawner", "minecraft:spawner"),
+            ("minecraft:stone_slab", "minecraft:smooth_stone_slab"),
+            ("minecraft:oak_bark", "minecraft:oak_wood"),
+            ("minecraft:sign", "minecraft:oak_sign"),
+            ("minecraft:portal", "minecraft:nether_portal"),
+        ] {
+            assert_eq!(
+                legacy_block(modern, &[]),
+                legacy_block(old, &[]),
+                "{modern} is {old} renamed"
+            );
+            assert!(legacy_block(modern, &[]).is_some(), "{modern}");
+        }
+        // A block added long after 1.8 has no legacy id.
+        assert_eq!(legacy_block("minecraft:sculk", &[]), None);
+    }
+}
+
 /// `Identifier.tryParse` validity, as `NamespacedSchema.ensureNamespaced` uses it.
 pub fn identifier(id: &str) -> Option<(String, String)> {
     let (ns, path) = match id.split_once(':') {

@@ -27,7 +27,7 @@ const CRUMBLING_BLEND: wgpu::BlendState = wgpu::BlendState {
 };
 /// `TerrainVertex` for `vs_terrain`: position, UV, layer, light, colour.
 const TERRAIN_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
-    wgpu::vertex_attr_array![0=>Float32x3,1=>Uint16x2,2=>Uint16,4=>Uint8x2,3=>Unorm8x4];
+    wgpu::vertex_attr_array![0=>Uint16x4,1=>Uint16x2,2=>Uint16,4=>Uint8x2,3=>Unorm8x4];
 
 /// entity.wgsl after the OverlayTexture constants it reads. Its fragment
 /// shaders sample the glint and overlay textures in branches on per-vertex
@@ -43,6 +43,12 @@ fn entity_shader() -> String {
 mod crumbling_tests;
 mod entity_batch;
 mod entity_outline;
+pub mod gpu_cull;
+pub mod gpu_hiz;
+pub mod gpu_particles;
+pub mod gpu_sort;
+#[cfg(test)]
+pub(crate) mod gpu_test;
 mod weather;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
@@ -3071,12 +3077,15 @@ impl Renderer {
         });
         let flat_wanted = flat::wanted(&adapter, &device);
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
-        let arena = arena::Arena::new(
+        let mut arena = arena::Arena::new(
             &device,
             std::mem::size_of::<TerrainVertex>() as u64,
             1 << 20,
             flat_wanted,
         );
+        // Terrain pages are never grown: doubling the newest page committed up to a
+        // page of spare room and copied it, and terrain sections come and go anyway.
+        arena.set_fixed_pages(true);
         // Sections as one index list per frame where multi-draw is emulated.
         let flat = flat_wanted.then(|| {
             let buffers = [Some(wgpu::VertexBufferLayout {
@@ -3726,7 +3735,7 @@ impl Renderer {
                     .as_chunks::<4>()
                     .0
                     .iter()
-                    .map(|q| translucency::quad_center(q[0].pos, q[2].pos))
+                    .map(|q| translucency::quad_center(q[0].position(), q[2].position()))
                     .collect(),
             ),
             sorted_indices,
@@ -8109,7 +8118,7 @@ mod tests {
                 (3, offset_of!(TerrainVertex, color)),
             ]
         );
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 24);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 20);
     }
     #[test]
     fn cracks_multiply_instead_of_covering_the_block() {

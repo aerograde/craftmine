@@ -193,13 +193,17 @@ type Decoded = (Box<C>, Result<Chunk, String>);
 /// One thread that decodes chunk packets in the order they arrived; its
 /// results come back in that order, one per `submit`.
 pub(super) struct ChunkDecoder {
-    jobs: mpsc::Sender<(Arc<ChunkFormat>, Box<C>)>,
+    jobs: mpsc::SyncSender<(Arc<ChunkFormat>, Box<C>)>,
     done: mpsc::Receiver<Decoded>,
 }
 
 impl ChunkDecoder {
     pub(super) fn new() -> Self {
-        let (jobs, todo) = mpsc::channel::<(Arc<ChunkFormat>, Box<C>)>();
+        // A joining client at RD 32 can receive thousands of column packets
+        // before the first frame drains them. The frame decodes anything
+        // beyond this bound itself, preserving order; the queue no longer
+        // grows with the view.
+        let (jobs, todo) = mpsc::sync_channel::<(Arc<ChunkFormat>, Box<C>)>(64);
         let (finished, done) = mpsc::channel();
         // The thread ends with the connection, when `jobs` is dropped.
         let spawned = horizon_os::thread::Builder::new()
@@ -227,7 +231,11 @@ impl ChunkDecoder {
     /// Start decoding a chunk packet with the format it arrived under.
     /// Without a decoder thread the packet comes back undecoded.
     pub(super) fn submit(&self, format: Arc<ChunkFormat>, packet: Box<C>) -> Option<Box<C>> {
-        self.jobs.send((format, packet)).err().map(|e| (e.0).1)
+        match self.jobs.try_send((format, packet)) {
+            Ok(()) => None,
+            Err(mpsc::TrySendError::Full((_, packet)))
+            | Err(mpsc::TrySendError::Disconnected((_, packet))) => Some(packet),
+        }
     }
 
     /// The oldest submitted packet and its column, unless it is still

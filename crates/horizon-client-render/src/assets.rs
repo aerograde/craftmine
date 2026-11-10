@@ -6,10 +6,15 @@ use horizon_world::{
     registry::{BlockRegistry, BlockStateId},
     worldgen::{tags::TagDefinitions, terrain::TerrainBlockStates},
 };
+use flate2::{
+    Compression,
+    read::ZlibDecoder,
+    write::ZlibEncoder,
+};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
-    io::{self, BufReader},
+    io::{self, BufReader, Read, Write},
     path::Path,
     sync::Arc,
 };
@@ -84,7 +89,12 @@ pub struct Assets {
 pub struct RenderAssets {
     pub sprite_size: u32,
     pub sprite_minimum_size: u32,
+    /// Atlas pixels only while they have not been compressed; see `pixels()`.
     pub pixels: Vec<u8>,
+    /// The atlas in [`Self::pixels`] after compression between renderer builds.
+    compressed_pixels: Option<Vec<u8>>,
+    /// The uncompressed atlas length, so a build allocates it exactly once.
+    pixel_len: usize,
     pub texture_layers: u32,
     pub model_catalog: crate::models::StateModels,
     /// Shared parsed resources; item-only validation errors surface at item preparation.
@@ -251,11 +261,28 @@ impl RenderAssets {
         }
         // `finish` grows the buffer by doubling: keep only the bytes in use.
         sprites.pixels.shrink_to_fit();
+        // A drawing client keeps the atlas compressed between renderer builds: the
+        // pixels are only needed while one is being created, and a 128 px pack is
+        // over a hundred MB. Servers draw nothing and keep their empty buffer.
+        let texture_layers = u32::try_from(sprites.count())?;
+        let pixel_len = sprites.pixels.len();
+        let compressed_pixels = if draws && pixel_len > 0 {
+            Some(compress_pixels(&sprites.pixels)?)
+        } else {
+            None
+        };
+        let pixels = if compressed_pixels.is_some() {
+            Vec::new()
+        } else {
+            sprites.pixels
+        };
         Ok(Self {
             sprite_size: sprites.size,
             sprite_minimum_size: sprites.minimum_size,
-            texture_layers: u32::try_from(sprites.count())?,
-            pixels: sprites.pixels,
+            texture_layers,
+            pixels,
+            compressed_pixels,
+            pixel_len,
             model_catalog: models.catalog,
             model_library,
             model_placements: models.placements,
@@ -269,6 +296,31 @@ impl RenderAssets {
             pbr_size: sprites.pbr_size,
         })
     }
+}
+
+impl RenderAssets {
+    /// The atlas pixels, decompressing the copy kept between renderer builds.
+    /// A server or a build before the atlas was compressed has no pixels.
+    pub fn pixels(&self) -> Vec<u8> {
+        if !self.pixels.is_empty() {
+            return self.pixels.clone();
+        }
+        let Some(compressed) = &self.compressed_pixels else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(self.pixel_len);
+        ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut out)
+            .expect("the atlas compression this process wrote must decompress");
+        assert_eq!(out.len(), self.pixel_len, "atlas length changed");
+        out
+    }
+}
+
+fn compress_pixels(pixels: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(pixels)?;
+    Ok(encoder.finish()?)
 }
 
 #[cfg(test)]
@@ -348,5 +400,26 @@ mod tests {
             chicken.consumable.as_ref().unwrap().effects[..],
             [ConsumeEffect::ApplyEffects { probability, .. }] if probability == 0.3
         ));
+    }
+
+    #[test]
+    fn atlas_compression_round_trips_every_size() {
+        use super::compress_pixels;
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+        let cases = [
+            Vec::new(),
+            vec![7],
+            (0..4096).map(|i| (i * 31) as u8).collect(),
+            (0..1 << 20).map(|i| (i % 251) as u8).collect(),
+        ];
+        for data in cases {
+            let compressed = compress_pixels(&data).unwrap();
+            let mut out = Vec::new();
+            ZlibDecoder::new(compressed.as_slice())
+                .read_to_end(&mut out)
+                .unwrap();
+            assert_eq!(out, data);
+        }
     }
 }

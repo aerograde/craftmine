@@ -9,19 +9,73 @@ use crate::{
 use horizon_core::position::ChunkPos;
 use horizon_os::fs::{self, File, OpenOptions};
 use std::{
+    fmt,
     io::{self, Read, Seek, SeekFrom, Write},
+    ops::Deref,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 const SECTOR: usize = 4096;
 const HEADER: usize = SECTOR * 2;
 const MAX_COMPRESSED: usize = 64 * 1024 * 1024;
 
+/// The compressed payload of a region record: owned for fresh writes, or a
+/// range into a read-only mapped region file, so a load does not copy it.
+#[derive(Clone)]
+pub enum ChunkBytes {
+    Owned(Vec<u8>),
+    Mapped {
+        map: Arc<horizon_mmap::MappedFile>,
+        start: usize,
+        len: usize,
+    },
+}
+impl ChunkBytes {
+    fn slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Mapped { map, start, len } => &map.as_slice()[*start..*start + *len],
+        }
+    }
+}
+impl Deref for ChunkBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.slice()
+    }
+}
+impl AsRef<[u8]> for ChunkBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.slice()
+    }
+}
+impl From<Vec<u8>> for ChunkBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Owned(bytes)
+    }
+}
+impl PartialEq for ChunkBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.slice() == other.slice()
+    }
+}
+impl Eq for ChunkBytes {}
+impl fmt::Debug for ChunkBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChunkBytes")
+            .field("len", &self.slice().len())
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChunkRecord {
     pub compression: Compression,
-    pub compressed: Vec<u8>,
+    pub compressed: ChunkBytes,
     pub timestamp: u32,
 }
 impl ChunkRecord {
@@ -34,7 +88,7 @@ impl ChunkRecord {
         let bytes = nbt::write_named(root, limits).map_err(|e| invalid(e.to_string()))?;
         Ok(Self {
             compression,
-            compressed: compression.encode(&bytes)?,
+            compressed: ChunkBytes::Owned(compression.encode(&bytes)?),
             timestamp,
         })
     }
@@ -54,6 +108,9 @@ impl ChunkRecord {
 
 pub struct RegionFile {
     file: File,
+    /// A read-only mapping of the same file, when opening it succeeded. The
+    /// mapping must not outlive writes made through another handle.
+    map: Option<Arc<horizon_mmap::MappedFile>>,
     path: PathBuf,
     position: ChunkPos,
     offsets: [u32; 1024],
@@ -115,7 +172,8 @@ impl RegionFile {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
         let file = File::open(&path)?;
-        Self::from_file(path, file)
+        let map = horizon_mmap::MappedFile::open(&path).ok().map(Arc::new);
+        Self::from_file(path, file, map)
     }
 
     /// Open for reading and in-place writes (`write`, `clear`), creating an
@@ -128,10 +186,14 @@ impl RegionFile {
             .create(create)
             .truncate(false)
             .open(&path)?;
-        Self::from_file(path, file)
+        Self::from_file(path, file, None)
     }
 
-    fn from_file(path: PathBuf, mut file: File) -> io::Result<Self> {
+    fn from_file(
+        path: PathBuf,
+        mut file: File,
+        map: Option<Arc<horizon_mmap::MappedFile>>,
+    ) -> io::Result<Self> {
         let position = position_from_path(&path)?;
         let len = file.metadata()?.len();
         // RegionFile's constructor: a short header (an empty or truncated file)
@@ -166,6 +228,7 @@ impl RegionFile {
         }
         let mut region = Self {
             file,
+            map,
             path,
             position,
             offsets,
@@ -313,12 +376,66 @@ impl RegionFile {
             .map(|(i, _)| (position(self.position, i), self.timestamps[i]))
     }
 
+    fn external_bytes(&self, chunk: ChunkPos) -> io::Result<Vec<u8>> {
+        let path = external_path(self.path.parent().unwrap_or(Path::new(".")), chunk);
+        let file = File::open(path)?;
+        let mut data = Vec::new();
+        file.take((MAX_COMPRESSED + 1) as u64)
+            .read_to_end(&mut data)?;
+        if data.len() > MAX_COMPRESSED {
+            return Err(invalid("external chunk compressed limit exceeded"));
+        }
+        Ok(data)
+    }
+
     pub fn read(&mut self, chunk: ChunkPos) -> io::Result<Option<ChunkRecord>> {
         let i = slot(self.position, chunk)?;
         let offset = self.offsets[i];
         if offset == 0 {
             return Ok(None);
         }
+        let start = usize::try_from(u64::from(offset >> 8) * SECTOR as u64)
+            .map_err(|_| invalid("region offset does not fit in memory"))?;
+        if let Some(map) = self.map.clone() {
+            let data = map
+                .as_slice()
+                .get(start..)
+                .ok_or_else(|| invalid("chunk starts past the mapped region"))?;
+            let header: [u8; 5] = data
+                .get(..5)
+                .ok_or_else(|| invalid("truncated mapped chunk header"))?
+                .try_into()
+                .unwrap();
+            let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+            if len < 1 || len as u64 + 4 > (u64::from(offset & 255) * SECTOR as u64) {
+                return Err(invalid("invalid chunk payload length"));
+            }
+            let compression = Compression::try_from(header[4] & 127)?;
+            let compressed = if header[4] & 128 != 0 {
+                if len != 1 {
+                    return Err(invalid("external chunk stub has inline data"));
+                }
+                ChunkBytes::Owned(self.external_bytes(chunk)?)
+            } else {
+                let end = 5usize
+                    .checked_add(len - 1)
+                    .ok_or_else(|| invalid("chunk length overflow"))?;
+                if end > data.len() {
+                    return Err(invalid("truncated mapped chunk payload"));
+                }
+                ChunkBytes::Mapped {
+                    map,
+                    start: start + 5,
+                    len: len - 1,
+                }
+            };
+            return Ok(Some(ChunkRecord {
+                compression,
+                compressed,
+                timestamp: self.timestamps[i],
+            }));
+        }
+        // A writable or unmappable region reads through its file handle.
         self.file
             .seek(SeekFrom::Start(u64::from(offset >> 8) * SECTOR as u64))?;
         let mut header = [0; 5];
@@ -332,19 +449,11 @@ impl RegionFile {
             if len != 1 {
                 return Err(invalid("external chunk stub has inline data"));
             }
-            let path = external_path(self.path.parent().unwrap_or(Path::new(".")), chunk);
-            let file = File::open(path)?;
-            let mut data = Vec::new();
-            file.take((MAX_COMPRESSED + 1) as u64)
-                .read_to_end(&mut data)?;
-            if data.len() > MAX_COMPRESSED {
-                return Err(invalid("external chunk compressed limit exceeded"));
-            }
-            data
+            ChunkBytes::Owned(self.external_bytes(chunk)?)
         } else {
             let mut data = vec![0; len - 1];
             self.file.read_exact(&mut data)?;
-            data
+            ChunkBytes::Owned(data)
         };
         Ok(Some(ChunkRecord {
             compression,

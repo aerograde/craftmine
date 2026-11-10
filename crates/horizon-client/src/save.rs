@@ -17,7 +17,7 @@ use crate::{
     Result,
     beehive::BeehiveExt,
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, ColumnLayout, Light, Section, block_strategy},
+    chunk::{BIOME_STRATEGY, Chunk, ColumnLayout, LIGHT_HALF, Light, Section, block_strategy},
     mobs::{spawner::SpawnerExt, trial_spawner::TrialSpawnerExt},
     streaming::ChunkGenerator,
 };
@@ -1302,18 +1302,16 @@ pub fn client_heightmaps_in(
 }
 /// Vanilla light layer (nibbles, index y<<8|z<<4|x, low nibble first).
 fn nibbles(light: &Light, sky: bool) -> Vec<u8> {
-    let mut out = vec![0u8; 2048];
-    for (i, byte) in out.iter_mut().enumerate() {
-        let value = |j: usize| {
-            let v = match light {
-                Light::Uniform(v) => *v,
-                Light::Full(a) => a[j],
-            };
-            if sky { v >> 4 } else { v & 15 }
-        };
-        *byte = value(2 * i) | value(2 * i + 1) << 4;
+    match light {
+        // A stored half is the layer already; a section's absent half is dark.
+        Light::Full(f) => f
+            .layer(sky)
+            .map_or_else(|| vec![0u8; LIGHT_HALF], |a| a.to_vec()),
+        Light::Uniform(v) => {
+            let n = if sky { v >> 4 } else { v & 15 };
+            vec![n | n << 4; LIGHT_HALF]
+        }
     }
-    out
 }
 
 pub fn encode(chunk: &Chunk, registry: &BlockRegistry, biomes: &Biomes) -> NamedTag {
@@ -1334,10 +1332,7 @@ pub fn encode_with(
     // Sky layers below the highest section with light other than 15 are
     // written (even all-zero ones): vanilla derives missing layers from the
     // layer above them.
-    let top_sky = chunk.sections.iter().rposition(|s| match &s.light {
-        Light::Uniform(v) => v >> 4 != 15,
-        Light::Full(a) => a.iter().any(|v| v >> 4 != 15),
-    });
+    let top_sky = chunk.sections.iter().rposition(|s| !s.light.all(15, true));
     for (si, section) in chunk.sections.iter().enumerate() {
         let y = (chunk.min_y() >> 4) + si as i32;
         if !shape.has_section(y) {
@@ -1399,10 +1394,7 @@ pub fn encode_with(
             ("biomes", Tag::compound(biome_tag)),
         ];
         if chunk.lit {
-            let block_lit = match &section.light {
-                Light::Uniform(v) => v & 15 != 0,
-                Light::Full(a) => a.iter().any(|v| v & 15 != 0),
-            };
+            let block_lit = section.light.any(false);
             if block_lit {
                 entries.push(("BlockLight", Tag::ByteArray(nibbles(&section.light, false))));
             }
@@ -1910,7 +1902,7 @@ pub fn load_light(tag: &Tag, chunk: &mut Chunk, sky_light: bool) {
                     pair[1] = s >> 4;
                 }
             }
-            section.light = Light::Full(data);
+            section.light = Light::from_packed(&data);
         }
         section.compact();
     }
@@ -1919,6 +1911,60 @@ pub fn load_light(tag: &Tag, chunk: &mut Chunk, sky_light: bool) {
 }
 
 type RegionCache = Mutex<RegionFiles>;
+
+/// Decoded columns kept for reuse between loads. Bounded: a visited column
+/// is not retained once the budget evicts it, and every save invalidates it.
+const DECODED_COLUMN_BYTES: usize = 32 << 20;
+
+#[derive(Default)]
+struct DecodedColumns {
+    entries: HashMap<(i32, i32), (Arc<Chunk>, usize, u64)>,
+    order: std::collections::VecDeque<(i32, i32)>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl DecodedColumns {
+    fn get(&mut self, x: i32, z: i32) -> Option<Arc<Chunk>> {
+        self.clock += 1;
+        let (chunk, _, used) = self.entries.get_mut(&(x, z))?;
+        *used = self.clock;
+        let chunk = chunk.clone();
+        self.order.retain(|key| *key != (x, z));
+        self.order.push_back((x, z));
+        Some(chunk)
+    }
+
+    fn insert(&mut self, chunk: &Chunk) {
+        let bytes = chunk.heap_bytes() + 4096;
+        if bytes > DECODED_COLUMN_BYTES {
+            return;
+        }
+        self.remove(chunk.x, chunk.z);
+        self.clock += 1;
+        self.entries.insert(
+            (chunk.x, chunk.z),
+            (Arc::new(chunk.clone()), bytes, self.clock),
+        );
+        self.order.push_back((chunk.x, chunk.z));
+        self.bytes += bytes;
+        while self.bytes > DECODED_COLUMN_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, bytes, _)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(bytes);
+            }
+        }
+    }
+
+    fn remove(&mut self, x: i32, z: i32) {
+        if let Some((_, bytes, _)) = self.entries.remove(&(x, z)) {
+            self.bytes = self.bytes.saturating_sub(bytes);
+        }
+        self.order.retain(|key| *key != (x, z));
+    }
+}
 /// `RegionFileStorage.MAX_CACHE_SIZE`: the region files of a folder kept
 /// open. Each holds a file descriptor: kept for every region ever visited,
 /// a server whose players travel runs out of them (`Too many open files`).
@@ -2267,6 +2313,8 @@ pub struct SaveDir {
     /// Saved chunks decoded for far terrain, shared by its sampling threads
     /// (`lod_surfaces_shared`), oldest first.
     lod_decoded: Mutex<LodDecoded>,
+    /// Full chunks decoded from this dimension, bounded by bytes.
+    decoded: Mutex<DecodedColumns>,
 }
 fn is_forced_ticket(ticket: &Tag) -> bool {
     matches!(ticket.get("type"), Some(Tag::String(t)) if *t == JavaString::from("minecraft:forced"))
@@ -2305,6 +2353,7 @@ impl SaveDir {
             shape,
             lod_regions: Default::default(),
             lod_decoded: Default::default(),
+            decoded: Default::default(),
         }
     }
     /// 26.3's TicketStorage: persistent tickets live in each dimension's
@@ -2460,10 +2509,16 @@ impl SaveDir {
         }
     }
     pub fn load(&self, x: i32, z: i32, registry: &BlockRegistry, biomes: &Biomes) -> Option<Chunk> {
+        if let Some(chunk) = self.decoded.lock().ok()?.get(x, z) {
+            return Some((*chunk).clone());
+        }
         let root = self.read_record("region", x, z)?;
         let tables = self.tables.get().map(|t| &**t);
         let mut chunk = decode_with(&root, registry, biomes, tables, self.shape.column())?;
         load_light(&root.tag, &mut chunk, self.shape.sky_light);
+        if let Ok(mut decoded) = self.decoded.lock() {
+            decoded.insert(&chunk);
+        }
         Some(chunk)
     }
     /// A saved full chunk read for a player's far ring (`lan::far`), as `load` but past the gameplay
@@ -2715,6 +2770,11 @@ impl SaveDir {
                 )
             })
             .collect();
+        for chunk in chunks {
+            if let Ok(mut decoded) = self.decoded.lock() {
+                decoded.remove(chunk.x, chunk.z);
+            }
+        }
         self.write_records("region", records, true)?;
         self.save_poi(chunks, true)?;
         Ok(chunks.len())
@@ -2747,6 +2807,11 @@ impl SaveDir {
             .iter()
             .map(|c| ((c.x, c.z), Record::Chunk(c.clone(), encoding.clone())))
             .collect();
+        for chunk in chunks {
+            if let Ok(mut decoded) = self.decoded.lock() {
+                decoded.remove(chunk.x, chunk.z);
+            }
+        }
         self.queue(Folder::Region, records, false)?;
         self.save_poi(chunks, false)?;
         Ok(chunks.len())
@@ -5270,7 +5335,7 @@ mod tests {
         let mut cave_light = Box::new([0x03; 4096]);
         cave_light[crate::chunk::index(12, 125, 11)] = 0xa7;
         Arc::make_mut(&mut chunk.sections[((121 - MIN_Y) >> 4) as usize]).light =
-            Light::Full(cave_light);
+            Light::from_packed(&cave_light);
         chunk.set(7, 90, 9, sand.0);
         chunk.set(7, 98, 9, leaves.0);
         let forest = biomes.id("minecraft:forest");
@@ -6111,7 +6176,7 @@ mod tests {
         let mut a = Box::new([0u8; 4096]);
         a[0] = 0xF3; // sky 15, block 3 at x=0
         a[1] = 0x52; // sky 5, block 2 at x=1
-        let light = Light::Full(a);
+        let light = Light::from_packed(&a);
         assert_eq!(nibbles(&light, false)[0], 0x23);
         assert_eq!(nibbles(&light, true)[0], 0x5F);
     }
@@ -6209,7 +6274,7 @@ mod tests {
             for sky_light in [false, true] {
                 let mut expected = Chunk::empty(-3, 5);
                 let s = Arc::make_mut(&mut expected.sections[0]);
-                s.light = Light::Full(Box::new([0xab; 4096]));
+                s.light = Light::from_packed(&[0xab; 4096]);
                 s.blocks.set(0, 1);
                 s.blocks.set(0, 0);
                 s.biomes.set(0, 1);
@@ -6967,6 +7032,16 @@ mod tests {
         );
         assert_eq!(WorldGen::read(&dir).unwrap().preset, WorldPreset::Debug);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn decoded_columns_cache_hits_and_invalidates() {
+        let mut cache = super::DecodedColumns::default();
+        let chunk = Chunk::empty(1, 2);
+        cache.insert(&chunk);
+        assert!(cache.get(1, 2).is_some());
+        cache.remove(1, 2);
+        assert!(cache.get(1, 2).is_none());
     }
 
     #[test]

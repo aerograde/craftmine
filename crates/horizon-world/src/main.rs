@@ -19,7 +19,8 @@ fn codec(name: &str) -> Result<Compression, Box<dyn Error>> {
         "zlib" | "2" => Ok(Compression::Zlib),
         "none" | "3" => Ok(Compression::None),
         "lz4" | "4" => Ok(Compression::Lz4),
-        _ => Err(format!("unknown codec {name}; choose gzip, zlib, none or lz4").into()),
+        "zstd" | "5" => Ok(Compression::Zstd),
+        _ => Err(format!("unknown codec {name}; choose gzip, zlib, none, lz4 or zstd").into()),
     }
 }
 
@@ -53,7 +54,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         "--help" | "-h" if args.len() == 1 => println!(
             "Horizon world data tools — Java Edition {}\n\
              inspect <region.mca>\n\
-             copy-region <source.mca> <new-directory/r.x.z.mca> [gzip|zlib|none|lz4]\n\
+             copy-region <source.mca> <new-directory/r.x.z.mca> [gzip|zlib|none|lz4|zstd]\n\
              get-block <region.mca> <x> <y> <z>\n\
              edit-block-data <source.mca> <new-directory/r.x.z.mca> <x> <y> <z> <name> [property=value ...]\n\
              nbt-copy <input> <new-output> <input-codec> <output-codec>\n\

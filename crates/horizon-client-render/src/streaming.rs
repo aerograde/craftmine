@@ -5,8 +5,10 @@
 use crate::fast_hash::{FxHashMap, FxHashSet};
 use crate::section_mask::SectionMask;
 use crate::{
-    chunk::Chunk,
-    light::{LightChanges, LightTables, apply_lighting, apply_relighting, light_chunk},
+    chunk::{Chunk, Light},
+    light::{
+        LightChanges, LightTables, RelightSnapshot, apply_lighting, apply_relighting, light_chunk,
+    },
     mesher::{MeshScratch, MeshTables, Mesher, Region, SectionMesh, borrow},
     world::World,
 };
@@ -211,6 +213,9 @@ enum Job {
     Decorate(i32, i32, Box<[Proto; 9]>, Vec<(usize, Chunk)>),
     Finish(Proto),
     Light(i32, i32, Box<Region>, u64, bool),
+    /// Block edits to relight incrementally (`light::relight`) off the frame,
+    /// with the sections they may touch.
+    Relight(Box<RelightSnapshot>, Vec<(i32, i32, i32)>, bool),
     Mesh(i32, i32, i32, Box<Region>, u64, MeshSettings),
     /// Proto chunks checked out to be saved (`ChunkGenerator::save_protos`),
     /// off the main thread like vanilla's IOWorker.
@@ -235,6 +240,9 @@ pub enum Done {
     /// decoration wrote into them.
     Decorated(i32, i32, Box<[Proto; 9]>, Vec<usize>, FinalWrites),
     Lit(i32, i32, Vec<crate::chunk::Light>, u64),
+    /// A worker's edit relight: the old and new light of each changed
+    /// section, and what changed for the meshes.
+    Relit(Vec<((i32, i32, i32), Light, Light)>, LightChanges),
     Meshed(i32, i32, i32, SectionMesh, u64),
     Saved(Vec<((i32, i32), Proto)>),
     /// A proto chunk back from `Job::LightView`, with its view.
@@ -449,6 +457,9 @@ pub struct Streaming {
     light_edit_sequence: u64,
     /// Edit sequence at each in-flight light job's snapshot.
     light_snapshots: FxHashMap<(i32, i32), u64>,
+    /// A block-edit relight running on a worker: later edits wait for it, so
+    /// the light they build on is the light it leaves.
+    relight_in_flight: bool,
     pub generated_total: u64,
     pub meshed_total: u64,
     /// Chunks come from a server (`insert_remote`/`forget`): nothing is
@@ -692,6 +703,11 @@ fn worker_fn<G: ChunkGenerator>(
             Job::Light(x, z, region, seq, sky) => {
                 Done::Lit(x, z, light_chunk(&borrow(&region), &light, sky), seq)
             }
+            Job::Relight(mut snapshot, positions, sky) => {
+                let mut changed = LightChanges::default();
+                crate::light::relight(&mut *snapshot, &light, sky, &positions, false, &mut changed);
+                Done::Relit(snapshot.changes(), changed)
+            }
             Job::Mesh(x, sy, z, region, seq, settings) => {
                 let context = shared.context.read().unwrap().clone();
                 let visibility = match faces.take() {
@@ -902,6 +918,7 @@ impl Streaming {
             light_log: Vec::new(),
             light_edit_sequence: 0,
             light_snapshots: Default::default(),
+            relight_in_flight: false,
             generated_total: 0,
             meshed_total: 0,
             remote: false,
@@ -1019,7 +1036,12 @@ impl Streaming {
     /// render distance 32 nothing was decorated until every proto chunk had
     /// been generated.
     fn requeue(&mut self) {
-        let basis = (self.center, self.loading, self.band);
+        // Every four chunks of movement rather than every chunk: a one-chunk
+        // step only moves the ordering of near ties, and flying used to
+        // rebuild the whole heap four times a second. The loading screen and
+        // the band (which order the queue by ring) still re-rank at once.
+        let center = (self.center.0 >> 2, self.center.1 >> 2);
+        let basis = (center, self.loading, self.band);
         if self.queue_basis.0 == basis && self.queue_basis.1 == self.extra {
             return;
         }
@@ -1190,6 +1212,28 @@ impl Streaming {
         self.protos.insert((x, z), Some(proto));
         if let Some(view) = view {
             self.light_views.insert((x, z), Arc::new(view));
+            self.trim_light_views();
+        }
+    }
+    /// The light views are a cache: a light job holds its own clone while it
+    /// runs, so an evicted view only means an extra `LightView` job later.
+    /// Keep the set near the player bounded instead of retaining every proto
+    /// chunk ever checked out.
+    fn trim_light_views(&mut self) {
+        const MAX_LIGHT_VIEWS: usize = 128;
+        while self.light_views.len() > MAX_LIGHT_VIEWS {
+            let center = self.center;
+            let farthest = self
+                .light_views
+                .keys()
+                .max_by_key(|&&(x, z)| {
+                    let dx = i64::from(x - center.0);
+                    let dz = i64::from(z - center.1);
+                    dx * dx + dz * dz
+                })
+                .copied();
+            let Some(key) = farthest else { break };
+            self.light_views.remove(&key);
         }
     }
     /// Whether `light_region` would find all nine columns: the same walk
@@ -1314,10 +1358,22 @@ impl Streaming {
         // The sweeps below walk every loaded column and proto chunk. Run them
         // at once when the view moves and every eighth tick otherwise: a
         // column can stay a little past the edge without anyone noticing.
+        let old_area = self.scan_area;
         let area = (self.center, self.radius);
-        let sweep = area != self.scan_area || self.scan_age >= 8;
+        // The full sweep (every loaded column and proto) runs every eighth
+        // update, or at once when the radius changes. A moved centre only
+        // scans the ring its old area ends in: columns further in cannot
+        // stop being kept by a one-chunk step, and the next full sweep
+        // catches anything left behind (a teleport's old area included).
+        let full = self.radius != old_area.1 || self.scan_age >= 8;
+        let moved = self.center != old_area.0;
+        let sweep = full || moved;
         self.scan_area = area;
-        self.scan_age = if sweep { 0 } else { self.scan_age + 1 };
+        self.scan_age = if full {
+            0
+        } else {
+            self.scan_age.saturating_add(1)
+        };
         self.requeue();
         self.relight_edits(world);
         let deferred = std::mem::take(&mut self.deferred);
@@ -1388,6 +1444,13 @@ impl Streaming {
                         self.replay_light_edits(world, x, z, snapshot);
                     }
                 }
+                Done::Relit(changes, changed) => {
+                    if !self.relight_in_flight {
+                        continue;
+                    }
+                    self.relight_in_flight = false;
+                    apply_relit(world, changes, &changed);
+                }
                 Done::Meshed(x, sy, z, mesh, seq) => {
                     if self.meshing.get(&(x, sy, z)) != Some(&seq) {
                         stale.push(((x, sy, z), mesh));
@@ -1410,13 +1473,32 @@ impl Streaming {
         self.free(stale);
         let mut removed = Vec::new();
         if sweep {
-            // Unload far columns.
-            let far: Vec<_> = world
-                .chunks
-                .keys()
-                .copied()
-                .filter(|&(x, z)| !self.remote && self.ranges().unloaded(x, z, self.decorates))
-                .collect();
+            // Unload far columns: all of them on a full sweep, and on a
+            // moved centre only the ring the old area's edge held (the only
+            // columns a one-step move can stop keeping).
+            let far: Vec<_> = if full {
+                world
+                    .chunks
+                    .keys()
+                    .copied()
+                    .filter(|&(x, z)| !self.remote && self.ranges().unloaded(x, z, self.decorates))
+                    .collect()
+            } else if self.remote {
+                Vec::new()
+            } else {
+                let ranges = self.ranges();
+                unload_ring(
+                    old_area.0,
+                    self.center,
+                    self.radius,
+                    Ranges::margins(self.decorates).1,
+                )
+                .into_iter()
+                .filter(|&(x, z)| {
+                    world.chunks.contains_key(&(x, z)) && ranges.unloaded(x, z, self.decorates)
+                })
+                .collect()
+            };
             for key in &far {
                 self.decorated.remove(key);
             }
@@ -1799,9 +1881,12 @@ impl Streaming {
         }
     }
     /// Relight block edits on lit chunks in place (vanilla's incremental light
-    /// engine) instead of recomputing the 3x3 chunks around each edit.
+    /// engine) instead of recomputing the 3x3 chunks around each edit. The
+    /// flood fill runs on a worker; the frame applies the light it changed.
     fn relight_edits(&mut self, world: &mut World) {
-        if world.light_edits.is_empty() {
+        // One batch at a time: the next is built on the light the last one
+        // leaves, and `World::light_edits` keeps the edits until then.
+        if self.relight_in_flight || world.light_edits.is_empty() {
             return;
         }
         let edits = std::mem::take(&mut world.light_edits);
@@ -1813,23 +1898,38 @@ impl Streaming {
         if positions.is_empty() {
             return;
         }
-        let mut changed = LightChanges::default();
-        crate::light::relight(
-            &mut world.chunks,
-            &self.light_tables,
-            self.sky_light,
-            &positions,
-            false,
-            &mut changed,
-        );
-        Self::mark_light_changes(world, &changed);
-        Self::relight_beside_unlit(world, &changed);
-        if !self.light_snapshots.is_empty() {
-            for p in positions {
-                self.light_edit_sequence += 1;
-                self.light_log.push((self.light_edit_sequence, p));
+        // The flood fill stays within 15 blocks of an edit and the sky-source
+        // scan reads whole columns: every column within one of an edit's.
+        let mut columns: FxHashSet<(i32, i32)> = FxHashSet::default();
+        for &(x, _, z) in &positions {
+            let (cx, cz) = (x >> 4, z >> 4);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    columns.insert((cx + dx, cz + dz));
+                }
             }
         }
+        let mut snapshot = RelightSnapshot::new(world.layout());
+        for &(cx, cz) in &columns {
+            if let Some(chunk) = world.chunks.get(&(cx, cz)) {
+                snapshot.add_column(chunk);
+            }
+        }
+        // Logged now, at the sequence light jobs submitted from here on
+        // record: those see the edited blocks, earlier ones replay the edits
+        // when they land (`replay_light_edits`).
+        if !self.light_snapshots.is_empty() {
+            for p in &positions {
+                self.light_edit_sequence += 1;
+                self.light_log.push((self.light_edit_sequence, *p));
+            }
+        }
+        self.relight_in_flight = true;
+        self.submit(
+            None,
+            0,
+            Job::Relight(Box::new(snapshot), positions, self.sky_light),
+        );
     }
     /// A light job computed from blocks older than some edits: redo those
     /// edits on top of its result.
@@ -2093,6 +2193,69 @@ pub fn in_view_distance(center: (i32, i32), radius: i32, x: i32, z: i32) -> bool
     let gap = |d: i32| i64::from((d.abs() - 1).max(0));
     let (dx, dz) = (gap(x - center.0), gap(z - center.1));
     dx * dx + dz * dz < i64::from(radius) * i64::from(radius)
+}
+/// The columns a one-step move of the centre can stop keeping: in the area
+/// kept around `old` but not around `new`. Every other column is kept by
+/// both or by neither (the static extras, band and forced rings never move),
+/// so the caller can check just these instead of every loaded column.
+fn unload_ring(old: (i32, i32), new: (i32, i32), radius: i32, reach: i32) -> Vec<(i32, i32)> {
+    if radius < 0 {
+        return Vec::new();
+    }
+    let kept = i64::from(radius + 3);
+    let mut out = Vec::new();
+    for x in i64::from(old.0) - kept..=i64::from(old.0) + kept {
+        let Some(old_z) = keep_reach(x - i64::from(old.0), radius, reach) else {
+            continue;
+        };
+        let (lo, hi) = (i64::from(old.1) - old_z, i64::from(old.1) + old_z);
+        let (lo_new, hi_new) = match keep_reach(x - i64::from(new.0), radius, reach) {
+            Some(z) => (i64::from(new.1) - z, i64::from(new.1) + z),
+            None => (1, 0),
+        };
+        let mut push = |from: i64, to: i64| {
+            for z in from.max(lo)..=to.min(hi) {
+                out.push((x as i32, z as i32));
+            }
+        };
+        // The old interval without the new one: its two tails.
+        push(lo, lo_new - 1);
+        push(hi_new + 1, hi);
+    }
+    out
+}
+
+/// How far a column `dx` from the centre is kept in z: the farther of
+/// `in_range(_, 3)`'s circle and `near_finished(_, reach)`'s gap circle (the
+/// circle grown by `reach` along the axes). Both are centred on the same z,
+/// so their union is the wider interval.
+fn keep_reach(dx: i64, radius: i32, reach: i32) -> Option<i64> {
+    let circle = circle_reach(dx, i64::from(radius + 3));
+    let gap = (dx.abs() - i64::from(reach)).max(0);
+    let r0 = i64::from(radius + 1);
+    let rounded =
+        (gap * gap <= r0 * r0).then(|| i64::from(reach) + circle_reach(gap, r0).unwrap_or(0));
+    match (circle, rounded) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The largest `|dz|` at which `dx` is inside the circle of radius `r`
+/// (integer square root, rounded down).
+fn circle_reach(dx: i64, r: i64) -> Option<i64> {
+    let rem = r * r - dx * dx;
+    if rem < 0 {
+        return None;
+    }
+    let mut z = (rem as f64).sqrt() as i64;
+    while (z + 1) * (z + 1) <= rem {
+        z += 1;
+    }
+    while z * z > rem {
+        z -= 1;
+    }
+    Some(z)
 }
 /// The rings around a `/forceload`ed chunk, in chunks. Vanilla's FORCED
 /// ticket is level 31 (`ChunkMap.FORCED_TICKET_LEVEL`), the level rises one
@@ -2397,6 +2560,39 @@ impl Drop for Streaming {
         }
     }
 }
+/// Applies a worker relight's new light where the world still holds the old
+/// light it read (`Done::Relit`). A light job that landed meanwhile computed
+/// its light from the edited blocks already and replayed them (`Done::Lit`):
+/// its sections are not the ones the relight read, and must not be
+/// overwritten. Returns whether any section took the new light.
+fn apply_relit(
+    world: &mut World,
+    changes: Vec<((i32, i32, i32), Light, Light)>,
+    changed: &LightChanges,
+) -> bool {
+    let mut applied = false;
+    for (key, old, new) in changes {
+        let Some(chunk) = world.chunks.get_mut(&(key.0, key.2)) else {
+            continue;
+        };
+        let chunk = Arc::make_mut(chunk);
+        let Some(section) = chunk.sections.get_mut(key.1 as usize) else {
+            continue;
+        };
+        if section.light != old {
+            continue;
+        }
+        if section.light != new {
+            Arc::make_mut(section).light = new;
+            applied = true;
+        }
+    }
+    if applied {
+        Streaming::mark_light_changes(world, changed);
+        Streaming::relight_beside_unlit(world, changed);
+    }
+    applied
+}
 /// The queued jobs' priorities computed again from each one's column
 /// `distance` (`Streaming::submit`).
 fn rank_again(queue: &mut BinaryHeap<Queued>, distance: impl Fn(i32, i32) -> i64) {
@@ -2517,6 +2713,33 @@ mod tests {
         assert!(pool.put(huge).is_some());
         assert!(pool.meshes.is_empty());
         assert_eq!(pool.bytes, 0);
+    }
+
+    /// A worker's relight is applied where the world still holds the light
+    /// it read, and dropped where a light job has replaced it meanwhile.
+    #[test]
+    fn a_relight_applies_only_where_the_light_is_unchanged() {
+        let mut world = World::new(horizon_world::registry::BlockStateId(0), 0);
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.lit = true;
+        let old = chunk.sections[0].light.clone();
+        let new = Light::Uniform(0x00);
+        assert_ne!(old, new);
+        world.chunks.insert((0, 0), Arc::new(chunk));
+        let key = (0, 0, 0);
+        let changed = LightChanges::default();
+        assert!(apply_relit(
+            &mut world,
+            vec![(key, old.clone(), new.clone())],
+            &changed
+        ));
+        assert_eq!(world.chunks.get(&(0, 0)).unwrap().sections[0].light, new);
+        assert!(!apply_relit(
+            &mut world,
+            vec![(key, old, Light::Uniform(0x11))],
+            &changed
+        ));
+        assert_eq!(world.chunks.get(&(0, 0)).unwrap().sections[0].light, new);
     }
 
     /// The frame never waits for a worker: while one holds the mailbox, the
@@ -3129,6 +3352,60 @@ mod tests {
             }
         }
     }
+    /// The ring is a complete candidate set: after a one-chunk move, every
+    /// column that stops being kept is in it, so skipping the full scan on
+    /// moves cannot leak a loaded column.
+    #[test]
+    fn a_one_chunk_move_only_unloads_columns_in_the_ring() {
+        let forced = HashSet::new();
+        for decorates in [true, false] {
+            for radius in [0, 1, 2, 8, 16, 32] {
+                let old = (5, -7);
+                for (dx, dz) in [
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (-1, 1),
+                    (1, -1),
+                    (-1, -1),
+                ] {
+                    let new = (old.0 + dx, old.1 + dz);
+                    let before = Ranges {
+                        center: old,
+                        radius,
+                        extra: &[],
+                        forced: &forced,
+                        cover: None,
+                        band: None,
+                    };
+                    let after = Ranges {
+                        center: new,
+                        radius,
+                        extra: &[],
+                        forced: &forced,
+                        cover: None,
+                        band: None,
+                    };
+                    let reach = Ranges::margins(decorates).1;
+                    let ring: HashSet<_> =
+                        unload_ring(old, new, radius, reach).into_iter().collect();
+                    for x in old.0 - 50..=old.0 + 50 {
+                        for z in old.1 - 50..=old.1 + 50 {
+                            let transition = !before.unloaded(x, z, decorates)
+                                && after.unloaded(x, z, decorates);
+                            assert!(
+                                !transition || ring.contains(&(x, z)),
+                                "radius {radius}, move ({dx}, {dz}), column ({x}, {z})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn requested_columns_stay_loaded() {
         let forced = HashSet::new();

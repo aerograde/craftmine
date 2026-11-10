@@ -9,6 +9,9 @@ pub enum Compression {
     Zlib = 2,
     None = 3,
     Lz4 = 4,
+    /// Horizon's opt-in region codec. Vanilla and older tools do not know
+    /// type 5; existing worlds still use zlib unless a writer asks for this.
+    Zstd = 5,
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> io::Error {
@@ -23,6 +26,7 @@ impl TryFrom<u8> for Compression {
             2 => Ok(Self::Zlib),
             3 => Ok(Self::None),
             4 => Ok(Self::Lz4),
+            5 => Ok(Self::Zstd),
             _ => Err(invalid(format!(
                 "unsupported region compression ID {value}"
             ))),
@@ -89,6 +93,24 @@ impl Compression {
                 }
             }
             Self::Lz4 => decode_lz4(bytes, max_output, output),
+            Self::Zstd => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let decoder = zstd::stream::read::Decoder::new(bytes)?;
+                    decoder
+                        .take((max_output as u64).saturating_add(1))
+                        .read_to_end(output)?;
+                    if output.len() > max_output {
+                        return Err(invalid("decompression limit exceeded"));
+                    }
+                    Ok(())
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (bytes, max_output, output);
+                    Err(invalid("zstd region codec unavailable on wasm"))
+                }
+            }
         }
     }
 
@@ -106,6 +128,17 @@ impl Compression {
                 encoder.finish()
             }
             Self::Lz4 => Ok(encode_lz4(bytes)),
+            Self::Zstd => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    Ok(zstd::stream::encode_all(bytes, 3)?)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = bytes;
+                    Err(invalid("zstd region codec unavailable on wasm"))
+                }
+            }
         }
     }
 }
@@ -325,6 +358,7 @@ mod tests {
             Compression::Zlib,
             Compression::None,
             Compression::Lz4,
+            Compression::Zstd,
         ] {
             for bytes in [
                 vec![],

@@ -82,6 +82,12 @@ pub struct Data {
     map: Vec<Option<u32>>,
     id_by_old: HashMap<State, i32>,
     id_by_old_name: HashMap<String, i32>,
+    /// The reverse of the table: the first id each modern state was
+    /// registered under, and each modern name's first one (its default
+    /// variant, for properties 1.12 did not carry).
+    legacy_by_instance: HashMap<u32, i32>,
+    legacy_by_name: HashMap<String, (u8, u8)>,
+    instance_by_state: HashMap<State, u32>,
 }
 
 fn parse_props(s: &str) -> Vec<(String, String)> {
@@ -104,6 +110,9 @@ pub fn data() -> &'static Data {
         let mut instances = Vec::new();
         let mut id_by_old = HashMap::new();
         let mut id_by_old_name: HashMap<String, i32> = HashMap::new();
+        let mut legacy_by_instance: HashMap<u32, i32> = HashMap::new();
+        let mut legacy_by_name: HashMap<String, (u8, u8)> = HashMap::new();
+        let mut instance_by_state: HashMap<State, u32> = HashMap::new();
         for line in include_str!("block_state_data.txt").lines() {
             if line.starts_with('#') || line.is_empty() {
                 continue;
@@ -111,10 +120,16 @@ pub fn data() -> &'static Data {
             let f: Vec<&str> = line.split('\t').collect();
             let id: usize = f[0].parse().expect("id");
             let instance = instances.len() as u32;
-            instances.push(State {
+            let state = State {
                 name: f[1].to_owned(),
                 props: parse_props(f.get(2).copied().unwrap_or("")),
-            });
+            };
+            instance_by_state.entry(state.clone()).or_insert(instance);
+            legacy_by_instance.entry(instance).or_insert(id as i32);
+            legacy_by_name
+                .entry(state.name.clone())
+                .or_insert(((id >> 4) as u8, (id & 15) as u8));
+            instances.push(state);
             map[id] = Some(instance);
             if defaults[id >> 4].is_none() {
                 defaults[id >> 4] = Some(instance);
@@ -138,6 +153,9 @@ pub fn data() -> &'static Data {
             map,
             id_by_old,
             id_by_old_name,
+            legacy_by_instance,
+            legacy_by_name,
+            instance_by_state,
         }
     })
 }
@@ -153,6 +171,17 @@ impl Data {
     }
     pub fn state(&self, instance: u32) -> &State {
         &self.instances[instance as usize]
+    }
+
+    /// The legacy `(block id, data)` a modern state flattens from: the exact
+    /// state, else its block's default variant (properties 1.12 did not
+    /// carry are dropped). `None` for a name the table never had.
+    pub fn legacy(&self, state: &State) -> Option<(u8, u8)> {
+        self.instance_by_state
+            .get(state)
+            .and_then(|instance| self.legacy_by_instance.get(instance).copied())
+            .map(|id| ((id >> 4) as u8, (id & 15) as u8))
+            .or_else(|| self.legacy_by_name.get(&state.name).copied())
     }
 }
 
@@ -195,5 +224,40 @@ pub fn upgrade_block_id(id: i32) -> String {
             None => "minecraft:air".to_owned(),
         },
         None => "minecraft:air".to_owned(),
+    }
+}
+
+/// The reverse table is exact: every registered state maps to a legacy id
+/// that flattens back to the same state.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_state_maps_back_to_itself() {
+        let d = data();
+        assert!(!d.legacy_by_instance.is_empty());
+        for (&instance, &id) in &d.legacy_by_instance {
+            assert_eq!(d.instance(id), instance, "the forward table keeps the id");
+            let state = d.state(instance);
+            let (back_id, back_data) = d
+                .legacy(state)
+                .unwrap_or_else(|| panic!("{} has no legacy id", state.name));
+            let back = i32::from(back_id) << 4 | i32::from(back_data);
+            let back_state = d.state(d.instance(back));
+            assert_eq!(back_state.name, state.name);
+            assert_eq!(back_state.props, state.props);
+        }
+    }
+
+    #[test]
+    fn a_property_the_table_lacks_falls_back_to_the_blocks_default() {
+        let d = data();
+        let state = State::new(
+            "minecraft:grass_block",
+            &[("snowy", "false"), ("not_a_property", "true")],
+        );
+        let (id, data) = d.legacy(&state).unwrap();
+        assert_eq!((id, data), (2, 0));
     }
 }

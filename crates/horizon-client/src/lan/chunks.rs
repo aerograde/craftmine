@@ -2,7 +2,7 @@
 //! (sections with their paletted containers, block entities and the sky and
 //! block DataLayers) and the section block-change batches.
 use crate::{
-    chunk::{Chunk, ColumnLayout, LevelShape, Light, Section},
+    chunk::{Chunk, ColumnLayout, LIGHT_HALF, LevelShape, Light, Section},
     containers::{BlockEntity, ModBlockEntity},
     fast_hash::FxHashMap,
     mobs::spawner::{SpawnDataExt, SpawnerExt},
@@ -205,31 +205,21 @@ struct Layers {
 }
 impl Layers {
     fn of(light: &Light) -> Self {
-        let (mut sky, mut block) = (vec![0u8; 2048], vec![0u8; 2048]);
-        let (sky_any, block_any) = match light {
+        // A stored half is the layer already (an absent one is dark).
+        let layer = |sky: bool| match light {
+            Light::Full(f) => f
+                .layer(sky)
+                .map_or_else(|| vec![0u8; LIGHT_HALF], |a| a.to_vec()),
             Light::Uniform(v) => {
-                let (sk, bl) = (v >> 4, v & 15);
-                sky.fill(sk | sk << 4);
-                block.fill(bl | bl << 4);
-                (sk != 0, bl != 0)
-            }
-            Light::Full(a) => {
-                for ((pair, sky), block) in
-                    a.as_chunks::<2>().0.iter().zip(&mut sky).zip(&mut block)
-                {
-                    let [even, odd] = *pair;
-                    *sky = even >> 4 | (odd & 0xF0);
-                    *block = (even & 15) | odd << 4;
-                }
-                let all = a.iter().fold(0u8, |acc, &v| acc | v);
-                (all & 0xF0 != 0, all & 15 != 0)
+                let n = if sky { v >> 4 } else { v & 15 };
+                vec![n | n << 4; LIGHT_HALF]
             }
         };
         Self {
-            sky,
-            block,
-            sky_any,
-            block_any,
+            sky: layer(true),
+            block: layer(false),
+            sky_any: light.any(true),
+            block_any: light.any(false),
         }
     }
 }
@@ -1551,7 +1541,7 @@ mod tests {
         for (i, v) in light.iter_mut().enumerate() {
             *v = (i * 37 % 251) as u8;
         }
-        Arc::make_mut(&mut chunk.sections[3]).light = Light::Full(light.clone());
+        Arc::make_mut(&mut chunk.sections[3]).light = Light::from_packed(&light);
         let data = light_data(&chunk.sections, SectionMask::ALL);
         // Layer 4 holds section 3. Below the world (layer 0) there is no sky
         // light, so the sky layers listed start at layer 1; section 3 has the
@@ -1572,12 +1562,12 @@ mod tests {
         let encoder = encoder();
         let mut chunk = Chunk::empty(0, 0);
         let mut light = Box::new([0x5Au8; 4096]);
-        Arc::make_mut(&mut chunk.sections[2]).light = Light::Full(light.clone());
+        Arc::make_mut(&mut chunk.sections[2]).light = Light::from_packed(&light);
         let first = encoder.encode(&chunk, &HashMap::new()).light;
         assert_eq!(first, light_data(&chunk.sections, SectionMask::ALL));
         // Relighting moves the section, so the cached layers aren't reused.
         light[7] = 0xF3;
-        Arc::make_mut(&mut chunk.sections[2]).light = Light::Full(light);
+        Arc::make_mut(&mut chunk.sections[2]).light = Light::from_packed(&light);
         let second = encoder.encode(&chunk, &HashMap::new()).light;
         assert_ne!(first, second);
         assert_eq!(second, light_data(&chunk.sections, SectionMask::ALL));
@@ -1653,10 +1643,10 @@ mod tests {
         for (i, v) in light.iter_mut().enumerate() {
             *v = (i * 53 % 256) as u8;
         }
-        Arc::make_mut(&mut chunk.sections[4]).light = Light::Full(light);
+        Arc::make_mut(&mut chunk.sections[4]).light = Light::from_packed(&light);
         Arc::make_mut(&mut chunk.sections[5]).light = Light::Uniform(0x07);
         Arc::make_mut(&mut chunk.sections[6]).light = Light::Uniform(0);
-        Arc::make_mut(&mut chunk.sections[7]).light = Light::Full(Box::new([0x30; 4096]));
+        Arc::make_mut(&mut chunk.sections[7]).light = Light::from_packed(&[0x30; 4096]);
         for (x, y, z, state) in [
             (3, 70, 9, 1),
             (5, 70, 5, 2),
@@ -1764,7 +1754,8 @@ mod tests {
                 for (i, v) in light.iter_mut().enumerate() {
                     *v = (i * 31 + n as usize) as u8;
                 }
-                Arc::make_mut(&mut chunk.sections[(n % 24) as usize]).light = Light::Full(light);
+                Arc::make_mut(&mut chunk.sections[(n % 24) as usize]).light =
+                    Light::from_packed(&light);
                 world.block_entities.insert(
                     (x * 16 + 2, 70, z * 16 + 3),
                     BlockEntity::Sign(crate::signs::SignData::default()),

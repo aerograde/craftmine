@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod connection;
 pub mod crypto;
 pub mod eagler;
+pub mod eagler_server;
 pub mod entity_data;
 pub mod frame;
 pub mod hash_ops;
@@ -22,6 +23,7 @@ pub mod rsa;
 pub mod secure_chat;
 pub mod servers;
 pub mod text;
+pub mod translate;
 pub mod websocket;
 
 /// SharedConstants.getProtocolVersion().

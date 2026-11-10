@@ -6,7 +6,11 @@ use std::collections::BTreeMap;
 /// start at multiples of it (`flat` names sections by these blocks).
 pub const GRAIN: u64 = 256;
 /// The largest page, in bytes.
-pub const PAGE_BYTES: u64 = 256 << 20;
+/// Pages stay small enough that one arena's committed bytes track its live
+/// vertices: with 256 MiB pages the doubling growth over-committed by up to
+/// 400 MiB at RD 32. 32 MiB still holds a large section, keeps multi-draw
+/// grouping useful, and lets `flat` work on devices with a small binding cap.
+pub const PAGE_BYTES: u64 = 32 << 20;
 
 /// Free vertex ranges: start -> length, never adjacent.
 #[derive(Debug, PartialEq)]
@@ -90,7 +94,7 @@ impl Page {
 
 /// An arena with this many bytes in free ranges, at least half of its pages,
 /// has a page worth emptying (`Arena::sparsest`).
-const COMPACT_MIN_FREE: u64 = 128 << 20;
+const COMPACT_MIN_FREE: u64 = 8 << 20;
 
 /// Terrain vertices in pages of at most `page_limit` vertices (devices cap
 /// buffer sizes): a section's vertices sit in one page.
@@ -99,6 +103,9 @@ pub struct Arena {
     stride: u64,
     page_limit: u64,
     initial_capacity: u64,
+    /// New pages start at `page_limit` and are never grown: no page copy, and
+    /// the committed bytes stay at the pages' own size (`Arena::set_fixed_pages`).
+    fixed_pages: bool,
     usage: wgpu::BufferUsages,
     /// A page being emptied (`Arena::close`): nothing is placed in it.
     closing: Option<u32>,
@@ -144,12 +151,19 @@ impl Arena {
             stride,
             page_limit,
             initial_capacity: capacity,
+            fixed_pages: false,
             usage,
             closing: None,
             spilled: false,
             #[cfg(test)]
             video_memory_full: false,
         }
+    }
+    /// Off by default. When on, pages are allocated at `page_limit` each and
+    /// never grown: the arena holds at most one page's worth of spare room
+    /// instead of doubling the newest page (and copying it).
+    pub fn set_fixed_pages(&mut self, fixed: bool) {
+        self.fixed_pages = fixed;
     }
     /// A buffer of `capacity` vertices in video memory or, when that is full
     /// and the device allows it, in system memory: Vulkan drivers fail an
@@ -215,9 +229,10 @@ impl Arena {
     }
     /// A range of `vertices`: (page, first vertex). Grows the newest page
     /// (copying its contents on the GPU, in `encoder`) or starts a new one
-    /// when nothing free is large enough; `None` when no memory is left for
-    /// it. Writes to the arena belong in `encoder` too, so that those
-    /// recorded before a grow reach the grown page.
+    /// when nothing free is large enough; a fixed-page arena
+    /// (`Arena::set_fixed_pages`) always starts a new one. `None` when no
+    /// memory is left for it. Writes to the arena belong in `encoder` too, so
+    /// that those recorded before a grow reach the grown page.
     pub fn alloc(
         &mut self,
         device: &wgpu::Device,
@@ -229,7 +244,8 @@ impl Arena {
             return Some(found);
         }
         let last = self.pages.len().saturating_sub(1);
-        if let Some(page) = self.pages.last().and_then(Option::as_ref)
+        if !self.fixed_pages
+            && let Some(page) = self.pages.last().and_then(Option::as_ref)
             && page.capacity < self.page_limit
             && self.closing != Some(last as u32)
         {
@@ -242,7 +258,9 @@ impl Arena {
                 return Some((last as u32, start));
             }
         }
-        let capacity = if self.pages.is_empty() {
+        let capacity = if self.fixed_pages {
+            self.page_limit
+        } else if self.pages.is_empty() {
             self.initial_capacity
         } else {
             1 << 20
@@ -519,6 +537,32 @@ mod tests {
         queue.submit([encoder.finish()]);
         assert_eq!(read(&device, &queue, arena.buffer(page), start * 4), 7);
         assert_eq!(read(&device, &queue, arena.buffer(page), next * 4), 9);
+    }
+
+    #[test]
+    fn fixed_pages_start_a_new_page_instead_of_copying_the_last() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let mut arena = Arena::new(&device, 4, GRAIN, false);
+        arena.set_fixed_pages(true);
+        arena.page_limit = 2 * GRAIN;
+        let (first, start) = alloc(&mut arena, &device, &queue, GRAIN).unwrap();
+        queue.write_buffer(arena.buffer(first), start * 4, &11u32.to_le_bytes());
+        let buffer = arena.buffer(first).clone();
+        // One grain is left in the page: two more do not fit beside it, so they
+        // go to a new page. A growing arena would double the page (and copy it).
+        let (second, _) = alloc(&mut arena, &device, &queue, 2 * GRAIN).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(arena.pages.iter().flatten().count(), 2);
+        // Every page was allocated at the limit instead of growing into it.
+        for page in arena.pages.iter().flatten() {
+            assert_eq!(page.capacity, 2 * GRAIN);
+        }
+        // The first page kept its buffer and its data: nothing was copied off it.
+        assert_eq!(arena.buffer(first), &buffer);
+        assert_eq!(read(&device, &queue, arena.buffer(first), start * 4), 11);
     }
 
     #[test]

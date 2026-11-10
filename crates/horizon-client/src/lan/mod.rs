@@ -362,6 +362,17 @@ impl SecureChat {
 pub struct Shared {
     /// What the next login is sent; `PlayerList.reloadResources` swaps it.
     sync: Mutex<Arc<data::SyncData>>,
+    /// The world's block registry, for translating its block states to old
+    /// guests (`EaglerServerSocket::legacy`); none until a world sets it.
+    legacy_blocks: Mutex<Option<&'static horizon_world::registry::BlockRegistry>>,
+    /// The level's shape, for translating its chunks to old guests.
+    legacy_shape: Mutex<Option<horizon_protocol::translate::legacy::play::ChunkShape>>,
+    /// The world's biomes by network id, as 1.8's.
+    legacy_biomes: Mutex<Option<std::sync::Arc<dyn Fn(u32) -> u8 + Send + Sync>>>,
+    /// The world's entity types by network id, for 1.8 spawn packets.
+    legacy_entities: Mutex<Option<std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>>>,
+    /// The world's item types by network id, for 1.8 stacks.
+    legacy_items: Mutex<Option<std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>>>,
     pub events: Sender<NetEvent>,
     pub config: NetConfig,
     motd: Mutex<String>,
@@ -386,6 +397,39 @@ pub struct Shared {
     turned_away: Mutex<(usize, Option<Instant>)>,
 }
 impl Shared {
+    /// The world's block registry for translated guests, once a world set it.
+    pub fn legacy_blocks(&self) -> Option<&'static horizon_world::registry::BlockRegistry> {
+        *self.legacy_blocks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// The level's shape for translated guests, once a world set it.
+    pub fn legacy_shape(&self) -> Option<horizon_protocol::translate::legacy::play::ChunkShape> {
+        *self.legacy_shape.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// The world's biomes by network id, once a world set them.
+    pub fn legacy_biomes(&self) -> Option<std::sync::Arc<dyn Fn(u32) -> u8 + Send + Sync>> {
+        self.legacy_biomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    /// The world's entity types by network id, once a world set them.
+    pub fn legacy_entities(
+        &self,
+    ) -> Option<std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>> {
+        self.legacy_entities
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    /// The world's item types by network id, once a world set them.
+    pub fn legacy_items(
+        &self,
+    ) -> Option<std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>> {
+        self.legacy_items
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
     /// The registries and tags a new connection is sent.
     pub fn sync(&self) -> Arc<data::SyncData> {
         self.sync.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -561,6 +605,53 @@ pub struct Lan {
     _pinger: Option<discovery::Pinger>,
 }
 impl Lan {
+    /// The world's block registry, for translating block states to guests
+    /// older than the world's protocol.
+    pub fn set_legacy_blocks(&self, blocks: &'static horizon_world::registry::BlockRegistry) {
+        *self
+            .shared
+            .legacy_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(blocks);
+    }
+    /// The level's shape, for translating its chunks to old guests.
+    pub fn set_legacy_shape(&self, shape: horizon_protocol::translate::legacy::play::ChunkShape) {
+        *self
+            .shared
+            .legacy_shape
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(shape);
+    }
+    /// The world's biomes by network id, as 1.8's.
+    pub fn set_legacy_biomes(&self, biomes: std::sync::Arc<dyn Fn(u32) -> u8 + Send + Sync>) {
+        *self
+            .shared
+            .legacy_biomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(biomes);
+    }
+    /// The world's entity types by network id, for 1.8 spawn packets.
+    pub fn set_legacy_entities(
+        &self,
+        entities: std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>,
+    ) {
+        *self
+            .shared
+            .legacy_entities
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(entities);
+    }
+    /// The world's item types by network id, for 1.8 stacks.
+    pub fn set_legacy_items(
+        &self,
+        items: std::sync::Arc<dyn Fn(u32) -> Option<String> + Send + Sync>,
+    ) {
+        *self
+            .shared
+            .legacy_items
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(items);
+    }
     /// Listen on `port` (0 picks a free one).
     pub fn start(
         sync: Arc<data::SyncData>,
@@ -576,6 +667,11 @@ impl Lan {
         let (listen, port, announce) = (config.listen, config.port, config.announce);
         let shared = Arc::new(Shared {
             sync: Mutex::new(sync),
+            legacy_blocks: Mutex::new(None),
+            legacy_shape: Mutex::new(None),
+            legacy_biomes: Mutex::new(None),
+            legacy_entities: Mutex::new(None),
+            legacy_items: Mutex::new(None),
             events: tx,
             motd: Mutex::new(config.motd.clone()),
             max_players: AtomicUsize::new(config.max_players),

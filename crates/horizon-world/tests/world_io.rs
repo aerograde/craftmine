@@ -6,7 +6,7 @@ use horizon_world::{
     chunk::{BlockState, ChunkData, PalettedContainer},
     compression::Compression,
     nbt::{JavaString, Limits, NamedTag, Tag},
-    region::{ChunkRecord, RegionFile, RegionWriter},
+    region::{ChunkBytes, ChunkRecord, RegionFile, RegionWriter},
 };
 use std::{
     io::{Seek, SeekFrom, Write},
@@ -40,10 +40,24 @@ impl Drop for Directory {
     }
 }
 
+#[test]
+fn a_read_only_region_serves_the_mapped_payload() {
+    let dir = Directory::new();
+    let mut writer = RegionFile::open_writable(dir.region(), true).unwrap();
+    let expected = record(64);
+    writer.write(ChunkPos::new(-1, 0), &expected).unwrap();
+    writer.sync().unwrap();
+    drop(writer);
+    let mut reader = RegionFile::open(dir.region()).unwrap();
+    let got = reader.read(ChunkPos::new(-1, 0)).unwrap().unwrap();
+    assert!(matches!(got.compressed, ChunkBytes::Mapped { .. }));
+    assert_eq!(&*got.compressed, &*expected.compressed);
+}
+
 fn record(len: usize) -> ChunkRecord {
     ChunkRecord {
         compression: Compression::None,
-        compressed: vec![37; len],
+        compressed: vec![37; len].into(),
         timestamp: 0x8000_0001,
     }
 }
@@ -338,7 +352,7 @@ fn a_chunk_loads_whatever_follows_its_root() {
     let bytes = horizon_world::nbt::write_named(&root, Limits::saved()).unwrap();
     let record = |compression: Compression, compressed: Vec<u8>| ChunkRecord {
         compression,
-        compressed,
+        compressed: compressed.into(),
         timestamp: 0,
     };
     let with = |tail: &[u8]| [bytes.as_slice(), tail].concat();

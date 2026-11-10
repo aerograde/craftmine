@@ -72,6 +72,8 @@ workspace = true
 [dev-dependencies]
 horizon-items = { path = "../horizon-items", features = ["test-support"] }
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }
+# The no-op adapter: pipelines, bind groups and passes validated with no GPU.
+wgpu = { version = "30.0.1", default-features = false, features = ["noop"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
