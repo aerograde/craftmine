@@ -7,6 +7,18 @@ import "./audio.js"; // before the game's glue, which keeps the AudioContext it 
 
 const ROOT = ".local/horizon-client/26.3";
 const status = document.getElementById("status");
+const startupErrors = [];
+const rememberError = (...args) => {
+    startupErrors.push(args.map((arg) => String(arg)).join(" "));
+    if (startupErrors.length > 8) startupErrors.shift();
+};
+const consoleError = console.error.bind(console);
+console.error = (...args) => {
+    rememberError(...args);
+    consoleError(...args);
+};
+window.addEventListener("error", (event) => rememberError(event.message));
+window.addEventListener("unhandledrejection", (event) => rememberError(event.reason));
 
 // Whether this browser can draw the game; says why not on the page.
 async function webgpu() {
@@ -271,10 +283,43 @@ async function main() {
 
 main().catch((e) => {
     console.error(e);
-    // The threaded build shares memory between workers, which browsers allow
-    // only on a cross-origin isolated page.
     const isolation = window.crossOriginIsolated ? "" :
-        "\n\nThe page isn't cross-origin isolated: its server must send " +
-        "Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp.";
-    status.textContent = `Horizon could not start:\n${e}${isolation}`;
+        "The page isn't cross-origin isolated, so the threaded build cannot use workers; " +
+        "the single-threaded build is used instead.";
+    status.className = "error";
+    status.replaceChildren();
+    const title = document.createElement("h1");
+    title.textContent = "Horizon could not start";
+    const message = document.createElement("p");
+    message.textContent = String(e);
+    const hint = document.createElement("p");
+    hint.textContent = "Try Reload. If this repeats, clear the cached game files. " +
+        "WebGPU and a supported browser are required.";
+    const details = document.createElement("pre");
+    details.textContent = [...new Set(startupErrors)].slice(-5).join("\n");
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const reload = document.createElement("button");
+    reload.textContent = "Reload";
+    reload.onclick = () => location.reload();
+    const reset = document.createElement("button");
+    reset.textContent = "Clear cached files and reload";
+    reset.onclick = async () => {
+        reset.disabled = true;
+        try {
+            if ("serviceWorker" in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                await Promise.all(registrations.map((registration) => registration.unregister()));
+            }
+            if ("caches" in window) {
+                await Promise.all((await caches.keys()).map((key) => caches.delete(key)));
+            }
+        } finally {
+            location.reload();
+        }
+    };
+    actions.append(reload, reset);
+    const isolationNote = document.createElement("p");
+    isolationNote.textContent = isolation;
+    status.append(title, message, hint, details, actions, isolationNote);
 });

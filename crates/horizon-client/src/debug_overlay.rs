@@ -442,13 +442,13 @@ impl ProcessMemory {
 /// second; a drop in use (a GC in vanilla) keeps the last rate.
 #[derive(Debug, Default)]
 pub struct MemoryMeter {
-    last: Option<(std::time::Instant, ProcessMemory)>,
+    last: Option<(horizon_os::time::Instant, ProcessMemory)>,
     rate: i64,
 }
 
 impl MemoryMeter {
     pub fn lines(&mut self) -> Option<[String; 3]> {
-        let now = std::time::Instant::now();
+        let now = horizon_os::time::Instant::now();
         let memory = match self.last {
             Some((at, memory)) if now.duration_since(at).as_millis() < 500 => memory,
             last => {

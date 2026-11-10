@@ -13,6 +13,25 @@
     pointer-events: none; white-space: pre-line;
   }
   #status:empty { display: none; }
+  #status.error {
+    pointer-events: auto; flex-direction: column; gap: 10px;
+    background: #0b0b0b; overflow: auto;
+  }
+  #status.error h1 { margin: 0; color: #fff; font-size: 22px; }
+  #status.error p { margin: 0; max-width: 760px; color: #bbb; }
+  #status.error pre {
+    max-width: min(90vw, 900px); max-height: 30vh; overflow: auto;
+    margin: 0; padding: 10px; border: 1px solid #333; border-radius: 6px;
+    background: #151515; color: #ffb4b4; font: 12px/1.45 ui-monospace, monospace;
+    text-align: left; white-space: pre-wrap;
+  }
+  #status.error .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  #status.error button {
+    border: 1px solid #555; border-radius: 6px; padding: 8px 14px;
+    background: #222; color: #eee; font: inherit; cursor: pointer;
+  }
+  #status.error button:hover { background: #333; }
+  #status.error button:disabled { opacity: .5; cursor: wait; }
 </style>
 </head>
 <body>
