@@ -1,0 +1,64 @@
+name: Deploy web client to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pages-web
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Download pinned Minecraft files
+        run: python3 tools/prepare_pages_resources.py .local/minecraft/26.3
+      - name: Prepare Horizon resources
+        run: |
+          cargo run --release -p horizon-prepare -- \
+            --prepare \
+            --client-jar .local/minecraft/26.3/client.jar \
+            --server-jar .local/minecraft/26.3/server.jar \
+            --version-json .local/minecraft/26.3/version.json \
+            --libraries-dir .local/minecraft/26.3/libraries \
+            --assets-dir .local/minecraft/26.3/assets \
+            --java-home "$JAVA_HOME" \
+            --root . \
+            --output .local/horizon-client/26.3
+      - name: Build single-threaded web folder
+        run: |
+          THREADS=0 PROFILE=fast web/build.sh
+          THREADS=0 PROFILE=fast DIST=web/dist-st CARGO_TARGET_DIR=target/web-st web/build.sh
+          python3 web/package.py folder --no-build
+          touch web/out/horizon-web/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/out/horizon-web
+      - id: deployment
+        uses: actions/deploy-pages@v4
