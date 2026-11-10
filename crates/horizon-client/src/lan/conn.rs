@@ -451,6 +451,14 @@ fn serve_legacy(mut stream: TcpStream, shared: &Shared) -> Result<(), String> {
 }
 
 /// The world's block states as 1.8's, for a guest older than its protocol.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+fn legacy_resolver(
+    _shared: &Shared,
+) -> std::sync::Arc<dyn Fn(u32) -> horizon_protocol::translate::legacy::LegacyState + Send + Sync> {
+    std::sync::Arc::new(|_: u32| horizon_protocol::translate::legacy::FALLBACK)
+}
+
+/// The world's block states as 1.8's, for a guest older than its protocol.
 #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
 fn legacy_resolver(
     shared: &Shared,
