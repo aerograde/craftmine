@@ -19269,6 +19269,9 @@ struct Loading {
     /// The first renderer, while the browser opens its device.
     #[cfg(target_arch = "wasm32")]
     opening: Option<std::rc::Rc<RefCell<Option<Result<Renderer>>>>>,
+    /// The UI bundle while a browser renderer rebuild borrows its atlas.
+    #[cfg(target_arch = "wasm32")]
+    opening_gui: Option<std::rc::Rc<RefCell<Option<UiResources>>>>,
 }
 impl Loading {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -19406,22 +19409,55 @@ impl Loading {
         if let Some(renderer) = &mut self.renderer {
             renderer.release_surface();
         }
-        let bundle = self.gui.as_ref().expect("the menu bundle was just set");
-        match loading_renderer(
-            window,
-            offscreen,
-            Some(&bundle.atlas),
-            Some(bundle.panorama.as_ref()),
-            self.renderer.as_ref(),
-            self.settings.horizon.api,
-        ) {
-            Ok(r) => {
-                horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
-                self.renderer = Some(r);
-            }
-            Err(e) => {
-                log::warn!("Horizon: title renderer failed: {e}");
-                self.error = Some(e);
+        #[cfg(target_arch = "wasm32")]
+        {
+            // The browser device request is a future; the first renderer used
+            // this path, and the title's atlas/panorama rebuild must too.
+            self.renderer = None;
+            let gui = self.gui.take().expect("the menu bundle was just set");
+            let gui_slot = std::rc::Rc::new(RefCell::new(Some(gui)));
+            let output = std::rc::Rc::new(RefCell::new(None));
+            let task_output = output.clone();
+            let task_gui = gui_slot.clone();
+            let api = self.settings.horizon.api;
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = {
+                    let guard = task_gui.borrow();
+                    let gui = guard.as_ref();
+                    open_loading_renderer(
+                        window,
+                        offscreen,
+                        gui.map(|g| &g.atlas),
+                        gui.map(|g| g.panorama.as_ref()),
+                        None,
+                        api,
+                    )
+                    .await
+                };
+                *task_output.borrow_mut() = Some(result);
+            });
+            self.opening = Some(output);
+            self.opening_gui = Some(gui_slot);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bundle = self.gui.as_ref().expect("the menu bundle was just set");
+            match loading_renderer(
+                window,
+                offscreen,
+                Some(&bundle.atlas),
+                Some(bundle.panorama.as_ref()),
+                self.renderer.as_ref(),
+                self.settings.horizon.api,
+            ) {
+                Ok(r) => {
+                    horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
+                    self.renderer = Some(r);
+                }
+                Err(e) => {
+                    log::warn!("Horizon: title renderer failed: {e}");
+                    self.error = Some(e);
+                }
             }
         }
     }
@@ -19446,6 +19482,9 @@ impl Loading {
                 return;
             };
             self.opening = None;
+            if let Some(gui_slot) = self.opening_gui.take() {
+                self.gui = gui_slot.borrow_mut().take();
+            }
             match opened {
                 Ok(r) => {
                     horizon_client::hud::GUI_SCALE
@@ -19729,6 +19768,8 @@ fn run_loading(
         error: None,
         #[cfg(target_arch = "wasm32")]
         opening: None,
+        #[cfg(target_arch = "wasm32")]
+        opening_gui: None,
     };
     let mut app = App::Loading(Box::new(loading));
     let result = EventLoop::new()?.run_app(&mut app);
