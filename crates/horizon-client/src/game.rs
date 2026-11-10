@@ -15503,7 +15503,7 @@ impl Game<'_> {
     }
     fn update_world(&mut self) {
         if let Err(e) = self.poll_remote() {
-            log::warn!("Horizon: {e}");
+            log::warn!("Horizon: update_world (title={}, remote={}, integrated={}): {e}", self.title.is_some(), self.remote.is_some(), self.integrated.is_some());
         }
         self.prepare_lod();
         if self.lod.is_some() {
@@ -18887,7 +18887,7 @@ fn loading_renderer(
     horizon_os::block_on(open_loading_renderer(
         window, offscreen, atlas, panorama, previous, api,
     ))
-        .ok_or("the renderer waited for the browser")?
+    .ok_or("the renderer waited for the browser")?
 }
 
 /// [`loading_renderer`]: on the web, the first one waits for the browser's
@@ -19340,7 +19340,8 @@ impl Loading {
             let out = slot.clone();
             let (opening, api) = (window.clone(), self.settings.horizon.api);
             wasm_bindgen_futures::spawn_local(async move {
-                let renderer = open_loading_renderer(opening, offscreen, None, None, None, api).await;
+                let renderer =
+                    open_loading_renderer(opening, offscreen, None, None, None, api).await;
                 *out.borrow_mut() = Some(renderer);
             });
             self.opening = Some(slot);
@@ -19418,7 +19419,10 @@ impl Loading {
                 horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
                 self.renderer = Some(r);
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => {
+                log::warn!("Horizon: title renderer failed: {e}");
+                self.error = Some(e);
+            }
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
