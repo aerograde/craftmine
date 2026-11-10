@@ -752,13 +752,21 @@ mod refinement_tests {
             let c = glam::Vec3::from(quad[2].position());
             let normal = (b - a).cross(c - a);
             area += normal.y;
-            let min_x = quad.iter().map(|v| v.position()[0]).fold(f32::INFINITY, f32::min) + ox as f32;
+            let min_x = quad
+                .iter()
+                .map(|v| v.position()[0])
+                .fold(f32::INFINITY, f32::min)
+                + ox as f32;
             let max_x = quad
                 .iter()
                 .map(|v| v.position()[0])
                 .fold(f32::NEG_INFINITY, f32::max)
                 + ox as f32;
-            let min_z = quad.iter().map(|v| v.position()[2]).fold(f32::INFINITY, f32::min) + oz as f32;
+            let min_z = quad
+                .iter()
+                .map(|v| v.position()[2])
+                .fold(f32::INFINITY, f32::min)
+                + oz as f32;
             let max_z = quad
                 .iter()
                 .map(|v| v.position()[2])
@@ -1200,8 +1208,9 @@ mod tests {
         assert_eq!(mesh.solid.len(), 3 * 4);
         let mut area = 0.0;
         for q in mesh.solid.as_chunks::<4>().0 {
-            let x =
-                |f: fn(f32, f32) -> f32, i: usize| q.iter().map(|v| v.position()[i]).reduce(f).unwrap();
+            let x = |f: fn(f32, f32) -> f32, i: usize| {
+                q.iter().map(|v| v.position()[i]).reduce(f).unwrap()
+            };
             area += (x(f32::max, 0) - x(f32::min, 0)) * (x(f32::max, 2) - x(f32::min, 2));
             for v in q {
                 // UVs follow the world position modulo a block.
@@ -1345,7 +1354,8 @@ mod tests {
         assert!(
             mesh.solid
                 .iter()
-                .all(|v| (3.0..=5.0).contains(&v.position()[1]) || (8.0..=9.0).contains(&v.position()[1]))
+                .all(|v| (3.0..=5.0).contains(&v.position()[1])
+                    || (8.0..=9.0).contains(&v.position()[1]))
         );
         assert!(
             mesh.solid
@@ -1408,7 +1418,11 @@ mod tests {
         // Over the lower neighbour: open air, lit like its top.
         let open: Vec<_> = quads
             .iter()
-            .filter(|q| q.iter().all(|v| v.position()[0] == 1.0 && v.position()[2] <= 1.0) && normal(q).x > 0.0)
+            .filter(|q| {
+                q.iter()
+                    .all(|v| v.position()[0] == 1.0 && v.position()[2] <= 1.0)
+                    && normal(q).x > 0.0
+            })
             .collect();
         assert_eq!(open.len(), 1);
         assert_eq!(bounds(open[0]), (4.0, 10.0));
@@ -1416,7 +1430,11 @@ mod tests {
         // Into the cave: its recorded light.
         let cave: Vec<_> = quads
             .iter()
-            .filter(|q| q.iter().all(|v| v.position()[2] == 1.0 && v.position()[0] <= 1.0) && normal(q).z > 0.0)
+            .filter(|q| {
+                q.iter()
+                    .all(|v| v.position()[2] == 1.0 && v.position()[0] <= 1.0)
+                    && normal(q).z > 0.0
+            })
             .collect();
         assert_eq!(cave.len(), 1);
         assert_eq!(bounds(cave[0]), (2.0, 6.0));
@@ -1530,7 +1548,9 @@ mod tests {
         assert_eq!(tops.iter().filter(|q| q[0].layer == 3).count(), 2);
         assert_eq!(tops.iter().filter(|q| q[0].light == 16).count(), 1);
         assert!(!mesh.solid.as_chunks::<4>().0.iter().any(|q| {
-            normal(q).x != 0.0 && q.iter().all(|v| v.position()[0] == 1.0 || v.position()[0] == 2.0)
+            normal(q).x != 0.0
+                && q.iter()
+                    .all(|v| v.position()[0] == 1.0 || v.position()[0] == 2.0)
         }));
     }
     #[test]
@@ -1668,8 +1688,14 @@ mod tests {
             .collect();
         assert_eq!(sides.len(), 2);
         for q in sides {
-            let min = q.iter().map(|v| v.position()[1]).fold(f32::INFINITY, f32::min);
-            let max = q.iter().map(|v| v.position()[1]).fold(f32::NEG_INFINITY, f32::max);
+            let min = q
+                .iter()
+                .map(|v| v.position()[1])
+                .fold(f32::INFINITY, f32::min);
+            let max = q
+                .iter()
+                .map(|v| v.position()[1])
+                .fold(f32::NEG_INFINITY, f32::max);
             if normal(q).x > 0.0 {
                 assert_eq!((min, max), (8.0, 16.0));
             } else {

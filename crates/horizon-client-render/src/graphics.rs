@@ -349,9 +349,46 @@ impl Graphics {
         lod_distance_capped(self.lod_distance, info)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualQuality {
+    Auto,
+    High,
+    Medium,
+    Low,
+}
+impl VisualQuality {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::High => "High",
+            Self::Medium => "Medium",
+            Self::Low => "Low",
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "high" => Self::High,
+            "medium" => Self::Medium,
+            "low" => Self::Low,
+            _ => Self::Auto,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Graphics {
     pub preset: Preset,
+    /// The built-in Vibrant Lux visual profile (tone/grade now; shadows, bloom and
+    /// volumetrics on the same profile). On by default.
+    pub visuals: bool,
+    pub visual_quality: VisualQuality,
     /// Distant surface terrain range, in chunks; 0 disables LODs.
     pub lod_distance: u32,
     /// How finely far terrain is drawn; Full unless the player picks Reduced.
@@ -424,6 +461,8 @@ impl Default for Graphics {
     fn default() -> Self {
         Self {
             preset: Preset::Custom,
+            visuals: true,
+            visual_quality: VisualQuality::Auto,
             lod_distance: 0,
             far_detail: FarDetail::Full,
             cave_culling: true,
@@ -490,6 +529,8 @@ impl Graphics {
             let number = |d: u32| value.parse().unwrap_or(d);
             match key.trim() {
                 "preset" => g.preset = Preset::parse(value),
+                "visuals" => g.visuals = flag(g.visuals),
+                "visualQuality" => g.visual_quality = VisualQuality::parse(value),
                 "lodDistance" => {
                     g.lod_distance = number(g.lod_distance).min(crate::lod::MAX_CHUNKS)
                 }
@@ -560,8 +601,10 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
+            "preset:{}\nvisuals:{}\nvisualQuality:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
             self.preset.name(),
+            bool_text(self.visuals),
+            self.visual_quality.name(),
             self.lod_distance,
             self.far_detail.name(),
             bool_text(self.cave_culling),
@@ -628,6 +671,28 @@ impl Graphics {
             0 => reported().map_or(1000, |r| r.peak),
             n => n,
         }
+    }
+    /// The Vibrant Lux post profile: x enabled, y contrast, z saturation, w warmth.
+    /// Auto currently starts at the High look; the adaptive tier is wired in the effect
+    /// layer, not guessed here.
+    pub fn visual_uniform(&self) -> [f32; 8] {
+        let (contrast, saturation, warmth, bloom, threshold, radius, vignette) = match self
+            .visual_quality
+        {
+            VisualQuality::Auto | VisualQuality::High => (1.06, 1.14, 1.0, 0.45, 0.72, 5.0, 0.14),
+            VisualQuality::Medium => (1.03, 1.09, 0.8, 0.28, 0.82, 3.0, 0.10),
+            VisualQuality::Low => (1.01, 1.05, 0.5, 0.12, 0.92, 2.0, 0.06),
+        };
+        [
+            if self.visuals { 1.0 } else { 0.0 },
+            contrast,
+            saturation,
+            warmth,
+            bloom,
+            threshold,
+            radius,
+            vignette,
+        ]
     }
     /// Worker threads for chunk generation and meshing.
     pub fn worker_threads(&self) -> usize {
@@ -714,9 +779,22 @@ mod tests {
     }
 
     #[test]
+    fn vibrant_lux_is_on_by_default() {
+        let g = Graphics::default();
+        assert!(g.visuals);
+        assert_eq!(g.visual_quality, VisualQuality::Auto);
+        assert_eq!(g.visual_uniform()[0], 1.0);
+        let mut off = Graphics::default();
+        off.visuals = false;
+        assert_eq!(off.visual_uniform()[0], 0.0);
+    }
+
+    #[test]
     fn round_trips() {
         let g = Graphics {
             preset: Preset::Balanced,
+            visuals: false,
+            visual_quality: VisualQuality::Low,
             lod_distance: 256,
             far_detail: FarDetail::Reduced,
             cave_culling: false,

@@ -240,7 +240,10 @@ mod tests {
             .iter()
             .filter(|q| {
                 [[0, 1, 2], [0, 2, 3]].iter().any(|t| {
-                    let (e1, e2) = (sub(q[t[1]].position(), q[t[0]].position()), sub(q[t[2]].position(), q[t[0]].position()));
+                    let (e1, e2) = (
+                        sub(q[t[1]].position(), q[t[0]].position()),
+                        sub(q[t[2]].position(), q[t[0]].position()),
+                    );
                     let n = [
                         e1[1] * e2[2] - e1[2] * e2[1],
                         e1[2] * e2[0] - e1[0] * e2[2],

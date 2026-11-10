@@ -14870,6 +14870,7 @@ impl Game<'_> {
             sky,
             shadow_scene_revision: (self.world.revision, self.world.chunks.membership_revision()),
             shadow_cache: self.settings.horizon.shadow_cache,
+            visual: self.settings.horizon.visual_uniform(),
             distance,
             detail_distance: (self.streaming.radius * 16) as f32,
             depth_far,
@@ -15503,7 +15504,12 @@ impl Game<'_> {
     }
     fn update_world(&mut self) {
         if let Err(e) = self.poll_remote() {
-            log::warn!("Horizon: update_world (title={}, remote={}, integrated={}): {e}", self.title.is_some(), self.remote.is_some(), self.integrated.is_some());
+            log::warn!(
+                "Horizon: update_world (title={}, remote={}, integrated={}): {e}",
+                self.title.is_some(),
+                self.remote.is_some(),
+                self.integrated.is_some()
+            );
         }
         self.prepare_lod();
         if self.lod.is_some() {
@@ -18981,6 +18987,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         sky: horizon_client::environment::Sky::default(),
         shadow_scene_revision: (0, 0),
         shadow_cache: false,
+        visual: [0.0; 8],
         distance: 12.0,
         detail_distance: 12.0,
         depth_far: 1000.0,
@@ -19451,7 +19458,8 @@ impl Loading {
                 self.settings.horizon.api,
             ) {
                 Ok(r) => {
-                    horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
+                    horizon_client::hud::GUI_SCALE
+                        .store(self.settings.gui_scale, Ordering::Relaxed);
                     self.renderer = Some(r);
                 }
                 Err(e) => {

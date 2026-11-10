@@ -350,6 +350,9 @@ pub struct Frame<'a> {
     /// Opt-in reuse of the shader pack's last shadow map when the key still matches
     /// (`horizon-graphics.txt` `shadowCache`; off by default).
     pub shadow_cache: bool,
+    /// Vibrant Lux profile: x enabled, y contrast, z saturation, w warmth,
+    /// and bloom/threshold/radius/vignette in the second half.
+    pub visual: [f32; 8],
     /// Render distance in blocks (fog end).
     pub distance: f32,
     /// Full-detail terrain distance in blocks; distant LODs bypass the cave graph.
@@ -4820,6 +4823,17 @@ impl Renderer {
         let views = self.views(frame);
         let pose = frame.bob * frame.spin;
         let view_proj = views.primary().view_proj(pose);
+        let builtin_visuals = frame.visual[0] > 0.0
+            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
+            && self.native.as_ref().is_none_or(|n| n.post.is_none());
+        self.world_post.set_visual(
+            &self.queue,
+            if builtin_visuals {
+                frame.visual
+            } else {
+                [0.0; 8]
+            },
+        );
         // TAA runs where the world post pass does, not under a shader pack's own.
         let taa = !frame.title
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
@@ -5923,7 +5937,7 @@ impl Renderer {
         let scaled = self.world_post.prepare(
             &self.device,
             [self.config.width, self.config.height],
-            pack_reads_world,
+            pack_reads_world || builtin_visuals,
         );
         let (world_view, world_depth) = match &scaled {
             Some((color, depth)) => (color, depth),

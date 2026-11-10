@@ -4,6 +4,42 @@
 @group(0) @binding(0) var world: texture_2d<f32>;
 @group(0) @binding(1) var world_sampler: sampler;
 
+struct Visual {
+    // x: enabled, y: contrast, z: saturation, w: warmth.
+    params: vec4<f32>,
+    // x: bloom, y: bloom threshold, z: radius in texels, w: vignette.
+    extra: vec4<f32>,
+};
+@group(0) @binding(5) var<uniform> visual: Visual;
+
+fn bloom_around(uv: vec2<f32>) -> vec3<f32> {
+    if visual.params.x < 0.5 || visual.extra.x <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let texel = visual.extra.z / max(vec2<f32>(textureDimensions(world)), vec2<f32>(1.0));
+    var bloom = vec3<f32>(0.0);
+    for (var i = 0; i < 8; i = i + 1) {
+        let a = f32(i) * 0.7853982;
+        let c = textureSampleLevel(world, world_sampler, uv + vec2(cos(a), sin(a)) * texel, 0.0).rgb;
+        bloom = bloom + max(c - vec3<f32>(visual.extra.y), vec3<f32>(0.0));
+    }
+    return bloom * (visual.extra.x * 0.125);
+}
+
+fn vibrant_lux(c: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    if visual.params.x < 0.5 {
+        return c;
+    }
+    var graded = c;
+    let l = dot(graded, vec3<f32>(0.2126, 0.7152, 0.0722));
+    graded = mix(vec3<f32>(l), graded, visual.params.z);
+    graded = (graded - vec3<f32>(0.5)) * visual.params.y + vec3<f32>(0.5);
+    graded = graded * vec3<f32>(1.0 + 0.05 * visual.params.w, 1.0, 1.0 - 0.04 * visual.params.w);
+    let d = distance(uv, vec2<f32>(0.5));
+    graded = graded * (1.0 - visual.extra.w * smoothstep(0.35, 0.85, d));
+    return max(graded, vec3<f32>(0.0));
+}
+
 struct PostOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -19,7 +55,9 @@ struct PostOut {
 
 @fragment fn fs_copy(in: PostOut) -> @location(0) vec4<f32> {
     // The alpha carries the emissive mark through to HDR output (hdr.wgsl).
-    return textureSampleLevel(world, world_sampler, in.uv, 0.0);
+    let c = textureSampleLevel(world, world_sampler, in.uv, 0.0);
+    let bloom = bloom_around(in.uv);
+    return vec4<f32>(vibrant_lux(c.rgb + bloom, in.uv), c.a);
 }
 
 fn luma(c: vec3<f32>) -> f32 {
@@ -27,7 +65,7 @@ fn luma(c: vec3<f32>) -> f32 {
 }
 
 // FXAA 3.11 (console quality): blend along the local edge direction.
-@fragment fn fs_fxaa(in: PostOut) -> @location(0) vec4<f32> {
+fn fxaa_color(in: PostOut) -> vec4<f32> {
     let texel = 1.0 / vec2<f32>(textureDimensions(world));
     let centre = textureSampleLevel(world, world_sampler, in.uv, 0.0);
     let rgb_m = centre.rgb;
@@ -54,6 +92,12 @@ fn luma(c: vec3<f32>) -> f32 {
         return vec4(a, centre.a);
     }
     return vec4(b, centre.a);
+}
+
+@fragment fn fs_fxaa(in: PostOut) -> @location(0) vec4<f32> {
+    let c = fxaa_color(in);
+    let bloom = bloom_around(in.uv);
+    return vec4<f32>(vibrant_lux(c.rgb + bloom, in.uv), c.a);
 }
 
 // TAA (`world_post.rs`): blend this frame into the history, reprojected from the

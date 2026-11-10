@@ -1,15 +1,11 @@
 use crate::Result;
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use horizon_os::fs::File;
 use horizon_world::{
     DATA_VERSION,
     heightmap::HeightmapState,
     registry::{BlockRegistry, BlockStateId},
     worldgen::{tags::TagDefinitions, terrain::TerrainBlockStates},
-};
-use flate2::{
-    Compression,
-    read::ZlibDecoder,
-    write::ZlibEncoder,
 };
 use serde_json::Value;
 use std::{

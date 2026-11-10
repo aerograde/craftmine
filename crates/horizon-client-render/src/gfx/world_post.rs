@@ -41,6 +41,13 @@ struct TaaUniform {
     jitter: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct VisualUniform {
+    params: [f32; 4],
+    extra: [f32; 4],
+}
+
 /// TAA's GPU resources, absent when the device cannot compile the shader
 /// (the OpenGL backend's naga GLSL emitter does not support `textureLoad`
 /// from depth textures).
@@ -72,6 +79,7 @@ pub struct Post {
     /// The last TAA frame's unjittered `view_proj` and camera, `None` once a frame ran without it.
     taa_previous: Option<(DMat4, DVec3)>,
     taa_this_frame: TaaUniform,
+    visual: wgpu::Buffer,
 }
 
 impl Post {
@@ -97,6 +105,16 @@ impl Post {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -232,6 +250,12 @@ impl Post {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let visual = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Horizon visual profile"),
+            size: std::mem::size_of::<VisualUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             copy: pipeline("fs_copy", &pipeline_layout, format),
             fxaa: pipeline("fs_fxaa", &pipeline_layout, format),
@@ -248,6 +272,7 @@ impl Post {
             taa_frame: 0,
             taa_previous: None,
             taa_this_frame: bytemuck::Zeroable::zeroed(),
+            visual,
         }
     }
 
@@ -413,6 +438,17 @@ impl Post {
         self.target.as_ref().map(|t| t.size)
     }
 
+    pub fn set_visual(&self, queue: &wgpu::Queue, params: [f32; 8]) {
+        queue.write_buffer(
+            &self.visual,
+            0,
+            bytemuck::bytes_of(&VisualUniform {
+                params: [params[0], params[1], params[2], params[3]],
+                extra: [params[4], params[5], params[6], params[7]],
+            }),
+        );
+    }
+
     /// Bindings that copy (or anti-alias) `view` onto the screen in `finish_with`.
     pub fn bind(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -426,6 +462,10 @@ impl Post {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.visual.as_entire_binding(),
                 },
             ],
         })
@@ -563,5 +603,17 @@ mod tests {
         let post = Post::new(&device, wgpu::TextureFormat::Rgba8Unorm);
         // Copy and FXAA pipelines always compile; TAA compiles if supported by backend.
         let _ = post.supports_taa();
+    }
+
+    #[test]
+    fn the_post_shader_validates() {
+        let module =
+            naga::front::wgsl::parse_str(include_str!("../world_post.wgsl")).expect("WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("WGSL validates");
     }
 }

@@ -9,8 +9,8 @@ use horizon_client::{
     creative::Creative,
     widgets::{self, Kind, Node},
 };
-use serde_json::{Value, json};
 use horizon_os::time::{Duration, Instant};
+use serde_json::{Value, json};
 use std::sync::mpsc::Sender;
 use winit::event::MouseButton;
 

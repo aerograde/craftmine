@@ -1599,7 +1599,7 @@ mod tests {
             {"formats":97,"directory":"C:"},
             {"formats":97,"directory":"ok_1.21-x"}]}}"#);
         assert_eq!(overlays_of(&meta), ["ok_1.21-x"]);
-                let base = horizon_os::env::temp_dir()
+        let base = horizon_os::env::temp_dir()
             .join(format!("horizon-packs-ov-{}", horizon_os::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");

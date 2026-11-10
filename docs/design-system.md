@@ -312,3 +312,12 @@ detail to 1024 px.
   (macOS grid: 824 px tile with 185 px corners in a 1024 canvas; Windows and Linux use the full
   square with 22 % corners).
 - Exports and where they go: `docs/media/brand/README.md`.
+
+## Visual vibrancy
+
+**Vibrant Lux** is Horizon's one built-in visual profile: a clean-room combination of the
+vibrant/deferred look and the Luxium low-cost approach. It is **on by default** (an owner-approved
+exception to the usual off-by-default rule for Horizon-only looks), with a master switch in Video
+Settings and Auto/High/Medium/Low quality. Auto starts high where the GPU allows and falls to the
+Luxium-style cheap path; explicit Off restores the vanilla look and is covered by parity tests.
+Shader packs keep ownership of passes they replace.

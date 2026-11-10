@@ -2,7 +2,9 @@
 //! they show, in what groups, with what description and cost, and their
 //! input. How they look comes from `graphics_style`.
 use crate::{
-    graphics::{FarDetail, GraphicsApi, Overlay, Pacing, PresentMode, Preset, Upscaling},
+    graphics::{
+        FarDetail, GraphicsApi, Overlay, Pacing, PresentMode, Preset, Upscaling, VisualQuality,
+    },
     graphics_style::{Cost, STYLE},
     hud::{HudAtlas, HudBatch},
     lang,
@@ -23,6 +25,8 @@ pub enum Level {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum H {
     Preset,
+    Visuals,
+    VisualQuality,
     LodDistance,
     FarDetail,
     CaveCulling,
@@ -101,6 +105,16 @@ pub fn rows(level: Level) -> Vec<Row> {
         Medium,
         "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
     );
+    let visuals = h(
+        H::Visuals,
+        High,
+        "Vibrant Lux: Horizon's shadow, light, colour and bloom look. Off is vanilla.",
+    );
+    let visual_quality = h(
+        H::VisualQuality,
+        Medium,
+        "Auto adapts the look to the GPU. Low is the Luxium-style cheap path.",
+    );
     // Suggested, never switched on, where far terrain costs the GPU most.
     let far = h(
         H::FarDetail,
@@ -133,7 +147,18 @@ pub fn rows(level: Level) -> Vec<Row> {
         "Sets the options below together. Changing one makes it Custom.",
     );
     let mut rows = match level {
-        Level::Simple => vec![preset, render, lod, far, fov, fps, vsync, gui],
+        Level::Simple => vec![
+            preset,
+            visuals,
+            visual_quality,
+            render,
+            lod,
+            far,
+            fov,
+            fps,
+            vsync,
+            gui,
+        ],
         Level::Hdr => vec![
             Row::Header("HDR"),
             h(
@@ -203,6 +228,8 @@ pub fn rows(level: Level) -> Vec<Row> {
                 "Meshed sections uploaded per frame. Lower is smoother while loading.",
             ),
             Row::Header("Quality"),
+            visuals,
+            visual_quality,
             v(
                 Opt::SmoothLighting,
                 Low,
@@ -509,6 +536,8 @@ impl H {
         let g = &s.horizon;
         match self {
             H::Preset => labelled("Preset", g.preset.label()),
+            H::Visuals => labelled("Visuals", on_off(g.visuals)),
+            H::VisualQuality => labelled("Visual Quality", g.visual_quality.label()),
             H::LodDistance => match g.lod_distance {
                 0 => labelled("LOD Distance", "Off"),
                 n => labelled("LOD Distance", lang::tr("%s chunks", &[&n])),
@@ -644,6 +673,19 @@ impl H {
         }
         let g = &mut s.horizon;
         match self {
+            H::Visuals => g.visuals = !g.visuals,
+            H::VisualQuality => {
+                g.visual_quality = step(
+                    &[
+                        VisualQuality::Auto,
+                        VisualQuality::High,
+                        VisualQuality::Medium,
+                        VisualQuality::Low,
+                    ],
+                    g.visual_quality,
+                    back,
+                )
+            }
             H::FarDetail => {
                 g.far_detail = step(&[FarDetail::Full, FarDetail::Reduced], g.far_detail, back)
             }

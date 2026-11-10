@@ -3,8 +3,8 @@ use super::event_loop::EventLoopCtl;
 use super::{Game, Screen};
 use horizon_client::{Result, items::ItemStack};
 use horizon_core::geometry::Vec3;
-use serde_json::{Value, json};
 use horizon_os::time::{Duration, Instant};
+use serde_json::{Value, json};
 use std::sync::mpsc::Sender;
 use winit::{event::MouseButton, keyboard::KeyCode};
 

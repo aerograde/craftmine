@@ -663,10 +663,9 @@ impl Title {
     pub fn new(saves: PathBuf, resources: &Path) -> Self {
         use chrono::Datelike;
         let today = chrono::Local::now();
-        let splashes = horizon_os::fs::read_to_string(
-            resources.join("assets/minecraft/texts/splashes.txt"),
-        )
-        .unwrap_or_default();
+        let splashes =
+            horizon_os::fs::read_to_string(resources.join("assets/minecraft/texts/splashes.txt"))
+                .unwrap_or_default();
         let seed = horizon_os::time::SystemTime::now()
             .duration_since(horizon_os::time::UNIX_EPOCH)
             .unwrap_or_default()

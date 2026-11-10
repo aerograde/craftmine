@@ -728,7 +728,10 @@ fn checked<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> Result<T, St
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let value = crate::crash::contain(create);
     let internal = horizon_os::block_on(internal.pop()).flatten();
-    match horizon_os::block_on(validation.pop()).flatten().or(internal) {
+    match horizon_os::block_on(validation.pop())
+        .flatten()
+        .or(internal)
+    {
         Some(e) => {
             // The details are in the error's description or its sources.
             let mut message = match &e {

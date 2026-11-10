@@ -2884,7 +2884,10 @@ mod tests {
                 .iter()
                 .filter(|quad| {
                     quad.iter().all(|v| v.position()[axis] == plane)
-                        && quad.iter().map(|v| v.position()[1]).fold(f32::INFINITY, f32::min)
+                        && quad
+                            .iter()
+                            .map(|v| v.position()[1])
+                            .fold(f32::INFINITY, f32::min)
                             == MIN_Y as f32
                         && quad
                             .iter()
@@ -2904,8 +2907,8 @@ mod tests {
                 })
                 .map(move |quad| {
                     let a = glam::Vec3::from(quad[0].position());
-                    (glam::Vec3::from(quad[1].position()) - a).cross(glam::Vec3::from(quad[2].position()) - a)
-                        [axis]
+                    (glam::Vec3::from(quad[1].position()) - a)
+                        .cross(glam::Vec3::from(quad[2].position()) - a)[axis]
                 })
                 .collect::<Vec<_>>()
         };

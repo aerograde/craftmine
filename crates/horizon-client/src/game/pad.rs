@@ -13,7 +13,7 @@ use horizon_client::{
 };
 use horizon_os::time::Instant;
 use serde_json::{Value, json};
-use winit::{keyboard::KeyCode};
+use winit::keyboard::KeyCode;
 
 pub(super) const HELP: &[&str] = &[
     "pad BUTTON down|up|tap         a virtual controller button (south east west north lb rb lt rt select start ls rs up down left right)",
