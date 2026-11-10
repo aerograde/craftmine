@@ -44,7 +44,7 @@ jobs:
             --prepare \
             --client-jar .local/minecraft/26.3/client.jar \
             --server-jar .local/minecraft/26.3/server.jar \
-            --version-json .local/minecraft/26.3/version.json \
+            --version-json .local/minecraft/26.3/manifest.json \
             --libraries-dir .local/minecraft/26.3/libraries \
             --assets-dir .local/minecraft/26.3/assets \
             --java-home "$JAVA_HOME" \

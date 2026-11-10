@@ -44,9 +44,15 @@ def main() -> int:
     entry = next((v for v in manifest["versions"] if v["id"] == version_id), None)
     if entry is None:
         raise SystemExit(f"{version_id} is not in Mojang's version manifest")
-    version = json.loads(get(entry["url"]))
+    accepted = lock["minecraft"]["manifest_sha1"]
+    accepted_url = f"https://piston-meta.mojang.com/v1/packages/{accepted}/{version_id}.json"
+    raw_version = get(accepted_url)
+    if hashlib.sha1(raw_version).hexdigest() != accepted:
+        raise SystemExit("the accepted version JSON's sha1 does not match research-lock.json")
+    version = json.loads(raw_version)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "version.json").write_bytes(get(entry["url"]))
+    (out / "version.json").write_bytes(raw_version)
+    (out / "manifest.json").write_bytes(raw_version)
 
     downloads = version["downloads"]
     save(downloads["client"]["url"], out / "client.jar", downloads["client"]["sha1"])
