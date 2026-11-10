@@ -58,7 +58,7 @@ def main() -> int:
         artifact = library.get("downloads", {}).get("artifact")
         if not artifact:
             continue
-        group, name, ver = library["name"].split(":")
+        group, name, ver = library["name"].split(":")[:3]
         relative = Path(*group.split(".")) / name / ver / Path(artifact["path"]).name
         jobs.append((artifact["url"], libraries / relative, artifact.get("sha1")))
 
