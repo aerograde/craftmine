@@ -1,3 +1,4 @@
+diagnostic(off, derivative_uniformity);
 // Terrain, sky and outline shaders, ported from the pinned vanilla
 // terrain.vsh/fsh, fog.glsl and sample_lightmap.glsl.
 struct Globals {
