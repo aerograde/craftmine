@@ -263,7 +263,7 @@ impl Config {
                 let source = match (i.get("location"), i.get("target")) {
                     (Some(location), None) => {
                         for key in ["width", "height"] {
-                            if !i.get(key).and_then(Value::as_u64).is_some_and(|v| v > 0) {
+                            if i.get(key).and_then(Value::as_u64).is_none_or(|v| v == 0) {
                                 return Err(format!("pass {n}: a texture input needs a {key}"));
                             }
                         }

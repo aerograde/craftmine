@@ -503,6 +503,10 @@ pub fn serve(
     {
         let mut socket =
             horizon_protocol::websocket::ServerSocket::accept(stream).map_err(|e| e.to_string())?;
+        // The TCP path below gets this timeout; the browser path used to
+        // return before it. A guest whose tab stops reading then blocked its
+        // writer thread forever, holding the connection slot and the UUID.
+        let _ = socket.set_write_timeout(Some(WRITE_TIMEOUT));
         let first = socket
             .recv_message()
             .map_err(|e| e.to_string())?
@@ -1419,6 +1423,7 @@ fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::net::So
     let reason = if events.send(NetEvent::Joined(Box::new(joined))).is_ok() {
         match read_loop(
             &mut reader,
+            start,
             conn_id,
             &events,
             &alive,
@@ -1506,6 +1511,7 @@ enum Ended {
 /// `required_pack`), or a rate-limit excess, which disconnects them.
 fn read_loop(
     reader: &mut ConnReader,
+    start: Instant,
     conn: u32,
     events: &Sender<NetEvent>,
     alive: &AtomicI64,
@@ -1531,7 +1537,14 @@ fn read_loop(
             return Ended::RateExceeded(average);
         }
         match play::Serverbound::decode(id, &payload).and_then(checked_play) {
-            Ok(play::Serverbound::KeepAlive(k)) => alive.store(k.id, Ordering::Relaxed),
+            Ok(play::Serverbound::KeepAlive(k)) => {
+                // Vanilla accepts only the challenge it sent. The timeout
+                // measures from the answered id, so an i64::MAX reply kept a
+                // stuck client alive for millennia; an id from the future is
+                // not an answer to anything sent yet.
+                let now = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
+                alive.store(k.id.clamp(-1, now), Ordering::Relaxed);
+            }
             Ok(play::Serverbound::ResourcePack(r))
                 if r.action == PACK_DECLINED && required_pack =>
             {

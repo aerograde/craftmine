@@ -16,6 +16,9 @@ pub(super) struct Pending {
     meshes: FxHashMap<TileKey, SectionMesh>,
     removed: FxHashSet<TileKey>,
     cutout: Option<FxHashSet<(i32, i32)>>,
+    /// When the first still-waiting mesh arrived. A batch that keeps being
+    /// refilled must not keep the new tiles invisible forever.
+    since: Option<Instant>,
 }
 
 impl Pending {
@@ -28,6 +31,9 @@ impl Pending {
         removed: Vec<TileKey>,
         cutout: Option<FxHashSet<(i32, i32)>>,
     ) {
+        if !meshes.is_empty() {
+            self.since.get_or_insert_with(Instant::now);
+        }
         for (key, mesh) in meshes {
             self.removed.remove(&key);
             self.meshes.insert(key, mesh);
@@ -111,6 +117,22 @@ impl Bounds {
         }
         Some(((min + max) * 0.5).length_squared().to_bits())
     }
+}
+
+/// Whether every column of `key`'s footprint is drawn by resident chunks
+/// (`Renderer::lod_cutout`), so the tile can be left out whole.
+pub(super) fn cut_out(key: TileKey, cutout: &FxHashSet<(i32, i32)>) -> bool {
+    if cutout.is_empty() {
+        return false;
+    }
+    let span = 1i32 << key.level;
+    // A tile with more columns than the set holds cannot be wholly covered;
+    // the all() below would pay (1 << level)^2 probes for the far horizon.
+    if u64::from(span as u32) * u64::from(span as u32) > cutout.len() as u64 {
+        return false;
+    }
+    let (x0, z0) = (key.x << key.level, key.z << key.level);
+    (0..span).all(|dx| (0..span).all(|dz| cutout.contains(&(x0 + dx, z0 + dz))))
 }
 
 /// A tile's instance: like a section's, with the UV step of merged faces.
@@ -325,8 +347,17 @@ impl Renderer {
             .filter(|column| !self.lod_cutout.contains(column))
             .copied()
             .collect();
+        // Read before the loop: while a tile is uploaded, the pending batch is
+        // not borrowed, so `upload_lod` may take `&mut self`.
+        let pending_since = self.lod_pending.as_ref().and_then(|pending| pending.since);
         while let Some(pending) = &mut self.lod_pending {
-            let Some(&key) = pending.meshes.keys().next() else {
+            // Finest (nearest) tiles first: a hash order drew the horizon
+            // before the terrain the player was walking into.
+            let Some(&key) = pending
+                .meshes
+                .keys()
+                .min_by_key(|key| (key.level, key.x, key.z))
+            else {
                 let pending = self.lod_pending.take().expect("pending tiles");
                 // A tile fades in over the ones it replaces. One over nothing
                 // shows whole: its hidden chunks would open holes to the sky
@@ -417,6 +448,24 @@ impl Renderer {
                 });
             self.upload_lod(key, &mesh, keep);
             if start.elapsed() >= budget {
+                // A batch that never empties (the mesher keeps refilling it
+                // while the camera moves) would otherwise leave every tile
+                // unshown: `Tile::visible` needs a `shown` instant. After a
+                // short cap, settle what is in, whole; the normal path takes
+                // over again when the batch drains.
+                if pending_since
+                    .is_some_and(|since| start.saturating_duration_since(since) >= FADE / 4)
+                {
+                    let whole = start.checked_sub(FADE).unwrap_or(start);
+                    for tile in self.lods.values_mut() {
+                        if tile.shown.is_none() {
+                            tile.shown = Some(whole);
+                        }
+                        if let Some((_, since)) = &mut tile.previous {
+                            since.get_or_insert(start);
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -443,6 +492,36 @@ impl Renderer {
 mod tests {
     use super::*;
     use crate::mesher::TerrainVertex;
+
+    #[test]
+    fn a_tile_is_left_out_only_when_all_its_columns_are_resident() {
+        let mut cutout = FxHashSet::default();
+        let one = TileKey {
+            x: 3,
+            z: -2,
+            level: 0,
+        };
+        cutout.insert((3, -2));
+        assert!(
+            cut_out(one, &cutout),
+            "one resident column hides a 16-block tile"
+        );
+        // A 32-block tile covers columns (6, -4)..(7, -3).
+        let two = TileKey {
+            x: 3,
+            z: -2,
+            level: 1,
+        };
+        assert!(!cut_out(two, &cutout), "half a tile must still draw");
+        for column in [(6, -4), (7, -4), (6, -3), (7, -3)] {
+            cutout.insert(column);
+        }
+        assert!(cut_out(two, &cutout), "all four columns are resident");
+        assert!(
+            !cut_out(one, &FxHashSet::default()),
+            "no cutout draws everything"
+        );
+    }
 
     #[test]
     fn tiles_fade_in_on_their_own_grid() {

@@ -50,10 +50,10 @@ impl MappedFile {
             // documented caller contract still forbids truncating the file while
             // the mapping exists.
             let map = unsafe { MmapOptions::new().map_copy_read_only(&file)? };
-            return Ok(Self {
+            Ok(Self {
                 path,
                 bytes: Bytes::Map(map),
-            });
+            })
         }
         #[cfg(target_arch = "wasm32")]
         {

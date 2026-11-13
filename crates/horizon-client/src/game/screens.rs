@@ -24,6 +24,7 @@ impl Screen {
             | Self::Advancements
             | Self::WorldOptions
             | Self::Friends
+            | Self::Nearby
             | Self::ServerLinks
             | Self::ConfirmLink
             | Self::DialogWarning
@@ -120,6 +121,8 @@ fn pause_buttons(
 /// `ConfirmLinkScreen`; player reporting (`SocialInteractionsScreen`, not
 /// ported) stays inactive.
 const FRIENDS_ICON: usize = 2;
+/// The Play Nearby icon, after vanilla's player reporting.
+const NEARBY_ICON: usize = 4;
 /// `CommonLinks.SNAPSHOT_BUGS_FEEDBACK`, behind `PauseScreen.REPORT_BUGS`.
 const BUGS_LINK: &str = "https://aka.ms/snapshotbugs?ref=game";
 /// `CommonLinks.RELEASE_FEEDBACK` / `SNAPSHOT_FEEDBACK`, by `WorldVersion.stable()`.
@@ -131,11 +134,12 @@ fn feedback_link() -> &'static str {
     }
 }
 /// `PauseScreen.createPauseMenu`'s icon tooltips (`SpriteIconButton.withTootip`).
-const ICON_LABELS: [&str; 4] = [
+const ICON_LABELS: [&str; 5] = [
     "menu.reportBugs",
     "menu.sendFeedback",
     "gui.friends.open",
     "menu.playerReporting",
+    "nearby.title",
 ];
 /// Whether an icon button is active: `reportBugsButton.active =
 /// !dataVersion().isSideSeries()` (26.3 is the `main` series), the feedback
@@ -143,14 +147,18 @@ const ICON_LABELS: [&str; 4] = [
 fn icon_active(icon: usize, friends: bool) -> bool {
     match icon {
         0 | 1 => true,
-        FRIENDS_ICON => friends,
+        FRIENDS_ICON | NEARBY_ICON => friends,
         _ => false,
     }
 }
 fn pause_icon_focus_ids(friends: bool) -> Vec<u8> {
-    (0..4)
+    (0..5)
         .filter(|&i| icon_active(i, friends))
-        .map(|i| if i == FRIENDS_ICON { 10 } else { 12 + i as u8 })
+        .map(|i| match i {
+            FRIENDS_ICON => 10,
+            NEARBY_ICON => 15,
+            _ => 12 + i as u8,
+        })
         .collect()
 }
 const SPLIT_SETTINGS: &str = "horizon.pages.split_settings";
@@ -160,7 +168,7 @@ fn pause_icons(
     links: bool,
     additions: bool,
     split: bool,
-) -> [(f32, f32, &'static str); 4] {
+) -> [(f32, f32, &'static str); 5] {
     let (x0, y0) = pause_grid(w, h, u8::from(links || additions) + u8::from(split));
     let (x0, y) = (x0 + 60.0, y0 + 98.0);
     [
@@ -168,6 +176,7 @@ fn pause_icons(
         (x0 + 24.0, y, "gui/sprites/pause_menu/social_interactions"),
         (x0 + 48.0, y, "gui/sprites/friends/friends"),
         (x0 + 72.0, y, "gui/sprites/pause_menu/player_reporting"),
+        (x0 + 96.0, y, "gui/sprites/pause_menu/social_interactions"),
     ]
 }
 /// DeathScreen.init: a hardcore player can only spectate.
@@ -278,6 +287,7 @@ impl Game<'_> {
         {
             let active = icon_active(i, friends);
             let is_focused = (self.pause_focus == Some(10) && i == FRIENDS_ICON)
+                || (self.pause_focus == Some(15) && i == NEARBY_ICON)
                 || (self.pause_focus == Some(12 + i as u8));
             let hover = active && (ui::hovered(self.cursor, x, y, 20.0, 20.0) || is_focused);
             // The icon has no label: name it for controller focus and the
@@ -285,6 +295,12 @@ impl Game<'_> {
             if i == FRIENDS_ICON {
                 horizon_client::widgets::record(
                     horizon_client::friends_screen::TITLE,
+                    [x, y, 20.0, 20.0],
+                    active,
+                );
+            } else if i == NEARBY_ICON {
+                horizon_client::widgets::record(
+                    horizon_client::nearby_screen::TITLE,
                     [x, y, 20.0, 20.0],
                     active,
                 );
@@ -309,10 +325,13 @@ impl Game<'_> {
                     "menu.sendFeedback",
                     "",
                     "menu.playerReporting",
+                    "",
                 ][i];
                 *n = if i == FRIENDS_ICON {
                     widgets::Narratable::named(t("gui.friends.open.narration"), n.rect, active)
                         .hint(t("gui.friends.open.tooltip"))
+                } else if i == NEARBY_ICON {
+                    widgets::Narratable::named(horizon_client::nearby_screen::TITLE, n.rect, active)
                 } else {
                     widgets::Narratable::button(t(key), n.rect, active).hint(t(key))
                 }
@@ -325,6 +344,8 @@ impl Game<'_> {
             if hover {
                 tooltip = Some(if i == FRIENDS_ICON {
                     Text::literal(horizon_client::friends_screen::TITLE)
+                } else if i == NEARBY_ICON {
+                    Text::literal(horizon_client::nearby_screen::TITLE)
                 } else {
                     Text::translate(ICON_LABELS[i], &[])
                 });
@@ -353,6 +374,7 @@ impl Game<'_> {
             4 => self.open_advancements(true),
             9 => self.open_world_options(),
             10 => self.screen = Screen::Friends,
+            15 => self.screen = Screen::Nearby,
             // DialogConnectionAccess.openDialog(Dialogs.SERVER_LINKS).
             11 => {
                 self.links_ui.scroll = 0.0;
@@ -390,6 +412,7 @@ impl Game<'_> {
         let additions = self.pause_screen_additions();
         let icons = pause_icons(w, h, links, additions.is_some(), self.options.split_guest);
         let friends = icons[FRIENDS_ICON];
+        let nearby = icons[NEARBY_ICON];
         let hit = pause_buttons(
             w,
             h,
@@ -411,6 +434,10 @@ impl Game<'_> {
             (self.friends_view().shown
                 && ui::hovered(self.cursor, friends.0, friends.1, 20.0, 20.0))
             .then_some(10)
+        })
+        .or_else(|| {
+            (self.friends_view().shown && ui::hovered(self.cursor, nearby.0, nearby.1, 20.0, 20.0))
+                .then_some(15)
         });
         if let Some(id) = hit {
             self.pause_focus = Some(id);
@@ -502,7 +529,11 @@ impl Game<'_> {
                 .enumerate()
                 {
                     if icon_active(i, friends) {
-                        let id = if i == FRIENDS_ICON { 10 } else { 12 + i as u8 };
+                        let id = match i {
+                            FRIENDS_ICON => 10,
+                            NEARBY_ICON => 15,
+                            _ => 12 + i as u8,
+                        };
                         rects.push((id, x, y, 20.0));
                     }
                 }
@@ -924,7 +955,7 @@ mod tests {
     #[test]
     fn pause_keyboard_focus_includes_the_active_icon_buttons() {
         assert_eq!(pause_icon_focus_ids(false), [12, 13]);
-        assert_eq!(pause_icon_focus_ids(true), [12, 13, 10]);
+        assert_eq!(pause_icon_focus_ids(true), [12, 13, 10, 15]);
     }
 
     #[test]

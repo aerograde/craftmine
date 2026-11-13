@@ -11,6 +11,10 @@ export function horizon_console(level, message) {
     else console.log(message);
 }
 
+export function horizon_js_stack() {
+    try { throw new Error("stack"); } catch (e) { return (e && e.stack) || ""; }
+}
+
 let wantLock = false;
 let lostLock = false;
 let hooked = null;
@@ -93,6 +97,8 @@ extern "C" {
     fn horizon_pick_file(kind: &str, accept: &str);
     fn horizon_take_picked() -> JsValue;
     fn horizon_console(level: u32, message: &str);
+    /// The browser's stack for this point, with the wasm frames' names.
+    pub fn horizon_js_stack() -> String;
     fn horizon_pointer_lock(want: bool);
     fn horizon_pointer_lock_lost() -> bool;
     fn horizon_pointer_locked() -> bool;

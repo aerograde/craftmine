@@ -13,6 +13,7 @@ mod windows;
 
 /// A platform's speech (`NarratorWindows`, `NarratorMac`, `NarratorLinux`),
 /// used only on the thread that opened it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub trait Speech {
     /// `say`: `interrupt` drops what is queued and cuts off what is being said.
     fn say(&mut self, message: &str, interrupt: bool, volume: f32);
@@ -25,6 +26,7 @@ pub trait Speech {
 
 /// `Narrator.getNarrator`: the platform's speech, or why there is none
 /// (`Narrator.EMPTY`).
+#[cfg(not(target_arch = "wasm32"))]
 fn open() -> Result<Box<dyn Speech>, String> {
     #[cfg(windows)]
     return windows::Sapi::open().map(|s| Box::new(s) as Box<dyn Speech>);
@@ -37,12 +39,15 @@ fn open() -> Result<Box<dyn Speech>, String> {
 }
 
 /// Speech that is there but makes no sound (`HORIZON_NO_AUDIO`).
+#[cfg(not(target_arch = "wasm32"))]
 struct Silent;
+#[cfg(not(target_arch = "wasm32"))]
 impl Speech for Silent {
     fn say(&mut self, _: &str, _: bool, _: f32) {}
     fn clear(&mut self) {}
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Command {
     Say(String, bool, f32),
     Clear,
@@ -57,6 +62,18 @@ pub(crate) struct Thread {
 }
 
 impl Thread {
+    /// The page has no native speech library, and may not start the thread:
+    /// its narrator stays inactive.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn spawn(_silent: bool) -> Thread {
+        let (commands, _) = mpsc::channel();
+        Thread {
+            commands,
+            opened: None,
+            active: false,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn spawn(silent: bool) -> Thread {
         let (commands, receive) = mpsc::channel();
         let (opened, ready) = mpsc::channel();
@@ -74,6 +91,7 @@ impl Thread {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run(silent: bool, opened: &Sender<bool>, commands: &Receiver<Command>) {
     let mut speech: Box<dyn Speech> = if silent {
         Box::new(Silent)

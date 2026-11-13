@@ -4,6 +4,7 @@
 *.py[cod]
 /.venv/
 # Downloaded/decompiled game content and private profiling artifacts.
+client_secret_*.json
 *.jar
 *.class
 *.jfr

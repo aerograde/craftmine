@@ -100,10 +100,18 @@ impl Stage<'_> {
         let mut hidden: Vec<&str> = Vec::new();
         let mut depth = 0;
         let mut skip_until = 0;
+        // Code after `return`/`discard` is dead in GLSL but naga keeps its expressions and
+        // rejects them at validation ("Expression not visited"). Blank the rest of the
+        // enclosing block, line for line.
+        let mut dead: Vec<(usize, usize)> = Vec::new();
         let next = |i: usize| (i + 1..self.tokens.len()).find(|&j| significant(self.tokens[j]));
         let prev = |i: usize| (0..i).rev().find(|&j| significant(self.tokens[j]));
         for (i, &t) in self.tokens.iter().enumerate() {
             if i < skip_until {
+                continue;
+            }
+            if dead.iter().any(|&(from, to)| i > from && i < to) {
+                out.extend(t.chars().filter(|&c| c == '\n'));
                 continue;
             }
             if let Some(text) = self.replaced.get(&i) {
@@ -140,6 +148,76 @@ impl Stage<'_> {
                 continue;
             }
             let called = next(i).is_some_and(|j| self.tokens[j] == "(");
+            // A terminator: everything after its `;` to the end of this block is dead.
+            // Only a return that is a statement of a braced block: one that is an `if`'s
+            // unbraced body (`if (x) return y;`) says nothing about the code after the `if`,
+            // and a case of a `switch` leaves the following cases reachable.
+            let mut enclosing_brace = None;
+            let mut level = 0i32;
+            for j in (0..i).rev() {
+                match self.tokens[j] {
+                    "}" => level += 1,
+                    "{" if level == 0 => {
+                        enclosing_brace = Some(j);
+                        break;
+                    }
+                    "{" => level -= 1,
+                    _ => {}
+                }
+            }
+            let mut in_switch = false;
+            if let Some(open) = enclosing_brace {
+                for j in (0..open).rev() {
+                    match self.tokens[j] {
+                        "switch" => {
+                            in_switch = true;
+                            break;
+                        }
+                        "{" | "}" | ";" => break,
+                        _ => {}
+                    }
+                }
+            }
+            let block_statement = !in_switch
+                && prev(i).is_some_and(|j| matches!(self.tokens[j], "{" | ";" | "}" | ":"));
+            if (t == "return" || t == "discard") && !called && block_statement {
+                let (mut parens, mut brackets, mut braces) = (0i32, 0i32, 0i32);
+                let mut end = i;
+                for (j, &u) in self.tokens.iter().enumerate().skip(i + 1) {
+                    match u {
+                        "(" => parens += 1,
+                        ")" => parens -= 1,
+                        "[" => brackets += 1,
+                        "]" => brackets -= 1,
+                        "{" => braces += 1,
+                        "}" => braces -= 1,
+                        ";" if parens == 0 && brackets == 0 && braces == 0 => {
+                            end = j;
+                            break;
+                        }
+                        _ => {}
+                    }
+                    end = j;
+                }
+                if end > i {
+                    let mut level = 0i32;
+                    let mut close = end;
+                    for (j, &u) in self.tokens.iter().enumerate().skip(end + 1) {
+                        match u {
+                            "{" => level += 1,
+                            "}" if level == 0 => {
+                                close = j;
+                                break;
+                            }
+                            "}" => level -= 1,
+                            _ => {}
+                        }
+                    }
+                    if close > end {
+                        dead.push((end, close));
+                    }
+                }
+            }
             match t {
                 "{" => depth += 1,
                 "}" => {
@@ -299,7 +377,18 @@ impl Stage<'_> {
                 _ if !fragment && VERTEX_INPUTS.iter().any(|b| t.starts_with(b)) => {
                     Some(format!("hz_{}", &t[3..]))
                 }
-                _ if old && LATER_KEYWORDS.contains(&t) => Some(format!("hz_kw_{t}")),
+                // `layout(std430) buffer Name { ... }` is the storage-block keyword, not an
+                // old pack's variable named `buffer`: keep it for naga.
+                _ if old
+                    && LATER_KEYWORDS.contains(&t)
+                    && !(t == "buffer"
+                        && next(i).is_some_and(|j| {
+                            is_ident(self.tokens[j])
+                                && next(j).is_some_and(|k| self.tokens[k] == "{")
+                        })) =>
+                {
+                    Some(format!("hz_kw_{t}"))
+                }
                 _ => None,
             };
             out.push_str(replaced.as_deref().unwrap_or(t));

@@ -400,7 +400,7 @@ pub(super) fn stage_pack(
     progress.set(1);
     // The world's models and sprites and the GUI atlas read the same root and nothing of
     // each other: about a second each, side by side.
-    let (render, atlas, panorama) = std::thread::scope(|s| {
+    let (render, atlas, panorama) = horizon_os::thread::scope(|s| {
         let atlas =
             s.spawn(|| HudAtlas::build_over(&root, vanilla_root).map_err(|e| e.to_string()));
         let panorama = s.spawn(|| horizon_client::gfx::panorama::Faces::load(&root));

@@ -18,12 +18,18 @@ pub trait SpawnLevel {
 /// the block above the column's top full-topped collision, unless water,
 /// lava or only non-colliding blocks are on top.
 pub fn level_respawn_pos(level: &impl SpawnLevel, x: i32, z: i32) -> Option<[i32; 3]> {
-    let top = level.height(HeightmapType::MotionBlocking, x, z);
+    let top = level.height(HeightmapType::MotionBlockingNoLeaves, x, z);
     if top < level.min_y() {
         return None;
     }
     let surface = level.height(HeightmapType::WorldSurface, x, z);
     if surface <= top && surface > level.height(HeightmapType::OceanFloor, x, z) {
+        return None;
+    }
+    // The player's box is two blocks: a leaf canopy or a trunk over the
+    // ground (the no-leaves heightmap still has the ground) must not put the
+    // camera inside a block.
+    if level.top_face_full(x, top, z) || level.top_face_full(x, top + 1, z) {
         return None;
     }
     for y in (level.min_y()..=top + 1).rev() {

@@ -248,10 +248,16 @@ async function served() {
 
 async function main() {
     if (!(await webgpu())) return;
-    const { glue, tar, manifest, base } = await (globalThis.horizonOffline ?? served)();
+    const { glue, tar, packs, manifest, base } = await (globalThis.horizonOffline ?? served)();
     status.textContent = "Installing resources…";
+    // The single-file archive can be large: let the status paint before the
+    // copy into the virtual filesystem blocks this thread.
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
     const t0 = performance.now();
     const installed = glue.horizon_install_tar(ROOT, tar);
+    // The single file's shader packs install at the game root, where the
+    // shader-pack list scans `/shaderpacks`.
+    if (packs) glue.horizon_install_tar("/", packs);
     glue.horizon_install_manifest(ROOT, base, manifest);
     console.log(`Horizon: ${installed} files installed in ${Math.round(performance.now() - t0)} ms`);
 
@@ -265,6 +271,26 @@ async function main() {
             if (document.hidden) saveChanges(glue, root);
         });
         addEventListener("pagehide", () => saveChanges(glue, root));
+    }
+
+    // The Visual Vibrance reference pack (Iris/OptiFine format) ships with the
+    // dev build so the game can be compared against the actual reference, not a
+    // built-in impression of it. It appears in Shader Packs and is not selected
+    // unless the player picks it. The single-file build has its packs inside its
+    // own resources instead (web/package.py single).
+    if (!globalThis.horizonOffline) {
+        try {
+            const pack = await fetch("packs/Visual-Vibrance-v0.3.5a.zip");
+            if (pack.ok) {
+                glue.horizon_install_saved_file(
+                    "shaderpacks/Visual-Vibrance-v0.3.5a.zip",
+                    new Uint8Array(await pack.arrayBuffer()),
+                    Date.now(),
+                );
+            }
+        } catch (e) {
+            console.warn(`Horizon: reference shader pack not installed: ${e}`);
+        }
     }
 
     status.textContent = "Loading resources…";
@@ -307,7 +333,9 @@ main().catch((e) => {
     reset.onclick = async () => {
         reset.disabled = true;
         try {
-            if ("serviceWorker" in navigator) {
+            // The single file may be served by its launcher's worker: unregistering
+            // that would leave __horizon.html with nothing to serve it.
+            if ("serviceWorker" in navigator && !globalThis.horizonOffline) {
                 const registrations = await navigator.serviceWorker.getRegistrations();
                 await Promise.all(registrations.map((registration) => registration.unregister()));
             }

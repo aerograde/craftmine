@@ -1,0 +1,20 @@
+[package]
+name = "horizon-webrtc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.89"
+description = "A blocking WebRTC data channel for Horizon: str0m driven on its own thread, carried as a byte stream"
+
+[dependencies]
+horizon-os = { path = "../horizon-os" }
+horizon-friends = { path = "../horizon-friends" }
+# Sans-IO WebRTC: ICE, DTLS, SCTP data channels. RustCrypto keeps the build
+# free of a C toolchain, matching the rest of the client.
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"] }
+serde_json = "1.0.151"
+getrandom = "0.3"
+log = "0.4"
+
+[lints]
+workspace = true

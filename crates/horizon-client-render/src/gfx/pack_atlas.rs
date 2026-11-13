@@ -116,7 +116,8 @@ impl PackAtlas {
 /// A `TerrainVertex` of flat draws' arena page (`hz_vertices`, six words each) into the vertex
 /// inputs, for vertex `hz_vertex_index`.
 pub const PULL: &str = "        uint hz_pw = hz_vertex_index * 6u;\n        \
-    hz_v_pos = uintBitsToFloat(uvec3(hz_vertices[hz_pw], hz_vertices[hz_pw + 1u], hz_vertices[hz_pw + 2u]));\n        \
+    vec3 hz_pull_pos = uintBitsToFloat(uvec3(hz_vertices[hz_pw], hz_vertices[hz_pw + 1u], hz_vertices[hz_pw + 2u]));\n        \
+    hz_v_pos = uvec4(uvec3(round((hz_pull_pos - vec3(-8.0)) * 2048.0)), 0u);\n        \
     hz_v_uv = uvec2(hz_vertices[hz_pw + 3u] & 65535u, hz_vertices[hz_pw + 3u] >> 16u);\n        \
     hz_v_layer = hz_vertices[hz_pw + 4u] & 65535u;\n        \
     uint hz_pl = hz_vertices[hz_pw + 4u] >> 16u;\n        \
@@ -150,11 +151,11 @@ const FACE: &str = "    uint hz_q = (uint(gl_VertexIndex) & ~3u) * 6u;\n    \
 impl PackAtlas {
     /// The vertex inputs of a gbuffers program drawing terrain (`TerrainVertex`, terrain.wgsl's
     /// `vs_terrain` or, for `flat` draws, `vs_terrain_flat`), in atlas coordinates.
-    pub fn terrain_inputs(&self, flat: bool) -> horizon_shaders::GbuffersInputs {
+    pub fn terrain_inputs(&self, flat: bool, far_lod: bool) -> horizon_shaders::GbuffersInputs {
         let mut declarations = String::from(
-            "layout(location = 0) in vec3 hz_v_pos;\nlayout(location = 1) in uvec2 hz_v_uv;\n\
-             layout(location = 2) in uint hz_v_layer;\nlayout(location = 3) in vec4 hz_v_color;\n\
-             layout(location = 4) in uvec2 hz_v_light;\n",
+            "layout(location = 0) in uvec4 hz_v_pos;\nlayout(location = 1) in uvec2 hz_v_uv;\n\
+             layout(location = 2) in uint hz_v_layer;\nlayout(location = 4) in uvec2 hz_v_light;\n\
+             layout(location = 3) in vec4 hz_v_color;\n",
         );
         let origin = if flat {
             declarations.push_str(
@@ -180,13 +181,21 @@ impl PackAtlas {
         let columns = self.columns;
         // UVs past a sprite (models up to 2, distant tiles) cannot repeat in an atlas: clamped.
         // The colour's alpha holds HDR's emission level (`mesher::EMISSION_BITS`): packs get 1.
+        // `TerrainVertex` (mesher.rs, terrain.wgsl's `vs_terrain`): a section vertex is
+        // 1/2048-block fixed point with tag 0; a distant tile is 1/16-block with tag 1 or
+        // 1/128-block with tag 2, all from -64. The raw vertex is the game's buffer, so the
+        // declarations above must be its formats (`Uint16x4`, ..., `Unorm8x4`).
         let body = format!(
             "    vec4 hz_origin = {origin};\n    \
+             float hz_pos_scale = hz_v_pos.w == 2u ? (1.0 / 128.0) : (hz_v_pos.w == 1u ? 16.0 : 2048.0);\n    \
+             float hz_pos_min = (hz_v_pos.w == 1u || hz_v_pos.w == 2u) ? -64.0 : -8.0;\n    \
+             vec3 hz_pos = vec3(hz_v_pos.xyz) / hz_pos_scale + hz_pos_min;\n    \
+             float hz_uv_scale = hz_v_pos.w == 0u ? 32768.0 : 32.0;\n    \
              uint hz_layer = hz_v_layer & 32767u;\n    \
              hz_cell = vec2(float(hz_layer % {columns}u), float(hz_layer / {columns}u));\n    \
              hz_scale = vec2({:?}, {:?});\n    \
-             hz_Vertex = vec4(hz_v_pos + hz_origin.xyz, 1.0);\n    \
-             hz_MultiTexCoord0 = vec4((hz_cell + clamp(vec2(hz_v_uv) * (hz_origin.w > 0.0 ? uintBitsToFloat(floatBitsToUint(hz_origin.w) & 0xff800000u) : fract(abs(hz_origin.w))), 0.0, 1.0)) * hz_scale, 0.0, 1.0);\n    \
+             hz_Vertex = vec4(hz_pos + hz_origin.xyz, 1.0);\n    \
+             hz_MultiTexCoord0 = vec4((hz_cell + clamp((vec2(hz_v_uv) / hz_uv_scale) * (hz_origin.w > 0.0 ? uintBitsToFloat(floatBitsToUint(hz_origin.w) & 0xff800000u) : fract(abs(hz_origin.w))), 0.0, 1.0)) * hz_scale, 0.0, 1.0);\n    \
              hz_MultiTexCoord1 = vec4(float(hz_v_light.y), float(hz_v_light.x), 0.0, 1.0);\n    \
              hz_MultiTexCoord2 = hz_MultiTexCoord1;\n    \
              hz_Color = vec4(hz_v_color.rgb, 1.0);\n    \
@@ -204,34 +213,52 @@ impl PackAtlas {
         } else {
             "vec4(-1.0, -1.0, 0.0, 0.0)"
         };
+        // Distant LOD tiles (the mesher sets 0x4000 on their layer) get a material id the
+        // gbuffer's cheap path recognises, so the pack does not run its full PBR/parallax path
+        // on thousands of far tiles.
+        let entity = if far_lod {
+            format!("((hz_v_layer & 0x4000u) != 0u ? vec4(4000.0, 0.0, 0.0, 0.0) : {entity})")
+        } else {
+            entity.to_owned()
+        };
+        let fragment_before = if far_lod {
+            "    if (materialID >= 4000) {\n        \
+             color = vec4(glcolor.rgb, 1.0);\n        \
+             outData1 = vec4(encodeNormal(vec3(0.0, 1.0, 0.0)), lmcoord.y, 0.0);\n        \
+             return;\n    }\n"
+                .to_owned()
+        } else {
+            String::new()
+        };
         // The block a face belongs to: half a block behind its centre (the quad's diagonal).
         let mid_block = if flat {
-            "vec4((floor((hz_p0 + hz_p2) * 0.5 - 0.5 * hz_Normal) + 0.5 - hz_v_pos) * 64.0, 0.0)"
+            "vec4((floor((hz_p0 + hz_p2) * 0.5 - 0.5 * hz_Normal) + 0.5 - hz_pos) * 64.0, 0.0)"
         } else {
             "vec4(0.0)"
         };
         let attributes = [
             ("mc_Entity", entity),
-            ("at_midBlock", mid_block),
+            ("at_midBlock", mid_block.to_owned()),
             (
                 "mc_midTexCoord",
-                "vec4((hz_cell + 0.5) * hz_scale, 0.0, 1.0)",
+                "vec4((hz_cell + 0.5) * hz_scale, 0.0, 1.0)".to_owned(),
             ),
-            ("at_tangent", "hz_tangent"),
-            ("vaPosition", "hz_Vertex.xyz"),
-            ("vaUV0", "hz_MultiTexCoord0.xy"),
-            ("vaUV2", "hz_MultiTexCoord1.xy"),
-            ("vaColor", "hz_Color"),
-            ("vaNormal", "hz_Normal"),
+            ("at_tangent", "hz_tangent".to_owned()),
+            ("vaPosition", "hz_Vertex.xyz".to_owned()),
+            ("vaUV0", "hz_MultiTexCoord0.xy".to_owned()),
+            ("vaUV2", "hz_MultiTexCoord1.xy".to_owned()),
+            ("vaColor", "hz_Color".to_owned()),
+            ("vaNormal", "hz_Normal".to_owned()),
         ];
         horizon_shaders::GbuffersInputs {
             declarations,
             body,
             attributes: attributes
                 .iter()
-                .map(|&(n, v)| (n.to_owned(), v.to_owned()))
+                .map(|(n, v)| ((*n).to_owned(), v.clone()))
                 .collect(),
             after: String::new(),
+            fragment_before,
             alpha_test: None,
         }
     }

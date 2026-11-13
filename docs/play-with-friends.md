@@ -6,6 +6,10 @@ Connection takes a full code too; or on the launcher's Play page) and join.
 There is no Horizon server in the middle and no account: the code itself says where the host is and
 holds the key that encrypts the game between them.
 
+For players on the same network, [Play Nearby](nearby.md) needs no code: they find the
+world, ask to join, and play over WebRTC. This invite-code path is for friends who are not on that
+network (and the fallback when a NAT cannot be crossed).
+
 It is built on Open to LAN: the integrated server (`crates/horizon-client/src/lan`) listens on a local
 TCP port and speaks the vanilla protocol. Play with friends puts an encrypted tunnel in front of that
 port. Neither the integrated server nor the guest's client changes: the tunnel carries exactly the

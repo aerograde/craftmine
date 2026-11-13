@@ -293,15 +293,13 @@ impl Walker<'_> {
             | "minecraft:fireball"
             | "minecraft:small_fireball"
             | "minecraft:snowball"
-            | "minecraft:wither_skull" => {
-                if blocks_as_names {
-                    self.field(Ty::BlockName, v, "inTile");
-                }
+            | "minecraft:wither_skull"
+                if blocks_as_names =>
+            {
+                self.field(Ty::BlockName, v, "inTile");
             }
-            "minecraft:xp_bottle" if !renamed => {
-                if blocks_as_names {
-                    self.field(Ty::BlockName, v, "inTile");
-                }
+            "minecraft:xp_bottle" if !renamed && blocks_as_names => {
+                self.field(Ty::BlockName, v, "inTile");
             }
             "minecraft:potion" => {
                 self.field(Ty::ItemStack, v, "Potion");

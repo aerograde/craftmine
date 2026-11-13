@@ -163,7 +163,7 @@ fn scene(
             let vertices: Vec<Value> = quad
                 .iter()
                 .map(|v| {
-                    let ([x, y, z], [u, w]) = (v.pos, v.uv());
+                    let ([x, y, z], [u, w]) = (v.position(), v.uv());
                     json!([
                         x,
                         y,

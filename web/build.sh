@@ -65,14 +65,20 @@ if [ "$profile" = release ] && [ "${WASM_OPT:-1}" != 0 ]; then
     fi
 fi
 cp web/index.html web/main.js web/audio.js web/worker.js web/sw.js "$dist/"
+if compgen -G "web/packs/*.zip" > /dev/null; then
+    mkdir -p "$dist/packs"
+    cp web/packs/*.zip "$dist/packs/"
+fi
 
-[ "${BUNDLE:-1}" = 0 ] && { ls -l "$dist/pkg"/*.wasm; exit 0; }
-if [ ! -f "$dist/fs/boot.tar.gz" ] || [ "$resources/horizon-resources.json" -nt "$dist/fs/boot.tar.gz" ] \
-    || [ web/bundle.py -nt "$dist/fs/boot.tar.gz" ]; then
+if [ "${BUNDLE:-1}" != 0 ] && { [ ! -f "$dist/fs/boot.tar.gz" ] \
+    || [ "$resources/horizon-resources.json" -nt "$dist/fs/boot.tar.gz" ] \
+    || [ web/bundle.py -nt "$dist/fs/boot.tar.gz" ]; }; then
     python3 web/bundle.py "$resources" "$dist/fs"
 fi
 # The large files' content hashes: the page asks for them with these, so the
-# service worker (sw.js) can keep them until they change.
+# service worker (sw.js) can keep them until they change. Written for a
+# BUNDLE=0 build too, or the page would keep fetching the previous module from
+# the service worker's cache under its old hash.
 python3 - "$dist" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
@@ -83,7 +89,9 @@ def digest(rel):
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()[:16]
-files = {rel: digest(rel) for rel in ("pkg/horizon-client_bg.wasm", "fs/boot.tar.gz")}
+files = {rel: digest(rel) for rel in
+         ("pkg/horizon-client_bg.wasm", "pkg-st/horizon-client_bg.wasm", "fs/boot.tar.gz")
+         if (dist / rel).is_file()}
 (dist / "build.json").write_text(json.dumps(files) + "\n")
 PY
 ls -l "$dist/pkg"/*.wasm

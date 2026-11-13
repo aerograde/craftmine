@@ -6,11 +6,11 @@
 //! names, UUIDs or addresses, no seed and no world name.
 use super::super::{Dim, Game};
 use horizon_client::spans::{self, Span};
+use horizon_os::time::{Duration, Instant};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
 };
 
 /// The longest window a report records.

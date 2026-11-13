@@ -18,7 +18,7 @@
 //! Composite-style programs draw one quad from (0,0) to (1,1) with an identity model-view and an
 //! orthographic projection onto it, the texture coordinate equal to the position (OQ-6).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 
 use naga::ShaderStage;
@@ -146,6 +146,9 @@ pub struct GbuffersInputs {
     pub attributes: Vec<(String, String)>,
     /// GLSL statements run last in `main`, with `gl_Position` in wgpu's clip space.
     pub after: String,
+    /// GLSL statements run first in the fragment's `main`, before the pack's `hz_main`; they
+    /// may `return` (a cheap path for geometry the pack's material code is too heavy for).
+    pub fragment_before: String,
     /// The alpha test applied to output 0 (`gl_FragData[0]`, `gl_FragColor`), the loader's
     /// (3.2 `alphaTest.<program>`): `None` keeps every fragment.
     pub alpha_test: Option<AlphaTest>,
@@ -211,7 +214,9 @@ pub fn translate_shadow(
     fragment: &Preprocessed,
     inputs: &GbuffersInputs,
 ) -> Result<Program, Vec<Error>> {
-    translate(vertex, fragment, Target::Buffers, Some(inputs), true)
+    let mut inputs = inputs.clone();
+    inputs.fragment_before.clear();
+    translate(vertex, fragment, Target::Buffers, Some(&inputs), true)
 }
 
 /// The matrices of the compatibility profile in a gbuffers-style program, from the frame's.
@@ -291,7 +296,7 @@ fn translate(
             }
         }
     }
-    let samplers: Vec<Sampler> = samplers
+    let mut samplers: Vec<Sampler> = samplers
         .into_iter()
         .enumerate()
         .map(|(i, (name, ty))| Sampler {
@@ -457,6 +462,9 @@ fn translate(
     for name in &f.inits {
         writeln!(fragment_main, "    {name} = hz_init_{name}();").unwrap();
     }
+    if let Some(g) = gbuffers {
+        fragment_main.push_str(&g.fragment_before);
+    }
     fragment_main.push_str("    hz_main();\n");
     for copy in &f.out_copies {
         writeln!(fragment_main, "    {copy}").unwrap();
@@ -517,6 +525,10 @@ fn translate(
     let mut images = images;
     mark_atomic(&vertex, &mut images);
     mark_atomic(&fragment, &mut images);
+    let mut used = used_global_bindings(&vertex);
+    used.extend(used_global_bindings(&fragment));
+    images.retain(|i| used.contains(&i.binding));
+    samplers.retain(|s| used.contains(&s.binding) || used.contains(&(s.binding + 1)));
     Ok(Program {
         interface: Interface {
             uniform_size,
@@ -530,6 +542,67 @@ fn translate(
         vertex,
         fragment,
     })
+}
+
+/// The bindings of the module's globals its entry points actually use. A global a pack only
+/// declares (its shared header declares every sampler and image) is not a resource of the
+/// program: keeping it would overflow WebGPU's per-stage sampled-texture limit and declare an
+/// unsupported read-write storage texture, either of which makes the pipeline invalid.
+fn used_global_bindings(module: &naga::Module) -> HashSet<u32> {
+    fn calls(block: &naga::Block, out: &mut Vec<naga::Handle<naga::Function>>) {
+        for statement in block.iter() {
+            match statement {
+                naga::Statement::Block(inner) => calls(inner, out),
+                naga::Statement::If { accept, reject, .. } => {
+                    calls(accept, out);
+                    calls(reject, out);
+                }
+                naga::Statement::Switch { cases, .. } => {
+                    for case in cases {
+                        calls(&case.body, out);
+                    }
+                }
+                naga::Statement::Loop {
+                    body, continuing, ..
+                } => {
+                    calls(body, out);
+                    calls(continuing, out);
+                }
+                naga::Statement::Call { function, .. } => out.push(*function),
+                _ => {}
+            }
+        }
+    }
+    let Ok(info) = Validator::new(ValidationFlags::all(), Capabilities::all()).validate(module)
+    else {
+        // Cannot happen for a module `compile` accepted; keep every binding if it does.
+        return module
+            .global_variables
+            .iter()
+            .filter_map(|(_, global)| global.binding.map(|binding| binding.binding))
+            .collect();
+    };
+    let mut used = vec![false; module.global_variables.len()];
+    let mut seen = vec![false; module.functions.len()];
+    for entry in &module.entry_points {
+        let mut stack = Vec::new();
+        calls(&entry.function.body, &mut stack);
+        while let Some(handle) = stack.pop() {
+            if std::mem::replace(&mut seen[handle.index()], true) {
+                continue;
+            }
+            for (global, use_) in info[handle].global_uses.iter().enumerate() {
+                used[global] |= !use_.is_empty();
+            }
+            calls(&module.functions[handle].body, &mut stack);
+        }
+    }
+    module
+        .global_variables
+        .iter()
+        .filter(|(handle, _)| used[handle.index()])
+        .filter_map(|(_, global)| global.binding.map(|binding| binding.binding))
+        .collect()
 }
 
 /// Images an atomic function uses (naga gave them atomic access) are bound for atomics.
@@ -725,6 +798,17 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
         buffers: c.buffers.iter().copied().collect(),
     };
     mark_atomic(&module, &mut interface.images);
+    // A declared image the shader never reads or writes needs no binding. Dropping it matters on
+    // WebGPU, which refuses a read-write storage texture this device doesn't support even when
+    // the program only declares it (the Visual Vibrance `prepare2` declares its floodfill voxel
+    // map and never touches it).
+    let used = used_global_bindings(&module);
+    interface
+        .images
+        .retain(|i| i.before.is_some() || used.contains(&i.binding));
+    interface
+        .samplers
+        .retain(|s| used.contains(&s.binding) || used.contains(&(s.binding + 1)));
     Ok(ComputeProgram {
         module,
         interface,
@@ -1006,7 +1090,7 @@ fn compile(stage: &Stage, text: &str, header_lines: usize) -> Result<naga::Modul
     // integer literals. Each refusal is rewritten where naga points, and the source parsed again.
     let mut text = std::borrow::Cow::Borrowed(text);
     let mut tries = 0;
-    let module = loop {
+    let mut module = loop {
         tries += 1;
         match Frontend::default().parse(&Options::from(stage.kind), &text) {
             Ok(m) => break m,
@@ -1018,6 +1102,13 @@ fn compile(stage: &Stage, text: &str, header_lines: usize) -> Result<naga::Modul
             },
         }
     };
+    // GLSL falls through a case that does not end in `break`; WGSL does not, and
+    // the web backend writes this module as WGSL. Naga's GLSL frontend clears
+    // `fall_through` only for a case ending in `break`, not for `return`,
+    // `discard` or `continue`, which leave the case just as definitely. Clearing
+    // those keeps the IR's meaning for every backend and lets the web build
+    // compile the same programs.
+    clear_unreachable_fall_through(&mut module);
     Validator::new(ValidationFlags::all(), Capabilities::all())
         .subgroup_operations(naga::valid::SubgroupOperationSet::all())
         .subgroup_stages(naga::valid::ShaderStages::all())
@@ -1035,6 +1126,65 @@ fn compile(stage: &Stage, text: &str, header_lines: usize) -> Result<naga::Modul
             vec![at(&text, span, message)]
         })?;
     Ok(module)
+}
+
+/// Clears `fall_through` on every switch case that cannot reach the next case.
+/// Naga's GLSL frontend sets the flag on every case not ending in `break`, which
+/// includes `return`, `discard`, `continue` and blocks that end in them; its
+/// WGSL writer (the web backend) refuses a non-empty falling case.
+fn clear_unreachable_fall_through(module: &mut naga::Module) {
+    for (_, function) in module.functions.iter_mut() {
+        fix_switch_fall_through(&mut function.body);
+    }
+    for entry in &mut module.entry_points {
+        fix_switch_fall_through(&mut entry.function.body);
+    }
+}
+
+fn fix_switch_fall_through(block: &mut naga::Block) {
+    for statement in block.iter_mut() {
+        match statement {
+            naga::Statement::Block(inner) => fix_switch_fall_through(inner),
+            naga::Statement::If { accept, reject, .. } => {
+                fix_switch_fall_through(accept);
+                fix_switch_fall_through(reject);
+            }
+            naga::Statement::Switch { cases, .. } => {
+                for case in cases.iter_mut() {
+                    fix_switch_fall_through(&mut case.body);
+                    if case.fall_through && leaves_the_case(&case.body) {
+                        case.fall_through = false;
+                    }
+                }
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                fix_switch_fall_through(body);
+                fix_switch_fall_through(continuing);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether control cannot reach the end of `block`: its last statement returns,
+/// leaves the invocation, or leaves the switch/loop, directly or through a
+/// block or an `if` whose arms all do.
+fn leaves_the_case(block: &naga::Block) -> bool {
+    match block.last() {
+        Some(
+            naga::Statement::Return { .. }
+            | naga::Statement::Kill
+            | naga::Statement::Break
+            | naga::Statement::Continue,
+        ) => true,
+        Some(naga::Statement::Block(inner)) => leaves_the_case(inner),
+        Some(naga::Statement::If { accept, reject, .. }) => {
+            leaves_the_case(accept) && leaves_the_case(reject)
+        }
+        _ => false,
+    }
 }
 
 /// `text` without the scalar swizzle naga's frontend refused (`e`, GLSL 4.20's `f.x`, `f.xx`): one
@@ -1188,6 +1338,101 @@ mod tests {
 
     const VSH_120: &str = "#version 120\nvarying vec2 texcoord;\nvoid main() {\n    gl_Position = ftransform();\n    \
                            texcoord = (gl_TextureMatrix[0] * gl_MultiTexCoord0).xy;\n}\n";
+
+    fn switches(block: &naga::Block, out: &mut Vec<(naga::SwitchValue, bool)>) {
+        for statement in block.iter() {
+            match statement {
+                naga::Statement::Block(inner) => switches(inner, out),
+                naga::Statement::If { accept, reject, .. } => {
+                    switches(accept, out);
+                    switches(reject, out);
+                }
+                naga::Statement::Switch { cases, .. } => {
+                    for case in cases {
+                        out.push((case.value, case.fall_through));
+                        switches(&case.body, out);
+                    }
+                }
+                naga::Statement::Loop {
+                    body, continuing, ..
+                } => {
+                    switches(body, out);
+                    switches(continuing, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A `return` leaves a case as definitely as a `break` does, but naga only
+    /// clears `fall_through` for `break`. The web backend writes the IR as WGSL,
+    /// which cannot express a non-empty falling case, so those flags must be
+    /// cleared without touching a case that really falls through.
+    #[test]
+    fn cases_that_leave_do_not_fall_through() {
+        let fsh = "#version 120\nuniform int mode;\n\
+                   float pick(int m) {\n    float x = 0.0;\n    switch (m) {\n\
+                       case 0: return 1.0;\n\
+                       case 1: x = 2.0; break;\n\
+                       case 2: x = 3.0;\n\
+                       case 3: x = 4.0; break;\n\
+                       default: x = 5.0;\n    }\n    return x;\n}\n\
+                   void main() { gl_FragColor = vec4(pick(mode)); }\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap();
+        let mut found = Vec::new();
+        for (_, function) in p.fragment.functions.iter() {
+            switches(&function.body, &mut found);
+        }
+        for entry in &p.fragment.entry_points {
+            switches(&entry.function.body, &mut found);
+        }
+        let falls = |value| {
+            found
+                .iter()
+                .find(|(case, _)| *case == value)
+                .map(|(_, fall_through)| *fall_through)
+        };
+        assert_eq!(falls(naga::SwitchValue::I32(0)), Some(false), "return");
+        assert_eq!(falls(naga::SwitchValue::I32(1)), Some(false), "break");
+        assert_eq!(
+            falls(naga::SwitchValue::I32(2)),
+            Some(true),
+            "real fall-through"
+        );
+        assert_eq!(falls(naga::SwitchValue::I32(3)), Some(false), "break");
+        assert_eq!(falls(naga::SwitchValue::Default), Some(false), "last case");
+    }
+
+    /// The web build's `wgpu` writes the IR as WGSL, and refuses a non-empty
+    /// case that falls through. A program whose cases all leave must write.
+    #[test]
+    fn a_translated_switch_writes_as_wgsl() {
+        let fsh = "#version 120\nuniform int mode;\n\
+                   float pick(int m) {\n    float x = 0.0;\n    switch (m) {\n\
+                       case 0: return 1.0;\n\
+                       case 1: x = 2.0; break;\n\
+                       default: x = 5.0;\n    }\n    return x;\n}\n\
+                   void main() { gl_FragColor = vec4(pick(mode)); }\n";
+        let p = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap();
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&p.fragment)
+            .unwrap();
+        let wgsl = naga::back::wgsl::write_string(
+            &p.fragment,
+            &info,
+            naga::back::wgsl::WriterFlags::empty(),
+        )
+        .expect("the web backend can write this module as WGSL");
+        assert!(wgsl.contains("switch"));
+    }
 
     #[test]
     fn compatibility_programs_translate() {
@@ -1850,5 +2095,17 @@ mod tests {
             Target::Buffers,
         );
         assert!(p.is_ok(), "{:?}", p.err());
+    }
+
+    #[test]
+    fn ssbo_blocks_translate() {
+        let vsh = "#version 120\nlayout(std430, binding = 0) buffer environmentData { vec3 sunlightColor; vec3 skylightColor; float weatherFrameTimeCounter; uint encodedHeldLightColor; };\nvoid main() { gl_Position = ftransform(); sunlightColor = vec3(1.0); }\n";
+        let fsh = "#version 120\nlayout(std430, binding = 0) buffer environmentData { vec3 sunlightColor; vec3 skylightColor; float weatherFrameTimeCounter; uint encodedHeldLightColor; };\nvoid main() { gl_FragColor = vec4(skylightColor, 1.0); }\n";
+        let p = program(
+            &[("composite.vsh", vsh), ("composite.fsh", fsh)],
+            Target::Window,
+        );
+        assert!(p.is_ok(), "{:?}", p.err());
+        assert_eq!(p.unwrap().interface.buffers, vec![0]);
     }
 }

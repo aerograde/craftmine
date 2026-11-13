@@ -2114,7 +2114,10 @@ impl Hub {
         if let Some(bed) = bed.filter(|_| sleeping) {
             meta.push((14, serializer::OPTIONAL_BLOCK_POS, Value::OptPos(Some(bed))));
         }
-        if (health - 1.0).abs() > f32::EPSILON && health != 20.0 {
+        // Health's wire default is 1.0. Omitting full health (20) left every
+        // other client showing the default 1.0, and healing back to 20 could
+        // never update them because the entry was never in the map.
+        if (health - 1.0).abs() > f32::EPSILON {
             meta.push((9, serializer::FLOAT, Value::Float(health)));
         }
         if skin != 0 {

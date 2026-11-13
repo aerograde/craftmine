@@ -301,6 +301,13 @@ impl Vegetation {
         }
     }
     pub(super) fn apply(&self, column: &mut Column, x: i32, z: i32, width: i32, light: u16) {
+        // A cell 32 blocks and wider would draw a whole cell of leaves: too
+        // large to read as a tree, and it would pop when the real canopies
+        // arrive. Crowns reach 16-block cells; beyond that the ground keeps
+        // its colour and the resident chunks supply the real trees.
+        if width > 16 {
+            return;
+        }
         let Some(surface) = column.surface else {
             return;
         };
@@ -324,6 +331,9 @@ impl Vegetation {
                 | "minecraft:mycelium"
                 | "minecraft:rooted_dirt"
                 | "minecraft:moss_block"
+                // Our snow-capped seed surface: snowy biomes keep their spruces.
+                | "minecraft:snow"
+                | "minecraft:snow_block"
         ) {
             return;
         }
@@ -401,11 +411,10 @@ impl Vegetation {
                 biome: surface.biome,
                 light,
             });
-            column.surface = Some(Surface {
-                height: top.max(bottom + 1),
-                state: tree.leaves,
-                ..surface
-            });
+            // Keep the ground as the surface. Recording the canopy here made
+            // the heightmap rings stretch the leaves down to bedrock: a leaf
+            // pillar where the real chunk shows grass, dirt and stone.
+            column.surface = Some(surface);
         }
     }
     /// A chorus plant as its place-and-grow feature leaves it: a 2..=5 block
@@ -442,11 +451,8 @@ impl Vegetation {
             biome: surface.biome,
             light,
         });
-        column.surface = Some(Surface {
-            height: top + 1,
-            state: chorus.flower,
-            ..surface
-        });
+        // The end stone stays the ground (see the tree branch above).
+        column.surface = Some(surface);
     }
     #[cfg(test)]
     pub(super) fn chorus_count(&self, biome: u16) -> Option<f64> {

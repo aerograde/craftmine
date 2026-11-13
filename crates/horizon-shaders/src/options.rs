@@ -331,6 +331,33 @@ pub fn chosen_text(chosen: &BTreeMap<String, String>) -> String {
     chosen.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
 }
 
+/// The values of `profile.<name>` in `shaders.properties`: the pack's own quality presets
+/// (`profile.potato`, `profile.dgpu`...). `!NAME` turns a switch off, `NAME:VALUE` sets a
+/// value, a bare `NAME` turns a switch on.
+pub fn profile(pack: &Pack, name: &str) -> BTreeMap<String, String> {
+    let Some(text) = pack.read_text("shaders.properties") else {
+        return BTreeMap::new();
+    };
+    let key = format!("profile.{name}");
+    let Some(line) = text.lines().find_map(|line| {
+        let (lhs, rhs) = line.split_once('=')?;
+        (lhs.trim() == key).then_some(rhs)
+    }) else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for word in line.split_whitespace() {
+        if let Some(name) = word.strip_prefix('!') {
+            out.insert(name.to_owned(), "false".to_owned());
+        } else if let Some((name, value)) = word.split_once(':') {
+            out.insert(name.to_owned(), value.to_owned());
+        } else {
+            out.insert(word.to_owned(), "true".to_owned());
+        }
+    }
+    out
+}
+
 /// The texts of the pack's sources and of the files they include.
 fn option_texts(pack: &Pack) -> Vec<String> {
     let files = pack.all_files();
@@ -474,5 +501,28 @@ mod tests {
             "#define LEVEL 2 //[1 2 3]\n"
         );
         assert_eq!(parse_chosen(&chosen_text(&chosen)), chosen);
+    }
+
+    #[test]
+    fn profiles_are_option_sets() {
+        let pack = Pack::from_zip_bytes(
+            "P.zip",
+            zip(&[(
+                "shaders/shaders.properties",
+                "profile.potato = !SHADOWS REFLECTION_MODE:1 !CLOUDS BLOOM_QUALITY:0.25 GODRAYS:0\n\
+                 profile.high = SHADOWS REFLECTION_MODE:2 CLOUDS\n",
+            )]),
+        )
+        .unwrap();
+        let potato = profile(&pack, "potato");
+        assert_eq!(potato["SHADOWS"], "false");
+        assert_eq!(potato["REFLECTION_MODE"], "1");
+        assert_eq!(potato["CLOUDS"], "false");
+        assert_eq!(potato["BLOOM_QUALITY"], "0.25");
+        assert_eq!(potato["GODRAYS"], "0");
+        let high = profile(&pack, "high");
+        assert_eq!(high["SHADOWS"], "true");
+        assert_eq!(high["REFLECTION_MODE"], "2");
+        assert!(profile(&pack, "missing").is_empty());
     }
 }

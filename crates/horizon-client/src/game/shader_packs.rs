@@ -15,12 +15,15 @@ use horizon_client::gfx::pack_draw::EntitySpan;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
-/// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`).
-fn chosen_shader_options(name: &str) -> BTreeMap<String, String> {
+/// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`); with no
+/// file yet, the pack's own `potato` profile, the light preset (a pack without profiles gets
+/// its defaults). Any saved value overrides the profile.
+fn chosen_shader_options(name: &str, pack: &Pack) -> BTreeMap<String, String> {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(name));
-    std::fs::read_to_string(file)
-        .map(|text| horizon_shaders::parse_chosen(&text))
-        .unwrap_or_default()
+    match horizon_os::fs::read_to_string(file) {
+        Ok(text) => horizon_shaders::parse_chosen(&text),
+        Err(_) => horizon_shaders::profile(pack, "potato"),
+    }
 }
 
 /// Pack `name`'s options, screens and names in `language`, with the values the player chose.
@@ -38,7 +41,7 @@ pub(super) fn read_shader_options(
     };
     let options = horizon_shaders::options(&pack);
     let lang = horizon_shaders::Lang::load(&pack, language);
-    let chosen = chosen_shader_options(name);
+    let chosen = chosen_shader_options(name, &pack);
     let pack = pack.with_chosen(chosen.clone());
     let text = pack.read_text("shaders.properties").unwrap_or_default();
     let properties = Properties::parse(&text, &horizon_shaders::with_options(&pack, macros));
@@ -56,12 +59,12 @@ pub(super) fn read_shader_options(
 pub(super) fn write_shader_options(options: &ShaderOptions) {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(&options.pack));
     let saved = if options.chosen.is_empty() {
-        std::fs::remove_file(&file).or_else(|e| match e.kind() {
+        horizon_os::fs::remove_file(&file).or_else(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
             _ => Err(e),
         })
     } else {
-        std::fs::write(&file, horizon_shaders::chosen_text(&options.chosen))
+        horizon_os::fs::write(&file, horizon_shaders::chosen_text(&options.chosen))
     };
     if let Err(e) = saved {
         log::warn!("shader pack {}: {}: {e}", options.pack, file.display());
@@ -159,7 +162,10 @@ impl Game<'_> {
             // A pack is not the game's own code: one that makes the shader compiler (or our
             // translation of it) panic is turned off instead of crashing every world load (#3525).
             let loaded = horizon_client::crash::contain(|| {
-                match Pack::open(&path).map(|p| p.with_chosen(chosen_shader_options(name))) {
+                match Pack::open(&path).map(|p| {
+                    let chosen = chosen_shader_options(name, &p);
+                    p.with_chosen(chosen)
+                }) {
                     Ok(pack) => {
                         let mut macros = Macros::standard();
                         renderer.define_pack_macros(&mut macros);
@@ -182,6 +188,16 @@ impl Game<'_> {
                         let folder = dimension_folder(&pack, dimension);
                         let inputs = renderer.pack_inputs();
                         let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
+                        // The pack's `SHADOWS` switch (the potato profile has it off) also
+                        // controls whether its shadow programs run.
+                        if !horizon_shaders::switches_on(&pack).contains("SHADOWS") {
+                            post.shadow_pass = false;
+                            post.shadow = None;
+                            post.shadow_water = None;
+                            post.shadow_entities = None;
+                            post.shadow_block = None;
+                            post.shadow_comp.clear();
+                        }
                         let biomes = world_biomes!(self);
                         let names: Vec<&str> =
                             biomes.list.iter().map(|b| b.name.as_str()).collect();
@@ -226,8 +242,11 @@ impl Game<'_> {
                             table.len() / 2,
                             started_ids.elapsed().as_millis()
                         );
+                        let far_lod = pack
+                            .read_text("program/gbuffers_main.glsl")
+                            .is_some_and(|t| t.contains("encodeNormal") && t.contains("outData1"));
                         if let Some((programs, notes)) =
-                            renderer.set_shader_pack(dimension, Some(post), &table)
+                            renderer.set_shader_pack(dimension, Some(post), &table, far_lod)
                         {
                             for note in notes {
                                 log::warn!("shader pack {name}: {note}");
@@ -243,7 +262,7 @@ impl Game<'_> {
                     Err(e) => {
                         self.pack_ids = None;
                         log::warn!("shader pack {name}: {e}");
-                        renderer.set_shader_pack(dimension, None, &[]);
+                        renderer.set_shader_pack(dimension, None, &[], false);
                     }
                 }
             });
@@ -318,7 +337,7 @@ impl Game<'_> {
         self.pack_ids = None;
         if let Some(renderer) = &mut self.renderer {
             // Marks this dimension as loaded, without a pack, so it is not tried again.
-            renderer.set_shader_pack(dimension, None, &[]);
+            renderer.set_shader_pack(dimension, None, &[], false);
         }
         if self.settings.horizon.shader_pack == name {
             self.settings.horizon.shader_pack.clear();

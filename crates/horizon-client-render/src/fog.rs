@@ -366,7 +366,21 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
             }
         }
     }
-    let span = (rd / 10.0).clamp(4.0, 64.0);
+    // Far terrain reaches past a vanilla render distance: fade it in over the
+    // last 45% of its range, so the horizon dissolves into the sky colour
+    // instead of ending at a visible rim. Vanilla-sized ranges keep the short
+    // edge span.
+    let distant_haze = input.distant_terrain
+        && input.skybox
+        && input.fog_type == FogType::Atmospheric
+        && input.blindness.is_none()
+        && input.darkness.is_none()
+        && !input.boss_world_fog;
+    let span = if distant_haze {
+        rd * 0.45
+    } else {
+        (rd / 10.0).clamp(4.0, 64.0)
+    };
     fog.render_distance_start = rd - span;
     fog.render_distance_end = rd;
     if input.distant_terrain
@@ -594,6 +608,9 @@ mod tests {
         input.distant_terrain = true;
         let fog = setup_fog(&tables, &FogState::default(), &input);
         assert_eq!(fog.environmental_end, 16384.);
+        // The horizon fades over the last 45% of far terrain's range.
+        assert!((fog.render_distance_start - 16384. * 0.55).abs() < 1e-2);
+        assert_eq!(fog.render_distance_end, 16384.);
         input.fog_type = FogType::Water;
         assert_eq!(
             setup_fog(&tables, &FogState::default(), &input).environmental_end,

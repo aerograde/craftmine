@@ -315,9 +315,9 @@ detail to 1024 px.
 
 ## Visual vibrancy
 
-**Vibrant Lux** is Horizon's one built-in visual profile: a clean-room combination of the
-vibrant/deferred look and the Luxium low-cost approach. It is **on by default** (an owner-approved
+**Visual Vibrance** is Horizon's one built-in visual profile: a clean-room recreation of the
+deferred Vibrant Visuals look, at Luxium's cost. It is **on by default** (an owner-approved
 exception to the usual off-by-default rule for Horizon-only looks), with a master switch in Video
 Settings and Auto/High/Medium/Low quality. Auto starts high where the GPU allows and falls to the
-Luxium-style cheap path; explicit Off restores the vanilla look and is covered by parity tests.
-Shader packs keep ownership of passes they replace.
+cheap path; explicit Off restores the vanilla look and is covered by parity tests.
+Shader packs keep ownership of passes they replace. The built-in pass shades the lightmap with a directional sun/moon (N·L weighted by the vertex sky light), adds world-anchored cloud shadows and aerial perspective (blue-grey by day, warm peach at dawn/dusk), gives water a sun glint and a Fresnel sky reflection, and runs the post profile. The profile is the reference's picture, not a screen tint: exposure into a filmic curve, a soft highlight shoulder, vivid but natural daylight, blue-grey shade and a gentle vignette, with a warm golden hour as the sun sets. Its glow is a quarter-resolution bright pass and separable Gaussian rather than a ring of full-resolution taps, so it spreads wider for a fraction of the cost; the golden-hour shafts ride in the same bright pass. Distant terrain samples its block sprite at the mip its own footprint asks for, so a far cell becomes its average colour continuously instead of switching look at a tile level. The near sun shadow's map follows the player's quality: High 2048² over 320 blocks with a four-tap soft filter, Medium 1024²/192 with one hardware-PCF sample, and Low 128 blocks (the pass itself is off). Nearby distant-terrain tiles cast into the same map, so the first LOD ring is not a line between shadowed and fully lit ground. The chosen quality decides whether the pass runs, and Low never runs it, keeping the grade, atmosphere and sun while dropping the second terrain pass and the glow chain. Terrain, foliage and water receive the sun shadow; entity casters are not part of the built-in pass, and the golden-hour shafts are a screen-space pass rather than volumetric light.

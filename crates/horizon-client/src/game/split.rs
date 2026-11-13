@@ -34,11 +34,11 @@ use super::{
 use horizon_client::gamepad::Button;
 use horizon_client::split_layout::{self as layout, MAX_PLAYERS, Placement, View};
 use horizon_client::{Result, gfx::compositor::Compositor, widgets};
+use horizon_os::time::{Duration, Instant};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
 };
 use winit::{
     application::ApplicationHandler,

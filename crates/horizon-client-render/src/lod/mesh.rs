@@ -66,6 +66,7 @@ impl Mesher {
         context: &WorkerContext,
         neighbors: &[Vec<EdgeColumn<'_>>; 4],
         finer: &[TileKey],
+        min_y: i32,
     ) -> SectionMesh {
         mesh_columns_with_edges(
             key,
@@ -74,6 +75,7 @@ impl Mesher {
             covered_bounds,
             neighbors,
             finer,
+            min_y,
             |span, direction, at| self.material(span, direction, at, context),
         )
     }
@@ -317,35 +319,85 @@ fn mesh_columns_with_neighbors(
         covered_bounds,
         &edges,
         &[],
+        crate::chunk::MIN_Y,
         material,
     )
 }
-/// From this tile level up a cell is 64 blocks wide or more: the strata
-/// inside the ground cannot be told apart, so a column is its surface.
-const HEIGHTMAP_LEVEL: u8 = 6;
-/// `column` as a heightmap: its top solid span reaching down to the bottom of
-/// the world (so the walls toward lower neighbours are one face of the
-/// surface's material, merged along the cliff), and the fluid over it.
-fn heightmap(column: &Column, mut fluid: impl FnMut(&Span) -> bool) -> Column {
-    let Some((top, below)) = column.spans.split_last() else {
+/// From this tile level up a cell is 8 blocks wide or more: the strata inside
+/// the ground cannot be told apart, so a column is its surface. The merged
+/// walls are what keep the far rings to a handful of quads per cell. Level 2
+/// (4-block cells) keeps its voxel columns: it is the ring that meets the
+/// resident chunks at a usual render distance, and its cliffs must show the
+/// same layers the real terrain does.
+const HEIGHTMAP_LEVEL: u8 = 3;
+/// `column` as a heightmap: its ground reaching down to the bottom of the
+/// world (so the walls toward lower neighbours are one face, merged along the
+/// cliff), and whatever sits above it kept as it is: the sea, and a canopy
+/// over the air gap under it. Stretching the topmost span down made a tree a
+/// leaf pillar from bedrock, a green slab that vanished when the real chunk
+/// arrived. With `lip` (the rings whose cells are still pixels wide), the
+/// ground under the surface carries the cliff: a far cell's wall is the dirt
+/// or stone the real chunk shows under its grass, with the surface's own layer
+/// as a lip. Deeper rings merge the cliff whole: their walls are a fraction of
+/// a pixel, and one face is what keeps the far horizon cheap.
+fn heightmap(
+    column: &Column,
+    mut fluid: impl FnMut(&Span) -> bool,
+    lip: bool,
+    min_y: i32,
+) -> Column {
+    let spans = &column.spans;
+    // The terrain surface, which the seed columns record; a reduction may not,
+    // and then the run of solid contiguous spans from the bottom stands in. The
+    // ground is the last solid span at or below it: a trunk is contiguous with
+    // the ground too, and stretching the trunk down would pillar the tree.
+    let ground = match column.surface.map(|surface| surface.height as i16) {
+        Some(height) => spans
+            .iter()
+            .rposition(|span| span.min < span.max && !fluid(span) && span.max <= height),
+        None => {
+            let mut floor = None;
+            for (i, span) in spans.iter().enumerate() {
+                if span.min >= span.max || fluid(span) {
+                    break;
+                }
+                if i > 0 && spans[i - 1].max != span.min {
+                    break;
+                }
+                floor = Some(i);
+            }
+            floor
+        }
+    };
+    let Some(top) = ground else {
         return column.clone();
     };
-    let ground = |span: &Span| Span {
-        min: crate::chunk::MIN_Y as i16,
+    let surface = spans[top];
+    // The dimension's floor, not the Overworld's: the Nether starts at y = 0,
+    // so stretching there drew cliffs 64 blocks below its bedrock.
+    let floor = min_y as i16;
+    let stretch = |span: &Span| Span {
+        min: floor,
         ..*span
     };
-    let mut spans = Spans::with_capacity(2);
-    match below.last() {
-        Some(under) if fluid(top) => {
-            spans.push(ground(under));
-            spans.push(*top);
+    let mut out = Spans::with_capacity(spans.len() - top + 1);
+    match lip
+        .then(|| top.checked_sub(1))
+        .flatten()
+        .map(|under| &spans[under])
+    {
+        Some(under) if under.max == surface.min => {
+            out.push(stretch(under));
+            out.push(surface);
         }
-        _ if fluid(top) => spans.push(*top),
-        _ => spans.push(ground(top)),
+        _ => out.push(stretch(&surface)),
+    }
+    for span in &spans[top + 1..] {
+        out.push(*span);
     }
     Column {
         surface: column.surface,
-        spans,
+        spans: out,
     }
 }
 fn mesh_columns_with_edges(
@@ -355,6 +407,7 @@ fn mesh_columns_with_edges(
     covered_bounds: Option<[i32; 4]>,
     neighbors: &[Vec<EdgeColumn<'_>>; 4],
     finer: &[TileKey],
+    min_y: i32,
     mut material: impl FnMut(&Span, Direction, [i32; 2]) -> Material,
 ) -> SectionMesh {
     assert_eq!(columns.len(), CELLS * CELLS);
@@ -366,13 +419,16 @@ fn mesh_columns_with_edges(
     let (columns, neighbors) = if key.level >= HEIGHTMAP_LEVEL {
         let [ox, _, oz] = key.origin();
         let mut fluid = |span: &Span| material(span, Direction::Up, [ox, oz]).fluid != 0;
+        // The surface lip only where a cell's blocks are still pixels wide; the
+        // deeper rings merge their cliffs whole.
+        let lip = key.level <= 4;
         heightmap_columns = columns
             .iter()
-            .map(|column| heightmap(column, &mut fluid))
+            .map(|column| heightmap(column, &mut fluid, lip, min_y))
             .collect();
         heightmap_edges = neighbors.each_ref().map(|side| {
             side.iter()
-                .map(|edge| heightmap(edge.column, &mut fluid))
+                .map(|edge| heightmap(edge.column, &mut fluid, lip, min_y))
                 .collect()
         });
         heightmap_refs = heightmap_columns.iter().collect();
@@ -685,6 +741,14 @@ fn mesh_columns_with_edges(
         }
     }
     mesh.finish_sprite_layers();
+    // Far heightmap tiles draw blurred seed colours: their vertices carry the
+    // far flag, which terrain.wgsl reads to skip the block texture's stripes,
+    // cutout holes and per-pixel shadow work.
+    if key.level >= HEIGHTMAP_LEVEL {
+        for v in mesh.solid.iter_mut().chain(mesh.translucent.iter_mut()) {
+            v.layer |= 0x4000;
+        }
+    }
     mesh
 }
 
@@ -726,6 +790,7 @@ mod refinement_tests {
             None,
             &[Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             &[fine],
+            crate::chunk::MIN_Y,
             |_, _, _| Material {
                 faces: [
                     Some(Paint {
@@ -1229,15 +1294,68 @@ mod tests {
             surface: None,
             spans: vec![span(0, 60, 1), span(60, 63, 3), span(63, 64, 4)].into(),
         };
-        let flat = heightmap(&strata, fluid);
-        assert_eq!(flat.spans, [span(-64, 64, 4)]);
+        let flat = heightmap(&strata, fluid, true, crate::chunk::MIN_Y);
+        // The surface's layer stays a lip over the material beneath it, so the
+        // cliff shows dirt or stone rather than grass to the world floor.
+        assert_eq!(flat.spans, [span(-64, 63, 3), span(63, 64, 4)]);
+        // Deeper rings merge the cliff whole (a fraction of a pixel each).
+        assert_eq!(
+            heightmap(&strata, fluid, false, crate::chunk::MIN_Y).spans,
+            [span(-64, 64, 4)],
+            "a deep ring's wall is one merged face"
+        );
         let sea = Column {
             surface: None,
             spans: vec![span(0, 50, 1), span(50, 62, 2)].into(),
         };
-        let flat = heightmap(&sea, fluid);
+        let flat = heightmap(&sea, fluid, true, crate::chunk::MIN_Y);
         assert_eq!(flat.spans, [span(-64, 50, 1), span(50, 62, 2)]);
-        assert!(heightmap(&columns()[0], fluid).spans.is_empty());
+        // A tree: the canopy stays a canopy over the air gap under it, never a
+        // leaf column from the world floor that vanished when the chunk loaded.
+        let tree = Column {
+            surface: None,
+            spans: vec![span(0, 60, 1), span(60, 64, 4), span(70, 76, 5)].into(),
+        };
+        assert_eq!(
+            heightmap(&tree, fluid, true, crate::chunk::MIN_Y).spans,
+            [span(-64, 60, 1), span(60, 64, 4), span(70, 76, 5)]
+        );
+        assert_eq!(
+            heightmap(&tree, fluid, false, crate::chunk::MIN_Y).spans,
+            [span(-64, 64, 4), span(70, 76, 5)]
+        );
+        // With the surface recorded (every seed column records it), the trunk
+        // is not mistaken for the ground either: the ground ends at the
+        // surface, and the trunk and canopy stay above it.
+        let trunk = Column {
+            surface: Some(crate::lod::Surface {
+                height: 64,
+                state: BlockStateId(4),
+                water: None,
+                biome: 0,
+            }),
+            spans: vec![
+                span(0, 60, 1),
+                span(60, 64, 4),
+                span(64, 70, 6),
+                span(70, 76, 5),
+            ]
+            .into(),
+        };
+        assert_eq!(
+            heightmap(&trunk, fluid, true, crate::chunk::MIN_Y).spans,
+            [
+                span(-64, 60, 1),
+                span(60, 64, 4),
+                span(64, 70, 6),
+                span(70, 76, 5)
+            ]
+        );
+        assert!(
+            heightmap(&columns()[0], fluid, true, crate::chunk::MIN_Y)
+                .spans
+                .is_empty()
+        );
         // A rolling landscape of strata: far tiles need a fraction of the quads.
         let rolling: Vec<Column> = (0..CELLS * CELLS)
             .map(|i| {
@@ -1258,8 +1376,18 @@ mod tests {
             let mesh = mesh_columns(key, &rolling, &FxHashSet::default(), None, material);
             mesh.solid.len() / 4
         };
-        let (voxel, height) = (quads(HEIGHTMAP_LEVEL - 1), quads(HEIGHTMAP_LEVEL));
-        assert!(height * 3 < voxel * 2, "{height} quads against {voxel}");
+        let (voxel, height, deep) = (
+            quads(HEIGHTMAP_LEVEL - 1),
+            quads(HEIGHTMAP_LEVEL),
+            quads(HEIGHTMAP_LEVEL + 2),
+        );
+        // The lip buys a two-material cliff (a face along each step) in the rings
+        // that show one; it must still not cost more than the voxel mesh it
+        // replaces.
+        assert!(height <= voxel, "{height} quads against {voxel}");
+        // From the rings whose walls are a fraction of a pixel, the cliff merges
+        // whole again: a fraction of the voxel mesh's quads.
+        assert!(deep * 3 < voxel * 2, "{deep} quads against {voxel}");
     }
     #[test]
     fn world_sized_faces_are_one_quad_with_uvs_that_fit() {
@@ -1628,6 +1756,7 @@ mod tests {
             None,
             &neighbors,
             &[],
+            crate::chunk::MIN_Y,
             material,
         );
         let walls: Vec<_> = mesh
@@ -1705,15 +1834,107 @@ mod tests {
         }
     }
     #[test]
+    fn a_drawn_resident_column_is_clipped_out_of_the_near_tile() {
+        let mut columns = columns();
+        for column in &mut columns {
+            column.spans = vec![span(0, 16, 1)].into();
+        }
+        // A 32-block tile (2-block cells) with one drawn resident chunk in it:
+        // the LOD leaves out exactly that chunk's 16x16 footprint.
+        let key = TileKey {
+            x: 1,
+            z: 1,
+            level: 1,
+        };
+        let covered: FxHashSet<_> = [(2, 3)].into_iter().collect();
+        let mesh = mesh_columns(key, &columns, &covered, Some([32, 48, 48, 64]), material);
+        let tops: Vec<_> = mesh
+            .solid
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|q| normal(q).y > 0.0)
+            .collect();
+        let area = tops
+            .iter()
+            .map(|q| {
+                let (x0, x1) = q
+                    .iter()
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                        (lo.min(v.position()[0]), hi.max(v.position()[0]))
+                    });
+                let (z0, z1) = q
+                    .iter()
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                        (lo.min(v.position()[2]), hi.max(v.position()[2]))
+                    });
+                (x1 - x0) * (z1 - z0)
+            })
+            .sum::<f32>();
+        assert_eq!(
+            area,
+            (32 * 32 - 16 * 16) as f32,
+            "the drawn chunk's footprint must be the only terrain left out"
+        );
+        for q in tops {
+            let (x0, x1) = q
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(v.position()[0]), hi.max(v.position()[0]))
+                });
+            let (z0, z1) = q
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(v.position()[2]), hi.max(v.position()[2]))
+                });
+            assert_eq!(
+                (x1.min(48.0) - x0.max(32.0)).max(0.0) * (z1.min(64.0) - z0.max(48.0)).max(0.0),
+                0.0,
+                "an LOD top face still overlaps the drawn resident chunk"
+            );
+        }
+    }
+    #[test]
+    fn far_heightmap_tiles_carry_the_flat_colour_flag() {
+        let build = |level| {
+            let mut columns = columns();
+            for column in &mut columns {
+                column.spans = vec![span(0, 3, 1)].into();
+            }
+            mesh_columns(
+                TileKey { x: 0, z: 0, level },
+                &columns,
+                &FxHashSet::default(),
+                None,
+                material,
+            )
+        };
+        let far = build(HEIGHTMAP_LEVEL);
+        let near = build(HEIGHTMAP_LEVEL - 1);
+        assert!(!far.solid.is_empty(), "the far tile meshes");
+        assert!(
+            far.solid.iter().all(|v| v.layer & 0x4000 != 0),
+            "far heightmap vertices request the blurred seed colour"
+        );
+        assert!(!near.solid.is_empty(), "the near tile meshes");
+        assert!(
+            near.solid.iter().all(|v| v.layer & 0x4000 == 0),
+            "near LOD keeps its block textures"
+        );
+    }
+
+    #[test]
     fn negative_parent_clips_chunks_without_internal_piece_walls() {
         let mut columns = columns();
         for column in &mut columns {
             column.spans = vec![span(10, 12, 1)].into()
         }
+        // Below the heightmap level: a heightmap deliberately reaches down to
+        // the world floor, which these cut faces must not need.
         let key = TileKey {
             x: -1,
             z: -1,
-            level: 5,
+            level: 1,
         };
         let [ox, _, oz] = key.origin();
         let mut covered = FxHashSet::default();

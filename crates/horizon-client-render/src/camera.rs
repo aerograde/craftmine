@@ -709,7 +709,7 @@ impl AvatarBob {
         self.cloak_o = self.cloak;
         for i in 0..3 {
             let d = position[i] - self.cloak[i];
-            if d > 10.0 || d < -10.0 {
+            if !(-10.0..=10.0).contains(&d) {
                 self.cloak[i] = position[i];
                 self.cloak_o[i] = position[i];
             } else {

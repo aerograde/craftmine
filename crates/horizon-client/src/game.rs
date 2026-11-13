@@ -209,6 +209,7 @@ mod native_visuals;
 mod native_world_read;
 mod natural_spawning;
 mod nautili;
+mod nearby;
 mod net_harness;
 mod nether_portal;
 mod no_resources;
@@ -526,7 +527,7 @@ impl Options {
             o.resources = std::path::absolute(&o.resources)?;
             o.report = o.report.map(std::path::absolute).transpose()?;
             o.control = o.control.map(std::path::absolute).transpose()?;
-            std::fs::create_dir_all(&dir)
+            horizon_os::fs::create_dir_all(&dir)
                 .and_then(|()| std::env::set_current_dir(&dir))
                 .map_err(|e| format!("game folder {}: {e}", dir.display()))?;
         }
@@ -754,6 +755,8 @@ enum Screen {
     /// Play with Friends, from the pause menu's Friends button
     /// (`friends_screen`, game/friends.rs).
     Friends,
+    /// Play Nearby (`nearby_screen`, game/nearby.rs).
+    Nearby,
     /// CommandBlockEditScreen (game/command_blocks.rs).
     CommandBlock,
     /// A game master block's edit screen (game/block_editor.rs).
@@ -787,6 +790,7 @@ impl Screen {
             Screen::Advancements => "advancements",
             Screen::WorldOptions => "world_options",
             Screen::Friends => "friends",
+            Screen::Nearby => "nearby",
             Screen::CommandBlock => "command_block",
             Screen::BlockEditor => "block_editor",
             Screen::ServerLinks => "server_links",
@@ -2087,8 +2091,8 @@ struct Game<'a> {
     /// When `resourcepacks/` was last looked at for the open pack screen, and what it held
     /// (`watch_pack_folder`).
     pack_folder: Option<(
-        std::time::Instant,
-        Vec<(String, u64, Option<std::time::SystemTime>)>,
+        horizon_os::time::Instant,
+        Vec<(String, u64, Option<horizon_os::time::SystemTime>)>,
     )>,
     /// A pack reload staged on a worker (`LoadingOverlay`): the frame draws
     /// its progress until `drive_pack_reload` applies it.
@@ -2127,8 +2131,9 @@ struct Game<'a> {
     /// Beacon beam sections kept after their chunk unloads, so far terrain
     /// LOD still draws their beams (`beacon_geometry` refreshes them).
     far_beacons: HashMap<(i32, i32, i32), Vec<(u32, i32)>>,
-    /// The detail revision, centre and radius `Lod::update` last had covered for.
-    lod_covered_at: Option<(u64, (i32, i32), i32)>,
+    /// The detail revision, centre, radius and time bucket `Lod::update` last
+    /// had covered for. The bucket refreshes the set as chunk fades finish.
+    lod_covered_at: Option<(u64, (i32, i32), i32, u64)>,
     options: Options,
     player: Option<PlayerMotion>,
     spawn: Option<Vec3>,
@@ -2328,7 +2333,7 @@ struct Game<'a> {
     loading_progress: f32,
     /// `CreateWorldScreen.openCreateWorldScreen`'s data read, on a worker,
     /// while the title says `createWorld.preparing`.
-    creation_job: Option<std::thread::JoinHandle<std::result::Result<(), String>>>,
+    creation_job: Option<horizon_os::thread::JoinHandle<std::result::Result<(), String>>>,
     /// When `loading_progress` last eased (the server thread's load, 50 ms a step).
     loading_progress_at: Option<horizon_os::time::Instant>,
     /// The world spawn search's origin chunk and fallback height, once known.
@@ -2679,6 +2684,8 @@ struct Game<'a> {
     serving: Option<integrated::Serving>,
     /// The open world is shared behind an invite code (game/friends.rs).
     friends: Option<friends::Sharing>,
+    /// Play Nearby's service and screen state (game/nearby.rs).
+    nearby: Option<nearby::Nearby>,
     world_options: Option<lan_screen::WorldOptions>,
     /// Chat Settings opened from RestrictionsScreen: Done returns to World Options.
     options_to_world_options: bool,
@@ -2692,7 +2699,7 @@ struct Game<'a> {
     /// The game tests read so far, by id (the test instance registry).
     test_defs: std::cell::RefCell<HashMap<String, Option<test_instances::TestDef>>>,
     /// `GameTestBlockHighlightRenderer.markers`: block, text, removal time.
-    test_highlights: HashMap<(i32, i32, i32), (String, std::time::Instant)>,
+    test_highlights: HashMap<(i32, i32, i32), (String, Instant)>,
     /// `GameTestTicker.SINGLETON`: the game tests running on this server.
     game_tests: game_tests::GameTests,
     /// KeyboardHandler's debug key state (game/debug_keys.rs), the physical
@@ -7445,6 +7452,7 @@ impl Game<'_> {
                     | Screen::Advancements
                     | Screen::WorldOptions
                     | Screen::Friends
+                    | Screen::Nearby
                     | Screen::ServerLinks
                     | Screen::ConfirmLink
                     | Screen::DialogWarning
@@ -7821,6 +7829,7 @@ impl Game<'_> {
         // The ToastManager draws over every screen, the title and the
         // options included: the narrator's toast follows the player there.
         self.draw_narrator_toast(&mut batch);
+        self.draw_nearby_toast(&mut batch);
         // Gui.extractRenderState: the debug overlay comes after the screen
         // and the toasts, so it is over everything, menus included.
         self.draw_debug_overlay(&mut batch, size);
@@ -7859,7 +7868,9 @@ impl Game<'_> {
             self.draw_split_hud(&mut batch, true);
             return batch;
         }
+        let nearby_view = self.nearby_view();
         if let Some(title) = &mut self.title {
+            title.nearby = nearby_view;
             title.poll_backup();
             if std::mem::take(&mut title.onboarding_finished) {
                 // Options.onboardingAccessibilityFinished.
@@ -8154,6 +8165,7 @@ impl Game<'_> {
             Screen::Advancements => self.draw_advancements(&mut batch),
             Screen::WorldOptions => self.draw_world_options(&mut batch),
             Screen::Friends => self.draw_friends_screen(&mut batch),
+            Screen::Nearby => self.draw_nearby_screen(&mut batch),
             Screen::ServerLinks => self.draw_server_links(&mut batch),
             Screen::ConfirmLink => self.draw_confirm_link(&mut batch),
             Screen::DialogWarning => self.draw_dialog_warning(&mut batch),
@@ -11274,6 +11286,7 @@ impl Game<'_> {
             Action::Connect { address, lan } => {
                 self.connect_server_with_options(&address, &self.options.player_name(), None, lan)?
             }
+            Action::Nearby(action) => self.title_nearby_action(action),
             Action::DataPacks { dir, selected } => {
                 self.keys.clear();
                 self.screen = Screen::Options;
@@ -11327,8 +11340,8 @@ impl Game<'_> {
         // Only when `install` did not run (no Data Packs screen opened): it
         // writes the file itself, and its `disabled` must not be lost.
         if let Some(o) = create.filter(|o| o.pack_dir.is_none()) {
-            let world = std::env::current_dir()?.join("saves").join(folder);
-            if let Err(e) = std::fs::create_dir_all(&world) {
+            let world = horizon_os::env::current_dir()?.join("saves").join(folder);
+            if let Err(e) = horizon_os::fs::create_dir_all(&world) {
                 log::warn!("Horizon: data packs for {folder}: {}: {e}", world.display());
             } else {
                 let disabled: Vec<String> =
@@ -13060,6 +13073,11 @@ impl Game<'_> {
             pose[5] = if p.name == arm.name { z_rot } else { 0.0 };
             pose
         };
+        // `renderPlayerArm`'s last steps: the model's Y grows down, and the
+        // arm is turned one block about it before it is drawn.
+        let m = m
+            * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
+            * glam::Mat4::from_translation(glam::Vec3::new(0.0, -1.0, 0.0));
         horizon_client::mobs::render_model(arm, m, &pose, [r.u0, r.v0, r.u1, r.v1], light, 0, out);
     }
     /// FirstPersonHandsAndItemsRenderer: the right arm or the held items of
@@ -14871,6 +14889,8 @@ impl Game<'_> {
             shadow_scene_revision: (self.world.revision, self.world.chunks.membership_revision()),
             shadow_cache: self.settings.horizon.shadow_cache,
             visual: self.settings.horizon.visual_uniform(),
+            visual_post: self.settings.horizon.post_uniform(),
+            visual_tier: self.settings.horizon.effective_visual_quality(),
             distance,
             detail_distance: (self.streaming.radius * 16) as f32,
             depth_far,
@@ -15210,7 +15230,7 @@ impl Game<'_> {
                         self.death_confirm_answer(false)?;
                     }
                 }
-                Screen::Stats | Screen::Friends => self.screen = Screen::Paused,
+                Screen::Stats | Screen::Friends | Screen::Nearby => self.screen = Screen::Paused,
                 Screen::ServerLinks => self.screen = Screen::Paused,
                 // ConfirmScreen.keyPressed: Escape answers no; both return to
                 // the Server Links screen they came from.
@@ -15439,20 +15459,25 @@ impl Game<'_> {
         }
         Ok(())
     }
-    /// LOD Distance and Far Detail Reduced as the player chose them.
+    /// LOD Distance and Far Detail Reduced as the player chose them. Infinite
+    /// terrain replaces the distance; on GPUs where far terrain costs most it
+    /// also picks the coarser cells, so the horizon stays affordable.
     fn far_terrain_choice(&self) -> (u32, bool) {
         let g = &self.settings.horizon;
-        let reduced = g.far_detail == horizon_client::graphics::FarDetail::Reduced;
-        (g.lod_distance, reduced)
+        let reduced = g.far_detail == horizon_client::graphics::FarDetail::Reduced
+            || (g.lod_infinite && horizon_client::graphics::reduced_far_detail_suggested());
+        let distance = if g.lod_infinite {
+            horizon_client::lod::INFINITE_CHUNKS
+        } else {
+            g.lod_distance
+        };
+        (distance, reduced)
     }
-    /// LOD Distance as far terrain uses it (`graphics::lod_distance_capped`).
+    /// LOD Distance as far terrain uses it (`graphics::lod_distance_on`).
     fn lod_distance(&self) -> u32 {
-        let (distance, _) = self.far_terrain_choice();
         match &self.renderer {
-            Some(renderer) => {
-                horizon_client::graphics::lod_distance_capped(distance, &renderer.info)
-            }
-            None => distance.min(horizon_client::lod::MAX_CHUNKS),
+            Some(renderer) => self.settings.horizon.lod_distance_on(&renderer.info),
+            None => self.far_terrain_choice().0,
         }
     }
     /// Only enabled LOD worlds extend the renderer's range, never simulation.
@@ -15494,12 +15519,28 @@ impl Game<'_> {
             Some(server) => server.call(move |game| game.lod_source_in(dim)).flatten(),
             None => Some(self.streaming.lod_source()),
         };
+        if source.is_none() {
+            // The page's integrated server answers when it can (`call` looks
+            // once): leaving `attempted` set here kept far terrain off forever.
+            self.lod_source_attempted = false;
+            return;
+        }
         if let Some(source) = source {
-            self.lod = Some(horizon_client::lod::Lod::new(
+            match horizon_client::lod::Lod::new(
                 source,
                 self.pack.context.clone(),
-            ));
-            self.lod_observe.extend(self.world.chunks.keys().copied());
+                self.settings.horizon.lod_infinite,
+                self.level_min_y(),
+            ) {
+                Some(lod) => {
+                    self.lod = Some(lod);
+                    self.lod_observe.extend(self.world.chunks.keys().copied());
+                }
+                None => log::info!(
+                    "Horizon: far terrain needs worker threads; this single-threaded \
+                     build draws the loaded chunks only"
+                ),
+            }
         }
     }
     fn update_world(&mut self) {
@@ -15510,6 +15551,16 @@ impl Game<'_> {
                 self.remote.is_some(),
                 self.integrated.is_some()
             );
+        }
+        // The infinite/finite setting changes the sampler's whole mode; the
+        // LOD is assembled once, so rebuild it when the setting moves. Before
+        // this it kept the old mode until the world was reloaded.
+        if self
+            .lod
+            .as_ref()
+            .is_some_and(|lod| lod.infinite() != self.settings.horizon.lod_infinite)
+        {
+            self.clear_lod();
         }
         self.prepare_lod();
         if self.lod.is_some() {
@@ -15551,20 +15602,23 @@ impl Game<'_> {
             }
             // Unloaded columns first (their summaries are all that remains),
             // then a few resident ones (an edit copies a chunk the worker
-            // still holds). The worker summarizes them.
-            horizon_client::spans::time("lod_observe", || {
-                for chunk in &unloaded {
-                    lod.observe(chunk.clone(), self.res.facts());
-                }
-                while lod.observing() < horizon_client::lod::OBSERVE_AHEAD
-                    && let Some(&key) = self.lod_observe.iter().next()
-                {
-                    self.lod_observe.remove(&key);
-                    if let Some(chunk) = self.world.chunks.get(&key) {
+            // still holds). The worker summarizes them. Infinite terrain is a
+            // pure seedmap and takes no chunk summaries.
+            if lod.observes_chunks() {
+                horizon_client::spans::time("lod_observe", || {
+                    for chunk in &unloaded {
                         lod.observe(chunk.clone(), self.res.facts());
                     }
-                }
-            });
+                    while lod.observing() < horizon_client::lod::OBSERVE_AHEAD
+                        && let Some(&key) = self.lod_observe.iter().next()
+                    {
+                        self.lod_observe.remove(&key);
+                        if let Some(chunk) = self.world.chunks.get(&key) {
+                            lod.observe(chunk.clone(), self.res.facts());
+                        }
+                    }
+                });
+            }
         }
         let dirty: Vec<_> = unloaded
             .iter()
@@ -15592,6 +15646,13 @@ impl Game<'_> {
             log::warn!("Horizon: failed to save unloaded chunks: {e}");
         }
         let (far_distance, far_reduced) = self.far_terrain_choice();
+        let far_distance = if self.settings.horizon.lod_infinite {
+            far_distance
+        } else if let Some(renderer) = &self.renderer {
+            horizon_client::graphics::lod_distance_capped(far_distance, &renderer.info)
+        } else {
+            far_distance
+        };
         if let Some(renderer) = self.renderer.as_mut() {
             let g = &self.settings.horizon;
             let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0;
@@ -15674,22 +15735,28 @@ impl Game<'_> {
             }
             renderer.remove_columns(unloaded.iter().map(|c| (c.x, c.z)));
             if let (Some(lod), Some(player)) = (&mut self.lod, &self.player) {
-                let lod_distance =
-                    horizon_client::graphics::lod_distance_capped(far_distance, &renderer.info);
                 lod.set_near_loading(self.streaming.busy());
                 lod.set_reduced_detail(far_reduced);
-                // The covered columns change only with the complete ones and
-                // the render area: rebuilt then, not every frame.
+                // The covered columns change with the complete ones and the
+                // render area, and as their sections finish fading in (a
+                // dithered section must keep its tile under it). Rebuild then,
+                // not every frame; the time bucket catches the fade ends.
                 let at = (
                     renderer.lod_detail_revision(),
                     self.streaming.center,
                     self.streaming.radius,
+                    self.started.elapsed().as_millis() as u64 / 250,
                 );
+                // The LOD leaves out only resident columns that are actually
+                // uploaded (every section has its mesh). A column still loading
+                // stays LOD terrain, so no hole can open; once its resident
+                // sections are drawn, the LOD clips it out instead of drawing
+                // its low-resolution cells under or over them.
                 let covered = (self.lod_covered_at != Some(at)).then(|| {
                     self.lod_covered_at = Some(at);
                     horizon_client::spans::time("lod_covered_set", || {
                         renderer
-                            .lod_detail_columns()
+                            .lod_detail_columns(self.settings.chunk_fade)
                             .filter(|&(x, z)| {
                                 horizon_client::streaming::in_view_distance(at.1, at.2, x, z)
                             })
@@ -15700,7 +15767,7 @@ impl Game<'_> {
                     lod.update(
                         [player.position.x, player.position.y, player.position.z],
                         self.streaming.radius,
-                        lod_distance,
+                        far_distance,
                         covered,
                     )
                 });
@@ -16440,11 +16507,24 @@ impl Game<'_> {
                     let b = HudBatch::new(size);
                     let atlas = &self.gui.atlas;
                     let shift = self.has_shift_down();
+                    let cursor = self.cursor;
+                    let size = (b.width, b.height);
                     let (action, sound) = self.title.as_mut().map_or((Action::None, false), |t| {
-                        let clicked = t.click(self.cursor.0, self.cursor.1, (b.width, b.height));
-                        t.press_field(atlas, self.cursor, (b.width, b.height), shift);
-                        let rules = t.press_rules(atlas, self.cursor, (b.width, b.height));
-                        (clicked.0, clicked.1 || rules)
+                        if matches!(t.mode, horizon_client::title::Mode::Nearby) {
+                            let clicked = horizon_client::nearby_screen::click(
+                                atlas, size, cursor, &t.nearby,
+                            );
+                            t.press_field(atlas, cursor, size, shift);
+                            let rules = t.press_rules(atlas, cursor, size);
+                            let clicked_some = clicked.is_some();
+                            let action = clicked.map(Action::Nearby).unwrap_or(Action::None);
+                            (action, clicked_some || rules)
+                        } else {
+                            let clicked = t.click(cursor.0, cursor.1, size);
+                            t.press_field(atlas, cursor, size, shift);
+                            let rules = t.press_rules(atlas, cursor, size);
+                            (clicked.0, clicked.1 || rules)
+                        }
                     });
                     self.save_title_options();
                     if sound {
@@ -16585,6 +16665,9 @@ impl Game<'_> {
                         }
                         Screen::Friends if pressed && button == MouseButton::Left => {
                             self.friends_screen_click()
+                        }
+                        Screen::Nearby if pressed && button == MouseButton::Left => {
+                            self.nearby_screen_click()
                         }
                         Screen::CommandBlock if pressed && button == MouseButton::Left => {
                             self.command_block_click()
@@ -16995,6 +17078,7 @@ impl Game<'_> {
                         self.tick_win_screen()?;
                         // Gui.tick runs ChatListener.tick paused or not.
                         self.tick_chat_queue();
+                        self.tick_nearby();
                         self.tick_music();
                         self.tick_sound_engine();
                         self.clock.record(started.elapsed());
@@ -17697,10 +17781,11 @@ impl<'a> Game<'a> {
             test_highlights: HashMap::new(),
             game_tests: game_tests::GameTests::default(),
             friends: None,
+            nearby: None,
             debug_keys: Default::default(),
             debug_charts: Default::default(),
             debug_entries: horizon_client::debug_entries::DebugEntries::load(
-                &std::env::current_dir().unwrap_or_default(),
+                &horizon_os::env::current_dir().unwrap_or_default(),
             ),
             debug_options: None,
             memory_meter: Default::default(),
@@ -17991,7 +18076,7 @@ impl Game<'_> {
                     )
                 })
                 .unwrap_or_default();
-            self.creation_job = std::thread::Builder::new()
+            self.creation_job = horizon_os::thread::Builder::new()
                 .name("world-creation".into())
                 .spawn(move || {
                     horizon_client::vanillagen::shared_data_with(&dir, &overrides, registry)
@@ -18004,7 +18089,7 @@ impl Game<'_> {
         if !self
             .creation_job
             .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished)
+            .is_none_or(horizon_os::thread::JoinHandle::is_finished)
         {
             return;
         }
@@ -18276,12 +18361,12 @@ fn launch_world(options: &Options) -> Option<&str> {
 /// A step of the resource load: on its own scoped thread, or, when the
 /// settings allow a single worker, run where it is joined.
 enum Step<'scope, T> {
-    Thread(std::thread::ScopedJoinHandle<'scope, T>),
+    Thread(horizon_os::thread::ScopedJoinHandle<'scope, T>),
     Later(Box<dyn FnOnce() -> T + Send + 'scope>),
 }
 impl<'scope, T: Send + 'scope> Step<'scope, T> {
     fn spawn(
-        scope: &'scope std::thread::Scope<'scope, '_>,
+        scope: &'scope horizon_os::thread::Scope<'scope, '_>,
         parallel: bool,
         f: impl FnOnce() -> T + Send + 'scope,
     ) -> Self {
@@ -18334,12 +18419,15 @@ fn load_core(
 ) -> std::result::Result<std::result::Result<CoreTables, String>, String> {
     let assets = match Assets::load(root) {
         Ok(assets) => assets,
-        Err(e) => return Ok(Err(e.to_string())),
+        Err(e) => {
+            log::warn!("Horizon: loading assets failed: {e}");
+            return Ok(Err(e.to_string()));
+        }
     };
     progress.set(1);
     let registry = assets.registry;
     let (render, gameplay, visibility, biomes, environment, collision) =
-        std::thread::scope(|scope| {
+        horizon_os::thread::scope(|scope| {
             let assets = &assets;
             let render = Step::spawn(scope, parallel, move || {
                 // A server reads no block sprites' pixels, which only the
@@ -18349,12 +18437,18 @@ fn load_core(
                 } else {
                     assets.reload(root)
                 }
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    log::warn!("Horizon: loading block models failed: {e}");
+                    e.to_string()
+                })?;
                 let item_renderer = horizon_client::item_render::ItemRenderer::load_with_library(
                     root,
                     render.model_library.clone(),
                 )
-                .map_err(|e| e.to_string());
+                .map_err(|e| {
+                    log::warn!("Horizon: loading item renderer failed: {e}");
+                    e.to_string()
+                });
                 Ok((render, item_renderer))
             });
             // Nor the face visibility the mesher and the block entity
@@ -18363,16 +18457,28 @@ fn load_core(
                 if headless {
                     return Ok(horizon_world::block_render::FaceVisibility::empty());
                 }
-                models::load_visibility(root, registry).map_err(|e| e.to_string())
+                models::load_visibility(root, registry).map_err(|e| {
+                    log::warn!("Horizon: loading face visibility failed: {e}");
+                    e.to_string()
+                })
             });
             let biomes = Step::spawn(scope, parallel, || {
-                Biomes::load(root).map_err(|e| e.to_string())
+                Biomes::load(root).map_err(|e| {
+                    log::warn!("Horizon: loading biomes failed: {e}");
+                    e.to_string()
+                })
             });
             let environment = Step::spawn(scope, parallel, || {
-                Environment::load(root).map_err(|e| e.to_string())
+                Environment::load(root).map_err(|e| {
+                    log::warn!("Horizon: loading environment failed: {e}");
+                    e.to_string()
+                })
             });
             let collision = Step::spawn(scope, parallel, || {
-                collisions::load(root, registry).map_err(|e| e.to_string())
+                collisions::load(root, registry).map_err(|e| {
+                    log::warn!("Horizon: loading collisions failed: {e}");
+                    e.to_string()
+                })
             });
             let gameplay = gameplay_tables(root, assets, parallel, progress);
             (
@@ -18411,12 +18517,21 @@ fn gameplay_tables(
     progress: &Progress,
 ) -> std::result::Result<GameplayTables, String> {
     let behaviour_json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(
-        std::fs::File::open(root.join("block-behaviours.json")).map_err(|e| e.to_string())?,
+        horizon_os::fs::File::open(root.join("block-behaviours.json")).map_err(|e| {
+            log::warn!("Horizon: opening block behaviours failed: {e}");
+            e.to_string()
+        })?,
     ))
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        log::warn!("Horizon: parsing block behaviours failed: {e}");
+        e.to_string()
+    })?;
     let (facts, gameplay_projection) =
         BlockFacts::load_with_projection(root, assets.registry, &behaviour_json, parallel)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log::warn!("Horizon: loading block facts failed: {e}");
+                e.to_string()
+            })?;
     horizon_client::block_contact::set_mod_blocks(
         facts
             .states
@@ -18424,12 +18539,17 @@ fn gameplay_tables(
             .any(|s| !s.name.starts_with("minecraft:")),
     );
     progress.set(2);
-    let (light, motion) = std::thread::scope(|scope| {
+    let (light, motion) = horizon_os::thread::scope(|scope| {
         let light = Step::spawn(scope, parallel, || {
-            LightTables::load(root, assets.registry, &facts).map_err(|e| e.to_string())
+            LightTables::load(root, assets.registry, &facts).map_err(|e| {
+                log::warn!("Horizon: loading light tables failed: {e}");
+                e.to_string()
+            })
         });
-        let motion =
-            MotionResources::load_with_facts(root, assets, &facts).map_err(|e| e.to_string());
+        let motion = MotionResources::load_with_facts(root, assets, &facts).map_err(|e| {
+            log::warn!("Horizon: loading motion tables failed: {e}");
+            e.to_string()
+        });
         (light.join(), motion)
     });
     Ok(GameplayTables {
@@ -18491,7 +18611,7 @@ fn load_resources(
         }
     };
     let (core, loaded_gui) = loop {
-        let (ui, core) = std::thread::scope(|scope| {
+        let (ui, core) = horizon_os::thread::scope(|scope| {
             let core = Step::spawn(scope, parallel, || {
                 load_core(&root, headless, parallel, progress)
             });
@@ -18584,7 +18704,13 @@ fn load_resources(
     // Finish fallible CPU preparation before starting the tail, so an error
     // cannot detach a tail worker that races the next pack-loader generation.
     let prepared_at = Instant::now();
-    let game_cpu = menu.then(|| GameCpuResources::load(&root)).transpose()?;
+    let game_cpu = menu
+        .then(|| GameCpuResources::load(&root))
+        .transpose()
+        .map_err(|e| {
+            log::warn!("Horizon: loading game CPU resources failed: {e}");
+            e
+        })?;
     let renderer_cpu = menu.then(|| {
         let pixels = pack.render.pixels();
         prepare_renderer_textures(&pack, &pixels)
@@ -18646,7 +18772,11 @@ fn load_resources(
             progress,
             started,
             !headless,
-        )?;
+        )
+        .map_err(|e| {
+            log::warn!("Horizon: loading world resources failed: {e}");
+            e
+        })?;
         resources
             .rest
             .set(rest)
@@ -18739,7 +18869,7 @@ fn load_world_rest(
         result.map_err(|e| e.to_string())
     }
     let (items, behaviours, block_entity_render, animate, mobs, transformers) = if threads > 1 {
-        std::thread::scope(|scope| {
+        horizon_os::thread::scope(|scope| {
             let items = scope.spawn(|| text(load_items()));
             let behaviours = scope.spawn(|| text(load_behaviours()));
             let block_entity_render = scope.spawn(|| text(load_block_entity_render()));
@@ -18988,6 +19118,8 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         shadow_scene_revision: (0, 0),
         shadow_cache: false,
         visual: [0.0; 8],
+        visual_post: [1.0, 0.0, 0.0, 0.0],
+        visual_tier: horizon_client::graphics::VisualQuality::Low,
         distance: 12.0,
         detail_distance: 12.0,
         depth_far: 1000.0,
@@ -19441,6 +19573,9 @@ impl Loading {
                     )
                     .await
                 };
+                if let Err(e) = &result {
+                    log::warn!("Horizon: title renderer failed: {e}");
+                }
                 *task_output.borrow_mut() = Some(result);
             });
             self.opening = Some(output);
@@ -19674,7 +19809,14 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
-                match if loading.menu.reload_packs {
+                // On the page the title renderer is an async device request; the
+                // core bundle can arrive first. Finishing then would take a
+                // menu bundle that is still in `opening_gui` (the black screen).
+                #[cfg(target_arch = "wasm32")]
+                let title_pending = loading.opening.is_some();
+                #[cfg(not(target_arch = "wasm32"))]
+                let title_pending = false;
+                match if loading.menu.reload_packs || title_pending {
                     None
                 } else {
                     loading.loaded.take()

@@ -425,11 +425,16 @@ pub(super) struct VanillaLodSampler {
     details: Vec<LodDetail>,
     /// Reduced far detail: `lod_grid` approximates wide cells.
     approximate: bool,
+    /// Infinite terrain: seed samples only. No chunk protos, features or
+    /// decoration, and no detail cache growth.
+    infinite: bool,
 }
 impl VanillaLodSampler {
     pub(super) fn new(generator: Arc<VanillaTerrain>) -> Self {
         let worker = generator.generator.worker();
-        let builder = Some(Builder::new(generator.clone()));
+        // Started by the first detail request; infinite terrain never makes
+        // one, so its decoration threads never exist.
+        let builder = None;
         let vegetation = Arc::new(Vegetation::new(
             generator.generator.data(),
             &generator.biome_map,
@@ -446,6 +451,7 @@ impl VanillaLodSampler {
             order: VecDeque::new(),
             details: Vec::new(),
             approximate: false,
+            infinite: false,
         }
     }
 }
@@ -461,12 +467,22 @@ impl LodSampler for VanillaLodSampler {
             order: VecDeque::new(),
             details: Vec::new(),
             approximate: self.approximate,
+            infinite: self.infinite,
         }))
     }
     fn set_approximate(&mut self, approximate: bool) {
         self.approximate = approximate;
     }
+    fn set_infinite(&mut self, infinite: bool) {
+        self.infinite = infinite;
+        // Infinite terrain uses the real decorated chunks inside the exact
+        // radius and the exact seed rows outside it; only the user's Reduced
+        // far detail keeps the coarse sampler.
+    }
     fn request_detail(&mut self, chunks: &[(i32, i32)], center: [i32; 2]) {
+        if self.builder.is_none() {
+            self.builder = Some(Builder::new(self.generator.clone()));
+        }
         let mut missing = Vec::new();
         for &key in chunks {
             if let Some(columns) = self.cache.get(&key) {
@@ -527,17 +543,25 @@ impl LodSampler for VanillaLodSampler {
         if let Some(columns) = cached_grid(&self.cache, x, z, width, side) {
             return columns;
         }
-        let samples =
-            match self
-                .worker
-                .lod_grid(x + width / 2, z + width / 2, width, side, self.approximate)
-            {
-                Ok(samples) => samples,
-                Err(error) => {
-                    log::warn!("Horizon: direct far sampling failed: {error}");
-                    return vec![Column::default(); side * side];
-                }
-            };
+        let samples = match self.worker.lod_grid(
+            x + width / 2,
+            z + width / 2,
+            width,
+            side,
+            // Exact by default everywhere. Reduced far detail is the only
+            // approximation, and only for wide cells.
+            if self.infinite {
+                false
+            } else {
+                self.approximate
+            },
+        ) {
+            Ok(samples) => samples,
+            Err(error) => {
+                log::warn!("Horizon: direct far sampling failed: {error}");
+                return vec![Column::default(); side * side];
+            }
+        };
         samples
             .into_iter()
             .enumerate()
@@ -599,6 +623,11 @@ impl VanillaLodSampler {
         }
         let nether = self.generator.dimension == "minecraft:the_nether";
         let light = if nether { 0 } else { 240 };
+        // Seed-stable vegetation in both modes: without it the horizon beyond
+        // the resident chunks is bare terrain and every tree pops in only when
+        // its real chunk arrives. The vegetation is deterministic from the
+        // world seed and only ever drawn as a visual approximation; resident
+        // and saved chunks still replace it.
         self.vegetation.apply(&mut column, x, z, width, light);
         self.islands.apply(&mut column, x, z, width, light);
         if !nether {

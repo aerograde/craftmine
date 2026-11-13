@@ -28,6 +28,14 @@ struct Globals {
     emissive_count: vec4<u32>,
     sunrise_fan: array<vec4<f32>, 32>,
     filtering: vec4<f32>,
+    // Visual Vibrance's daylight pass (terrain.wgsl documents it): x on, y direct sun,
+    // z specular, w sun-tinted fog.
+    visual: vec4<f32>,
+    // Visual Vibrance's near sun shadow map (terrain.wgsl documents it).
+    shadow_view_proj: mat4x4<f32>,
+    shadow_params: vec4<f32>,
+    // The camera's world position, xyz (terrain.wgsl documents it).
+    camera: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -65,6 +73,8 @@ struct Out {
     // HDR tier of a light-giving particle (mesher::hdr_tier), from the overlay's
     // high bits (particles.rs): fs_hdr_mark marks the frame with it.
     @location(13) @interpolate(flat) tier: u32,
+    // Camera-relative world position: cloud faces shade from their normal.
+    @location(14) world: vec3<f32>,
 }
 // Shipped light.glsl; normals are already transformed and RGBA8_SNORM packed.
 fn entity_light(normal: vec3<f32>, nether: bool) -> f32 {
@@ -140,6 +150,7 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     out.cylindrical = select(max(length(position.xz), abs(position.y)), 0.0, overlay >= 2u && overlay <= 4u);
     out.overlay = overlay;
     out.glint_uv = vec2(0.0);
+    out.world = position + globals.camera.xyz;
     if overlay == 4u { out.spherical = length(position); }
     return out;
 }
@@ -264,7 +275,30 @@ fn entity_color(in: Out, front: bool) -> vec4<f32> {
         color = vec4(c, 1.0);
     } else if in.overlay == 4u {
         // clouds.fsh: alpha fades out towards the cloud fog end.
-        return vec4(color.rgb, color.a * (1.0 - linear_fog(in.spherical, 0.0, globals.fog_ends.y)));
+        var rgb = color.rgb;
+        if globals.visual.x > 0.5 {
+            // The galleries' clouds are lit by their face: bright, warm tops,
+            // blue-grey undersides, and a sunset wash on the sunlit side.
+            let to_eye = normalize(globals.camera.xyz - in.world);
+            var n = cross(dpdx(in.world), dpdy(in.world));
+            let n_len = length(n);
+            if n_len > 1e-6 {
+                n = n / n_len;
+                if dot(n, to_eye) < 0.0 { n = -n; }
+            } else {
+                n = vec3<f32>(0.0, 1.0, 0.0);
+            }
+            let light = normalize(globals.sun.xyz);
+            let ndl = max(dot(n, light), 0.0);
+            let top = smoothstep(-0.25, 0.65, n.y);
+            let dusk = clamp(globals.sunrise.a, 0.0, 1.0);
+            let shade = 0.72 + 0.24 * ndl + 0.10 * top;
+            rgb = rgb * shade + globals.sky_color.rgb * 0.045 * (1.0 - top);
+            rgb = mix(rgb, rgb * globals.sunrise.rgb, 0.30 * dusk * (0.4 + 0.6 * ndl));
+            // Bright tops give the bloom pass something to glow around.
+            rgb = rgb * 1.08 + vec3<f32>(0.015);
+        }
+        return vec4(rgb, color.a * (1.0 - linear_fog(in.spherical, 0.0, globals.fog_ends.y)));
     }
     if color.a < 0.1 || (in.cull != 0u && !front) { discard; }
     // entity.fsh calculateFinalColor: the overlay (hurt red, TNT white) over the

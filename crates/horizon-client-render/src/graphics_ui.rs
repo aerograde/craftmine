@@ -28,6 +28,7 @@ pub enum H {
     Visuals,
     VisualQuality,
     LodDistance,
+    LodInfinite,
     FarDetail,
     CaveCulling,
     EntityCulling,
@@ -103,17 +104,22 @@ pub fn rows(level: Level) -> Vec<Row> {
     let lod = h(
         H::LodDistance,
         Medium,
-        "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
+        "Coarse distant terrain in local worlds. Moving this pins a finite distance.",
+    );
+    let infinite = h(
+        H::LodInfinite,
+        Medium,
+        "Seed-generated terrain to a far horizon, fading into the sky.",
     );
     let visuals = h(
         H::Visuals,
         High,
-        "Vibrant Lux: Horizon's shadow, light, colour and bloom look. Off is vanilla.",
+        "Visual Vibrance: Horizon's colour, light and atmosphere. Off is vanilla.",
     );
     let visual_quality = h(
         H::VisualQuality,
         Medium,
-        "Auto adapts the look to the GPU. Low is the Luxium-style cheap path.",
+        "Auto adapts to the GPU. Low keeps the grade but drops the extra passes.",
     );
     // Suggested, never switched on, where far terrain costs the GPU most.
     let far = h(
@@ -153,6 +159,7 @@ pub fn rows(level: Level) -> Vec<Row> {
             visual_quality,
             render,
             lod,
+            infinite,
             far,
             fov,
             fps,
@@ -201,6 +208,7 @@ pub fn rows(level: Level) -> Vec<Row> {
             Row::Header("Rendering"),
             render,
             lod,
+            infinite,
             far,
             v(
                 Opt::SimulationDistance,
@@ -506,7 +514,7 @@ impl H {
                 Some(i as f32 / (LOD_STEPS.len() - 1) as f32)
             }
             H::Workers => Some(g.workers as f32 / max_workers() as f32),
-            H::ResolutionScale => Some((g.resolution_scale as f32 - 50.0) / 150.0),
+            H::ResolutionScale => Some((g.resolution_scale as f32 - 25.0) / 175.0),
             // Auto, then 10..480 by 10.
             H::HdrPaperWhite => Some(g.hdr_paper_white as f32 / 480.0),
             // Auto, then 200..2000 by 50.
@@ -538,10 +546,12 @@ impl H {
             H::Preset => labelled("Preset", g.preset.label()),
             H::Visuals => labelled("Visuals", on_off(g.visuals)),
             H::VisualQuality => labelled("Visual Quality", g.visual_quality.label()),
+            H::LodDistance if g.lod_infinite => labelled("LOD Distance", "Infinite"),
             H::LodDistance => match g.lod_distance {
                 0 => labelled("LOD Distance", "Off"),
                 n => labelled("LOD Distance", lang::tr("%s chunks", &[&n])),
             },
+            H::LodInfinite => labelled("Infinite Terrain", on_off(g.lod_infinite)),
             H::FarDetail => labelled("Far Detail", g.far_detail.label()),
             H::CaveCulling => labelled("Cave Culling", on_off(g.cave_culling)),
             H::EntityCulling => labelled("Entity Culling", on_off(g.entity_culling)),
@@ -643,10 +653,11 @@ impl H {
                     UPLOAD_STEPS[(v * (UPLOAD_STEPS.len() - 1) as f32).round() as usize]
             }
             H::LodDistance => {
-                g.lod_distance = LOD_STEPS[(v * (LOD_STEPS.len() - 1) as f32).round() as usize]
+                g.lod_distance = LOD_STEPS[(v * (LOD_STEPS.len() - 1) as f32).round() as usize];
+                g.lod_infinite = false;
             }
             H::Workers => g.workers = (v * max_workers() as f32).round() as u32,
-            H::ResolutionScale => g.resolution_scale = (50.0 + (v * 30.0).round() * 5.0) as u32,
+            H::ResolutionScale => g.resolution_scale = (25.0 + (v * 35.0).round() * 5.0) as u32,
             H::HdrPaperWhite => g.hdr_paper_white = (v * 48.0).round() as u32 * 10,
             H::HdrPeak => {
                 g.hdr_peak = match (v * 37.0).round() as u32 {
@@ -689,6 +700,7 @@ impl H {
             H::FarDetail => {
                 g.far_detail = step(&[FarDetail::Full, FarDetail::Reduced], g.far_detail, back)
             }
+            H::LodInfinite => g.lod_infinite = !g.lod_infinite,
             H::CaveCulling => g.cave_culling = !g.cave_culling,
             H::EntityCulling => g.entity_culling = !g.entity_culling,
             H::Sky => g.sky = !g.sky,
@@ -1749,9 +1761,11 @@ mod tests {
     fn lod_distance_slides_in_both_levels_without_changing_near_distance() {
         let mut s = Settings::default();
         let item = Item::Horizon(H::LodDistance);
+        let infinite = Item::Horizon(H::LodInfinite);
         let near = s.render_distance;
-        assert_eq!(item.label(&s).plain(), "LOD Distance: Off");
+        assert_eq!(item.label(&s).plain(), "LOD Distance: Infinite");
         assert_eq!(item.slider(&s), Some(0.0));
+        assert_eq!(infinite.label(&s).plain(), "Infinite Terrain: On");
         for level in [Level::Simple, Level::Advanced] {
             let items: Vec<_> = rows(level)
                 .into_iter()
@@ -1765,11 +1779,15 @@ mod tests {
                 .position(|i| *i == Item::Vanilla(Opt::RenderDistance))
                 .unwrap();
             assert_eq!(items[render + 1], item);
+            assert_eq!(items[render + 2], infinite);
         }
-        // Every stop is reachable and reads back as the same position.
+        // Every stop is reachable and reads back as the same position; moving
+        // the slider pins a finite distance.
         for (i, &distance) in LOD_STEPS.iter().enumerate() {
             let at = i as f32 / (LOD_STEPS.len() - 1) as f32;
+            s.horizon.lod_infinite = true;
             item.set_slider(&mut s, at);
+            assert!(!s.horizon.lod_infinite);
             assert_eq!(s.horizon.lod_distance, distance);
             assert_eq!(item.slider(&s), Some(at));
             assert_eq!(s.render_distance, near);
@@ -1793,6 +1811,11 @@ mod tests {
             Item::Vanilla(Opt::RenderDistance).label(&s).plain(),
             format!("Full Detail Distance: {near} chunks")
         );
+        // The switch is the other way back.
+        infinite.cycle(&mut s, false, [854, 480]);
+        assert!(s.horizon.lod_infinite);
+        assert_eq!(item.label(&s).plain(), "LOD Distance: Infinite");
+        assert_eq!(infinite.label(&s).plain(), "Infinite Terrain: On");
     }
 
     #[test]

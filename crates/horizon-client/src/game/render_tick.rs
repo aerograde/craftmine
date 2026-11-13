@@ -107,13 +107,21 @@ impl Game<'_> {
         } else {
             self.res.fog()
         };
+        let infinite_lod = self.lod.is_some() && self.settings.horizon.lod_infinite;
+        // The built-in profile's aerial perspective fades the infinite horizon
+        // into the sky. Without it (Visuals off, or a shader pack owns the
+        // frame) the LOD needs ordinary distance fog, or it ends at a hard rim
+        // at the render distance.
+        let aerial = self.settings.horizon.visuals && self.settings.horizon.shader_pack.is_empty();
         let input = FogInputs {
             fog_type,
             sky,
             water_fog_color,
             biome,
             render_distance_chunks: self.terrain_distance(),
-            distant_terrain: self.lod.is_some(),
+            // Infinite terrain is meant to be readable to the horizon: only
+            // the sky/cloud/light-shaft atmosphere remains, never distance fog.
+            distant_terrain: self.lod.is_some() && (!infinite_lod || !aerial),
             cloud_range_chunks: self.settings.cloud_range,
             camera_y: camera.y,
             min_y: self.level_min_y(),
@@ -137,7 +145,7 @@ impl Game<'_> {
             night_vision: self.fog_night_vision(),
         };
         let mut fog = horizon_client::fog::setup_fog(tables, &self.fog, &input);
-        if !self.settings.horizon.fog {
+        if !self.settings.horizon.fog || (infinite_lod && aerial) {
             horizon_client::fog::clear_distance_fog(&mut fog, &input);
         }
         fog
@@ -166,7 +174,7 @@ impl Game<'_> {
         }
     }
     /// `Level.getMinY`: the current dimension type's minimum y.
-    fn level_min_y(&self) -> i32 {
+    pub(super) fn level_min_y(&self) -> i32 {
         match self.remote.as_ref() {
             Some(r) => r.dimension.min_y,
             None => self.world.shape.min_y,

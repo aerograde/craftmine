@@ -268,6 +268,9 @@ impl Game<'_> {
         if let Some(value) = self.friends_control(&words)? {
             return Ok(Some(value));
         }
+        if let Some(value) = self.nearby_control(&words)? {
+            return Ok(Some(value));
+        }
         match self.agent_command(&words, line, reply, event_loop)? {
             super::agent::Handled::Reply(value) => return Ok(Some(value)),
             super::agent::Handled::Deferred => return Ok(None),
@@ -280,6 +283,7 @@ impl Game<'_> {
                 .chain(super::blockctl::HELP)
                 .chain(super::lan::HELP)
                 .chain(super::friends::HELP)
+                .chain(super::nearby::HELP)
                 .chain(super::render_control::HELP)
                 .chain(super::sculk::HELP)
                 .chain(super::agent::HELP)
@@ -655,6 +659,16 @@ impl Game<'_> {
                     .into());
                 }
                 self.settings.horizon.lod_distance = n;
+                self.settings.horizon.lod_infinite = false;
+                self.apply_settings();
+                ok()
+            }
+            "lod-infinite" => {
+                self.settings.horizon.lod_infinite = match arg(1)? {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    other => return Err(format!("expected on or off, not {other}").into()),
+                };
                 self.apply_settings();
                 ok()
             }
@@ -1023,6 +1037,7 @@ impl Game<'_> {
             Screen::Advancements => "advancements",
             Screen::WorldOptions => "world-options",
             Screen::Friends => "friends",
+            Screen::Nearby => "nearby",
             Screen::ServerLinks => "server-links",
             Screen::ConfirmLink => "confirm-link",
             Screen::DialogWarning => "dialog-warning",
@@ -1140,6 +1155,7 @@ impl Game<'_> {
         physical_keys.sort();
         let lod = json!({
             "distance": self.settings.horizon.lod_distance,
+            "infinite": self.settings.horizon.lod_infinite,
             "effective_distance": self.lod_distance(),
             "terrain_distance": self.terrain_distance(),
             "source": if self.lod.is_none() { "none" } else if self.integrated.is_some() { "integrated" } else { "local" },

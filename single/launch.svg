@@ -1,0 +1,648 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1200 760"
+     role="application" aria-label="Horizon launcher">
+  <title>Horizon - single-file launcher</title>
+  <desc>Installs horizon.html in this origin's storage and serves it from a worker with the headers
+        that let the game use its Web Workers. Its only network use is the game's own multiplayer.</desc>
+
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#07061a"/>
+      <stop offset=".34" stop-color="#140f38"/>
+      <stop offset=".56" stop-color="#2a1656"/>
+      <stop offset=".72" stop-color="#5b2a78"/>
+      <stop offset=".86" stop-color="#b0477d"/>
+      <stop offset="1" stop-color="#f08a5d"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff6cf"/>
+      <stop offset=".5" stop-color="#ffd272"/>
+      <stop offset="1" stop-color="#ff9a44"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#ffc874" stop-opacity=".38"/>
+      <stop offset=".55" stop-color="#ff8a5c" stop-opacity=".10"/>
+      <stop offset="1" stop-color="#ff8a5c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="markGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#7656fa" stop-opacity=".42"/>
+      <stop offset=".6" stop-color="#7656fa" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#7656fa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="farHill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a2f7e"/>
+      <stop offset="1" stop-color="#2b1f5e"/>
+    </linearGradient>
+    <linearGradient id="nearHill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#151a45"/>
+      <stop offset="1" stop-color="#080b22"/>
+    </linearGradient>
+    <clipPath id="sunCut"><rect x="0" y="0" width="1200" height="684"/></clipPath>
+    <clipPath id="sunDisc"><circle cx="600" cy="648" r="214"/></clipPath>
+    <style>
+      text { font-family: 'Bricolage Grotesque', 'Segoe UI', system-ui, sans-serif; }
+      .mono { font-family: 'Geist Mono', ui-monospace, Menlo, Consolas, monospace; }
+      .btn { cursor: pointer; }
+      .btn.off { opacity: .42; pointer-events: none; }
+      .btn .face { transition: opacity .12s linear; }
+      .btn:hover .face { opacity: .86; }
+      .btn:focus { outline: none; }
+      .btn:focus .ring { opacity: 1; }
+      .ring { opacity: 0; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" fill="url(#sky)"/>
+
+  <g fill="#f4f2ff">
+    <rect x="96" y="34" width="2" height="2" opacity=".52"/>
+    <rect x="172" y="58" width="2" height="2" opacity=".31"/>
+    <rect x="258" y="24" width="2" height="2" opacity=".46"/>
+    <rect x="344" y="52" width="2" height="2" opacity=".24"/>
+    <rect x="430" y="30" width="2" height="2" opacity=".55"/>
+    <rect x="516" y="58" width="2" height="2" opacity=".28"/>
+    <rect x="692" y="26" width="2" height="2" opacity=".44"/>
+    <rect x="778" y="54" width="2" height="2" opacity=".3"/>
+    <rect x="864" y="28" width="2" height="2" opacity=".5"/>
+    <rect x="950" y="56" width="2" height="2" opacity=".26"/>
+    <rect x="1036" y="32" width="2" height="2" opacity=".42"/>
+    <rect x="1112" y="60" width="2" height="2" opacity=".3"/>
+    <circle cx="130" cy="48" r="1" opacity=".4"/>
+    <circle cx="302" cy="40" r="1" opacity=".34"/>
+    <circle cx="480" cy="44" r="1" opacity=".42"/>
+    <circle cx="742" cy="42" r="1" opacity=".36"/>
+    <circle cx="912" cy="40" r="1" opacity=".32"/>
+    <circle cx="1088" cy="46" r="1" opacity=".4"/>
+  </g>
+
+  <ellipse cx="600" cy="620" rx="560" ry="280" fill="url(#glow)"/>
+  <g clip-path="url(#sunCut)">
+    <circle cx="600" cy="648" r="214" fill="url(#sun)"/>
+    <g clip-path="url(#sunDisc)">
+      <rect x="330" y="558" width="540" height="8" fill="#b0477d" opacity=".42"/>
+      <rect x="330" y="586" width="540" height="11" fill="#b0477d" opacity=".52"/>
+      <rect x="330" y="620" width="540" height="14" fill="#b0477d" opacity=".62"/>
+    </g>
+  </g>
+
+  <path fill="url(#farHill)" d="M0 686H64V652H144V680H240V648H336V676H432V640H528V672H624V646H720V678H816V650H912V680H1008V654H1104V682H1200V760H0Z"/>
+  <path fill="url(#nearHill)" d="M0 716H80V696H176V724H288V700H400V728H512V704H624V732H736V706H848V730H960V702H1072V726H1200V760H0Z"/>
+  <g fill="#ffffff" opacity=".055">
+    <rect x="64" y="680" width="3" height="80"/>
+    <rect x="240" y="676" width="3" height="84"/>
+    <rect x="432" y="668" width="3" height="92"/>
+    <rect x="624" y="674" width="3" height="86"/>
+    <rect x="816" y="678" width="3" height="82"/>
+    <rect x="1008" y="682" width="3" height="78"/>
+    <rect x="0" y="744" width="1200" height="3"/>
+  </g>
+  <g fill="#ffb25e" opacity=".22">
+    <rect x="0" y="686" width="64" height="3"/>
+    <rect x="144" y="680" width="96" height="3"/>
+    <rect x="336" y="676" width="96" height="3"/>
+    <rect x="528" y="672" width="96" height="3"/>
+    <rect x="720" y="678" width="96" height="3"/>
+    <rect x="912" y="680" width="96" height="3"/>
+    <rect x="1104" y="682" width="96" height="3"/>
+  </g>
+
+  <path d="M128 72H1052L1056 72L1060 76L1060 80V652L1060 656L1056 660L1052 660H128L124 660L120 656V80L120 76L124 72Z"
+        fill="#15112e" fill-opacity=".94" stroke="#b9acff" stroke-opacity=".14"/>
+
+  <g transform="translate(160 104) scale(1.4)" fill="#f4f2ff">
+    <rect x="6" y="7" width="4" height="1.5"/>
+    <rect x="4" y="9" width="8" height="1.5"/>
+    <rect x="3" y="11" width="10" height="1.5"/>
+    <rect x="2" y="13" width="12" height="1.5" fill="#9a86ff"/>
+  </g>
+  <text x="202" y="122" font-size="13" font-weight="600" letter-spacing="3.4" fill="#a59fc6">HORIZON</text>
+  <text x="1040" y="121" font-size="10.5" text-anchor="end" letter-spacing="1.8" fill="#a59fc6" class="mono">SINGLE FILE</text>
+  <rect x="160" y="146" width="880" height="1" fill="#b9acff" opacity=".10"/>
+
+  <ellipse cx="600" cy="250" rx="190" ry="88" fill="url(#markGlow)"/>
+  <g transform="translate(552 168) scale(8)" fill="#f4f2ff">
+    <rect x="6" y="7" width="4" height="1.5"/>
+    <rect x="4" y="9" width="8" height="1.5"/>
+    <rect x="3" y="11" width="10" height="1.5"/>
+    <rect x="2" y="13" width="12" height="1.5" fill="#9a86ff"/>
+  </g>
+
+  <text x="600" y="326" font-size="66" font-weight="700" letter-spacing="1.5" text-anchor="middle" fill="#f4f2ff">HORIZON</text>
+  <text x="600" y="356" font-size="16" text-anchor="middle" fill="#cfc9ea">Minecraft 26.3, compiled for the browser</text>
+  <rect x="540" y="374" width="120" height="2" fill="#7656fa" opacity=".85"/>
+
+  <text id="st" x="600" y="418" font-size="21" font-weight="600" text-anchor="middle" fill="#f4f2ff"
+        data-y="418" data-cols="60" data-dy="26" data-max="1">Starting…</text>
+  <text id="sub" x="600" y="446" font-size="12.5" text-anchor="middle" fill="#a59fc6"
+        data-y="446" data-cols="88" data-dy="17" data-max="2" class="mono">checking this browser and the launcher worker</text>
+
+  <rect x="200" y="486" width="800" height="4" fill="#b9acff" opacity=".12"/>
+  <rect id="fill" x="200" y="486" width="0" height="4" fill="#7656fa"/>
+  <text id="pct" x="1000" y="478" font-size="11" text-anchor="end" fill="#a59fc6" class="mono">0%</text>
+
+  <g id="go" class="btn" role="button" tabindex="0" aria-label="Download and launch the game">
+    <path class="face" d="M258 512H512L520 520V560L512 568H258L250 560V520Z" fill="#7656fa"/>
+    <text id="golabel" x="385" y="548" font-size="16" font-weight="700" text-anchor="middle" letter-spacing="2" fill="#0f0b1f">DOWNLOAD</text>
+    <path class="ring" d="M258 512H512L520 520V560L512 568H258L250 560V520Z" fill="none" stroke="#a08cff" stroke-width="2"/>
+  </g>
+
+  <g id="direct" class="btn" role="button" tabindex="0" aria-label="Open the game directly, without workers">
+    <path class="face" d="M548 512H782L790 520V560L782 568H548L540 560V520Z" fill="#231c4a" stroke="#b9acff" stroke-opacity=".14"/>
+    <text x="665" y="548" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="1.4" fill="#cfc9ea">OPEN DIRECTLY</text>
+    <path class="ring" d="M548 512H782L790 520V560L782 568H548L540 560V520Z" fill="none" stroke="#a08cff" stroke-width="2"/>
+  </g>
+
+  <g id="clr" class="btn" role="button" tabindex="0" aria-label="Clear the installed game">
+    <path class="face" d="M818 512H942L950 520V560L942 568H818L810 560V520Z" fill="#231c4a" stroke="#b9acff" stroke-opacity=".14"/>
+    <text x="880" y="548" font-size="12" font-weight="600" text-anchor="middle" letter-spacing="1.6" fill="#a59fc6">CLEAR</text>
+    <path class="ring" d="M818 512H942L950 520V560L942 568H818L810 560V520Z" fill="none" stroke="#a08cff" stroke-width="2"/>
+  </g>
+
+  <rect x="160" y="596" width="880" height="1" fill="#b9acff" opacity=".10"/>
+  <text id="diag" x="160" y="618" font-size="10.5" fill="#a59fc6" class="mono"></text>
+  <text id="warn" x="160" y="636" font-size="10.5" fill="#ff8a78"
+        data-y="636" data-cols="136" data-dy="13" data-max="1" class="mono"></text>
+
+  <text x="600" y="652" font-size="9.5" text-anchor="middle" letter-spacing=".8" fill="#a59fc6" opacity=".9" class="mono"
+        >ONE FILE - EVERY TEXTURE, SOUND AND LANGUAGE INSIDE - THE NETWORK IS ONLY FOR PLAYING WITH OTHERS</text>
+
+  <script type="application/ecmascript"><![CDATA[
+"use strict";
+// The launcher's own copy. The game itself never fetches anything: this page is
+// the one that downloads horizon.html, stores it in IndexedDB and lets the
+// worker serve it with the headers that enable the game's threads.
+var Q = new URLSearchParams(location.search);
+var GAME = "horizon.html";
+var DRIVE_ID = "1o_7XgQ39hX1HHayNF9pLmzn0bbPqRWov";
+var DRIVE_KEY = "AIzaSyC5HrSEXwPdoHF3jCvp6gUwzCCyjc6Mimo";
+var DRIVE_URL = "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(DRIVE_ID) + "?alt=media&key=" + encodeURIComponent(DRIVE_KEY);
+var SOURCE = Q.get("src") ? new URL(Q.get("src"), location.href).href : DRIVE_URL;
+var SW_URL = "horizon-launch-sw.js";
+var SW_BUILD = "ada127908db7";
+var DB_NAME = "horizon-launcher";
+var DB_VERSION = 1;
+var CHUNK = 4 << 20;
+var busy = false;
+
+var SVGNS = "http://www.w3.org/2000/svg";
+
+function el(id) { return document.getElementById(id); }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// SVG has no text flow, so each label is wrapped into tspans by its own column
+// budget: the source URL and the failure messages are sentences, not labels.
+function wrap(text, cols, maxLines) {
+  var words = String(text == null ? "" : text).split(/\s+/), out = [], cur = "", truncated = false;
+  for (var i = 0; i < words.length; i++) {
+    var word = words[i];
+    if (!word) continue;
+    if (!cur) {
+      cur = word;
+    } else if ((cur + " " + word).length <= cols) {
+      cur += " " + word;
+    } else {
+      if (out.length === maxLines - 1) { truncated = true; break; }
+      out.push(cur);
+      cur = word;
+    }
+    if (cur.length > cols) cur = cur.slice(0, cols);
+  }
+  if (cur && out.length < maxLines) out.push(cur);
+  if (!out.length) out.push("");
+  if (truncated) {
+    var last = out[out.length - 1];
+    out[out.length - 1] = (last.length > cols - 1 ? last.slice(0, cols - 1) : last) + "\u2026";
+  }
+  return out;
+}
+
+function writeLines(id, text) {
+  var node = el(id);
+  var cols = Number(node.getAttribute("data-cols") || 64);
+  var dy = Number(node.getAttribute("data-dy") || 22);
+  var y0 = Number(node.getAttribute("data-y") || node.getAttribute("y") || 0);
+  var maxLines = Number(node.getAttribute("data-max") || 2);
+  while (node.firstChild) node.removeChild(node.firstChild);
+  var lines = wrap(text, cols, maxLines);
+  for (var i = 0; i < lines.length; i++) {
+    var line = document.createElementNS(SVGNS, "tspan");
+    line.setAttribute("x", node.getAttribute("x"));
+    line.setAttribute("y", String(y0 + i * dy));
+    line.textContent = lines[i];
+    node.appendChild(line);
+  }
+}
+
+function say(text) { writeLines("st", text); }
+function note(text) { writeLines("sub", text || ""); }
+function warn(text) { writeLines("warn", text || ""); }
+function diag(text) { el("diag").textContent = text || ""; }
+
+function pct(fraction, label) {
+  var width = Math.max(0, Math.min(1, fraction || 0)) * 800;
+  el("fill").setAttribute("width", String(width));
+  el("pct").textContent = label || (Math.round((fraction || 0) * 100) + "%");
+}
+
+function bytes(n) {
+  if (!isFinite(n) || n <= 0) return "0 B";
+  var units = ["B", "KB", "MB", "GB", "TB"], i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (n >= 10 || i === 0 ? n.toFixed(0) : n.toFixed(1)) + " " + units[i];
+}
+
+// ---- the vault, the same stores launch-sw.js reads --------------------------------
+var database = null;
+
+function db() {
+  if (database) return Promise.resolve(database);
+  return new Promise(function (resolve, reject) {
+    var request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = function () {
+      var opened = request.result;
+      if (!opened.objectStoreNames.contains("meta")) opened.createObjectStore("meta");
+      if (!opened.objectStoreNames.contains("chunks")) opened.createObjectStore("chunks");
+    };
+    request.onsuccess = function () { database = request.result; resolve(database); };
+    request.onerror = function () { reject(request.error); };
+  });
+}
+
+function getMeta() {
+  return db().then(function (opened) {
+    return new Promise(function (resolve, reject) {
+      var request = opened.transaction("meta", "readonly").objectStore("meta").get("game");
+      request.onsuccess = function () { resolve(request.result || null); };
+      request.onerror = function () { reject(request.error); };
+    });
+  });
+}
+
+function put(store, key, value) {
+  return db().then(function (opened) {
+    return new Promise(function (resolve, reject) {
+      var transaction = opened.transaction(store, "readwrite");
+      transaction.objectStore(store).put(value, key);
+      transaction.oncomplete = function () { resolve(); };
+      transaction.onerror = function () { reject(transaction.error); };
+      transaction.onabort = function () { reject(transaction.error); };
+    });
+  });
+}
+
+function wipe() {
+  return db().then(function (opened) {
+    return new Promise(function (resolve, reject) {
+      var transaction = opened.transaction(["meta", "chunks"], "readwrite");
+      transaction.objectStore("meta").clear();
+      transaction.objectStore("chunks").clear();
+      transaction.oncomplete = function () { resolve(); };
+      transaction.onerror = function () { reject(transaction.error); };
+    });
+  });
+}
+
+// ---- the worker -------------------------------------------------------------------
+function askBuild(worker) {
+  return new Promise(function (resolve) {
+    if (!worker) { resolve(""); return; }
+    var channel = new MessageChannel(), settled = false;
+    var timer = setTimeout(function () { if (!settled) { settled = true; resolve(""); } }, 1500);
+    channel.port1.onmessage = function (event) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(String(event.data || ""));
+    };
+    try { worker.postMessage({ q: "build" }, [channel.port2]); }
+    catch (e) { if (!settled) { settled = true; clearTimeout(timer); resolve(""); } }
+  });
+}
+
+async function ensureWorker() {
+  if (!isSecureContext) throw new Error("This page is not a secure context. Serve it over https:// (localhost counts) so it can register its worker.");
+  if (!("serviceWorker" in navigator)) throw new Error("This browser has no service worker support. Use OPEN DIRECTLY: the game runs without workers, a little slower.");
+  var registration = await navigator.serviceWorker.register(SW_URL + "?v=" + SW_BUILD, {
+    scope: "./",
+    updateViaCache: "none",
+  });
+  await navigator.serviceWorker.ready;
+  try { await registration.update(); } catch (e) { /* a cached worker still runs */ }
+  if (!navigator.serviceWorker.controller) {
+    await Promise.race([
+      new Promise(function (resolve) { navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true }); }),
+      sleep(3000),
+    ]);
+  }
+  if (!navigator.serviceWorker.controller) {
+    throw new Error("The launcher worker did not take control of this page. Reload and try again.");
+  }
+  var active = registration.active || registration.waiting || registration.installing;
+  var got = await askBuild(active);
+  diag("worker " + (got || "unknown") + " - expected " + SW_BUILD + " - " + location.origin);
+  if (got && got !== SW_BUILD) {
+    var key = "horizon-launcher-update";
+    if (sessionStorage.getItem(key) !== SW_BUILD) {
+      sessionStorage.setItem(key, SW_BUILD);
+      try { await registration.unregister(); } catch (e) { /* reload anyway */ }
+      location.reload();
+      await new Promise(function () {});
+    }
+    throw new Error("An older launcher worker is still installed. Reload this page: the stale copy was just dropped.");
+  }
+  return registration;
+}
+
+async function spaceFor(need) {
+  if (!navigator.storage || !navigator.storage.estimate) return;
+  try {
+    if (navigator.storage.persist) await navigator.storage.persist();
+    var estimate = await navigator.storage.estimate();
+    var quota = estimate.quota || 0;
+    var free = quota - (estimate.usage || 0);
+    if (need && quota && free < need * 1.08) {
+      throw new Error("This origin may store " + bytes(free) + " more and the game needs " + bytes(need) +
+                      ". Free some browser storage, or use OPEN DIRECTLY.");
+    }
+  } catch (e) {
+    if (e && e.message && e.message.indexOf("may store") >= 0) throw e;
+  }
+}
+
+// ---- installing -------------------------------------------------------------------
+async function install() {
+  if (busy) return;
+  busy = true;
+  el("go").classList.add("off");
+  el("golabel").textContent = "WORKING";
+  warn("");
+  try {
+    say("Checking the launcher worker...");
+    note("the worker gives the game its threads");
+    var registration = await ensureWorker();
+    diag("worker " + SW_BUILD + " - " + (registration.active ? "active" : "pending") + " - " + location.origin);
+
+    var total = 0;
+    try {
+      var head = await fetch(SOURCE, { method: "HEAD", cache: "no-store" });
+      if (head.headers.get("content-length")) total = Number(head.headers.get("content-length"));
+    } catch (e) { /* a host without HEAD still downloads: progress stays in bytes */ }
+    if (!total) {
+      try {
+        var probe = await fetch(SOURCE, { cache: "no-store" });
+        if (!probe.ok) throw new Error(String(probe.status));
+        total = Number(probe.headers.get("content-length") || 0);
+        var probeReader = probe.body && probe.body.getReader();
+        if (probeReader) {
+          var first = await probeReader.read();
+          if (!first.done) {
+            var text = new TextDecoder().decode(first.value.slice(0, 200)).toLowerCase();
+            if (text.replace(/^\uFEFF/, "").replace(/^\s+/, "").indexOf("<!doctype html") !== 0 &&
+                text.replace(/^\s+/, "").indexOf("<html") !== 0) {
+              throw new Error("What arrived is not an HTML document. Check that " + SOURCE + " is the single file.");
+            }
+          }
+          try { await probeReader.cancel(); } catch (e) { /* already closed */ }
+        }
+      } catch (e) {
+        throw new Error("Cannot read " + SOURCE + " (" + e.message + "). Put horizon.html beside launch.svg, or pass ?src=.");
+      }
+    }
+    await spaceFor(total);
+    await wipe();
+
+    var have = 0, chunks = 0, offset = 0, attempts = 0;
+    var buffer = new Uint8Array(CHUNK);
+    var headText = "";
+    var started = Date.now(), lastTick = 0;
+
+    async function flush() {
+      if (!offset) return;
+      var piece = new Blob([buffer.slice(0, offset)]);
+      var at = chunks;
+      chunks += 1;
+      offset = 0;
+      buffer = new Uint8Array(CHUNK);
+      await put("chunks", at, piece);
+    }
+
+    say(total ? "Downloading " + bytes(total) : "Downloading the game");
+    note(SOURCE);
+    for (;;) {
+      var response;
+      try {
+        response = await fetch(SOURCE, {
+          headers: have ? { Range: "bytes=" + have + "-" } : {},
+          cache: "no-store",
+        });
+      } catch (e) {
+        attempts += 1;
+        if (attempts > 4) throw new Error("The download stopped (" + e.message + "). Check that " + SOURCE + " is reachable.");
+        say("Connection lost, retrying...");
+        await sleep(700 * attempts);
+        continue;
+      }
+      if (!response.ok) {
+        if (response.status === 404) throw new Error("horizon.html was not found beside launch.svg. Put the single file here, or open launch.svg?src=...");
+        throw new Error(SOURCE + " answered " + response.status + " " + response.statusText + ".");
+      }
+      if (have && response.status !== 206) {
+        await wipe();
+        have = 0;
+        chunks = 0;
+        offset = 0;
+        buffer = new Uint8Array(CHUNK);
+      }
+      var reader = response.body && response.body.getReader();
+      if (!reader) {
+        var all = new Uint8Array(await response.arrayBuffer());
+        if (headText.length < 200) headText += new TextDecoder().decode(all.slice(0, 200 - headText.length));
+        var at = 0;
+        while (at < all.length) {
+          var take = Math.min(CHUNK - offset, all.length - at);
+          buffer.set(all.subarray(at, at + take), offset);
+          offset += take;
+          at += take;
+          have += take;
+          if (offset === CHUNK) await flush();
+        }
+      } else {
+        for (;;) {
+          var step = await reader.read();
+          if (step.done) break;
+          var value = step.value;
+          if (headText.length < 200) {
+            headText += new TextDecoder().decode(value.slice(0, 200 - headText.length));
+          }
+          var pos = 0;
+          while (pos < value.length) {
+            var amount = Math.min(CHUNK - offset, value.length - pos);
+            buffer.set(value.subarray(pos, pos + amount), offset);
+            offset += amount;
+            pos += amount;
+            have += amount;
+            if (offset === CHUNK) await flush();
+          }
+          var now = Date.now();
+          if (now - lastTick > 120) {
+            lastTick = now;
+            var rate = have / Math.max(1, now - started) * 1000;
+            pct(total ? have / total : 0, total ? Math.round(have / total * 100) + "%" : bytes(have));
+            note(bytes(have) + (total ? " of " + bytes(total) : "") + "  -  " + bytes(rate) + "/s");
+          }
+        }
+      }
+      if (total && have < total) {
+        attempts += 1;
+        if (attempts > 5) throw new Error("The download stalled at " + bytes(have) + " of " + bytes(total) + ".");
+        say("Reconnecting at " + bytes(have) + "...");
+        await sleep(600 * attempts);
+        continue;
+      }
+      break;
+    }
+    await flush();
+    var signature = headText.replace(/^\uFEFF/, "").replace(/^\s+/, "").toLowerCase();
+    if (signature.indexOf("<!doctype html") !== 0 && signature.indexOf("<html") !== 0) {
+      throw new Error("What arrived is not an HTML document. Check that " + SOURCE + " is the single file.");
+    }
+    await put("meta", "game", {
+      size: have,
+      chunks: chunks,
+      name: "horizon.html",
+      source: SOURCE,
+      storedAt: Date.now(),
+    });
+    pct(1, "100%");
+    say("Ready - " + bytes(have));
+    note("the worker serves it cross-origin isolated");
+    el("golabel").textContent = "LAUNCH";
+    busy = false;
+    el("go").classList.remove("off");
+  } catch (e) {
+    fail(e);
+  }
+}
+
+function fail(error) {
+  say("Stopped");
+  var message = error && error.message ? error.message : String(error);
+  note(message);
+  warn(message);
+  el("golabel").textContent = "RETRY";
+  el("go").classList.remove("off");
+  busy = false;
+}
+
+// ---- launching --------------------------------------------------------------------
+async function launch() {
+  if (busy) return;
+  busy = true;
+  warn("");
+  try {
+    say("Launching...");
+    note("the worker serves it cross-origin isolated");
+    await ensureWorker();
+    var target = new URL("__horizon.html", location.href);
+    var args = Q.get("args");
+    if (args) target.searchParams.set("args", args);
+    location.replace(target.href);
+    await new Promise(function () {});
+  } catch (e) {
+    fail(e);
+  }
+}
+
+function sameSource(meta) {
+  return !meta || !meta.source || meta.source === SOURCE;
+}
+
+async function start() {
+  var meta = await getMeta().catch(function () { return null; });
+  if (meta && meta.size && sameSource(meta)) return launch();
+  await install();
+  if (Q.get("autostart") === "1") {
+    var installed = await getMeta().catch(function () { return null; });
+    if (installed && installed.size && sameSource(installed)) return launch();
+  }
+}
+
+function direct() {
+  say("Opening without workers...");
+  note("the single-threaded build; the game still runs");
+  location.href = SOURCE;
+}
+
+async function clear() {
+  if (busy) return;
+  busy = true;
+  try {
+    await wipe();
+    pct(0, "0%");
+    say("Storage cleared");
+    note("press DOWNLOAD to install it again");
+    el("golabel").textContent = "DOWNLOAD";
+    warn("");
+  } catch (e) {
+    fail(e);
+  }
+  busy = false;
+}
+
+async function refresh() {
+  var meta = await getMeta().catch(function () { return null; });
+  var parts = [
+    location.origin,
+    "secure " + (isSecureContext ? "yes" : "no"),
+    "worker " + (navigator.serviceWorker ? "yes" : "no"),
+    "vault " + (meta && meta.size ? bytes(meta.size) : "empty"),
+  ];
+  diag(parts.join("  -  "));
+  if (meta && meta.size && sameSource(meta)) {
+    el("golabel").textContent = "LAUNCH";
+    say("Ready - " + bytes(meta.size));
+    note(meta.name || "horizon.html");
+    pct(1, "100%");
+  } else {
+    el("golabel").textContent = "DOWNLOAD";
+    say("Not installed yet");
+    note("downloads " + SOURCE);
+    pct(0, "0%");
+  }
+  if (!isSecureContext || !navigator.serviceWorker) {
+    warn("This page cannot use a service worker. OPEN DIRECTLY runs the game without workers.");
+  }
+}
+
+function wireButton(id, action) {
+  var node = el(id);
+  node.addEventListener("click", function () { action(); });
+  node.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      action();
+    }
+  });
+}
+
+function wire() {
+  wireButton("go", function () { start(); });
+  wireButton("direct", direct);
+  wireButton("clr", function () { clear(); });
+}
+
+(async function boot() {
+  wire();
+  if (Q.get("reset") === "1") await wipe().catch(function () {});
+  await refresh();
+  if (Q.get("autostart") === "1") await start();
+})().catch(function (e) {
+  say("Stopped");
+  note(e && e.message ? e.message : String(e));
+  warn(e && e.message ? e.message : String(e));
+});
+
+// Handy from a browser console while testing the launcher.
+globalThis.horizonLauncher = { install: install, launch: launch, clear: clear, refresh: refresh, source: SOURCE };
+]]></script>
+</svg>

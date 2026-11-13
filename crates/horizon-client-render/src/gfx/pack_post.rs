@@ -25,6 +25,46 @@ use super::pack_uniforms::{self, FrameUniforms, PackInputs};
 
 const BUFFERS: usize = horizon_shaders::BUFFERS;
 
+/// WebGPU allows four bind groups. Native keeps the pack's buffer objects in group 4 and the
+/// geometry programs' block ids in group 3; browsers move the buffers into group 3 and omit the
+/// ids group (the pack's own shaders only use the pass layout and the buffer objects).
+const PACK_BUFFER_GROUP: u32 = if cfg!(target_arch = "wasm32") { 3 } else { 4 };
+
+/// Move the pack's buffer-object globals to the bind group the web pipeline layout uses.
+fn move_pack_buffers(module: &mut naga::Module) {
+    if PACK_BUFFER_GROUP == 4 {
+        return;
+    }
+    for (_, global) in module.global_variables.iter_mut() {
+        if let Some(binding) = global.binding.as_mut()
+            && binding.group == 4
+        {
+            binding.group = PACK_BUFFER_GROUP;
+        }
+    }
+}
+
+/// A pack shader's module. Browsers take WGSL, and the pack's post chain has branches whose
+/// uniformity Tint cannot prove; the module-level diagnostic turns that check off, as the
+/// browser runtime requires for this class of shader. Native keeps the naga IR.
+fn pack_module(module: naga::Module) -> wgpu::ShaderSource<'static> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use naga::valid::{Capabilities, ValidationFlags, Validator};
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("the pack shader validates");
+        let wgsl =
+            naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+                .expect("the pack shader writes as WGSL");
+        wgpu::ShaderSource::Wgsl(format!("diagnostic(off, derivative_uniformity);\n{wgsl}").into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module))
+    }
+}
+
 /// The texture behind a pack sampler name.
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
@@ -724,28 +764,40 @@ fn sampler(
 /// naga's backends turn a module they cannot write into a panic as the driver gets the pipeline
 /// (#3525), which a pack's program must not turn into a crash.
 fn checked<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> Result<T, String> {
-    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
-    let value = crate::crash::contain(create);
-    let internal = horizon_os::block_on(internal.pop()).flatten();
-    match horizon_os::block_on(validation.pop())
-        .flatten()
-        .or(internal)
+    // The browser's error-scope pop resolves after a microtask, which the page's thread cannot
+    // run while it is inside this call (`horizon_os::block_on` only polls once there): the
+    // validation error would be lost. The device's uncaptured-error handler logs it instead.
+    #[cfg(target_arch = "wasm32")]
     {
-        Some(e) => {
-            // The details are in the error's description or its sources.
-            let mut message = match &e {
-                wgpu::Error::Validation { source, .. } => format!("{source:?}"),
-                e => e.to_string(),
-            };
-            let mut source = std::error::Error::source(&e);
-            while let Some(s) = source {
-                message = format!("{message}: {s}");
-                source = s.source();
+        let _ = device;
+        return crate::crash::contain(create)
+            .map_err(|panic| format!("the shader compiler failed: {panic}"));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let value = crate::crash::contain(create);
+        let internal = horizon_os::block_on(internal.pop()).flatten();
+        match horizon_os::block_on(validation.pop())
+            .flatten()
+            .or(internal)
+        {
+            Some(e) => {
+                // The details are in the error's description or its sources.
+                let mut message = match &e {
+                    wgpu::Error::Validation { source, .. } => format!("{source:?}"),
+                    e => e.to_string(),
+                };
+                let mut source = std::error::Error::source(&e);
+                while let Some(s) = source {
+                    message = format!("{message}: {s}");
+                    source = s.source();
+                }
+                Err(message)
             }
-            Err(message)
+            None => value.map_err(|panic| format!("the shader compiler failed: {panic}")),
         }
-        None => value.map_err(|panic| format!("the shader compiler failed: {panic}")),
     }
 }
 
@@ -1041,19 +1093,19 @@ fn bindings(
             .images
             .iter()
             .position(|i| i.def.sampler.as_deref() == Some(s.name.as_str()));
-        let (src, sample_type, dimension) = match custom {
-            _ if let Some(k) = image => {
+        let (src, sample_type, dimension) = match (custom, image) {
+            (_, Some(k)) => {
                 let i = &pack.images[k];
                 (Source::Image(k), i.sample_type(features), i.dimension)
             }
-            Some(i) if !fits(&s.ty, textures[i].sample_type) => {
+            (Some(i), None) if !fits(&s.ty, textures[i].sample_type) => {
                 notes.push(format!(
                     "{name}: `{} {}` can't read texture.{}.{}",
                     s.ty, s.name, textures[i].stage, textures[i].name
                 ));
                 (Source::Dummy, float, stand_in)
             }
-            Some(i) => {
+            (Some(i), None) => {
                 let t = &textures[i];
                 let src = match t.image {
                     pack_textures::Image::Lightmap => Source::Lightmap,
@@ -1066,7 +1118,7 @@ fn bindings(
                 };
                 (src, t.sample_type, t.dimension)
             }
-            None => {
+            (None, None) => {
                 let mut src = source(&s.name, group.shadow(), shadow.is_some(), watershadow);
                 let blank = match src {
                     // The shadow pass writes the shadow map.
@@ -1389,25 +1441,72 @@ fn build_pass(
             label: Some(&p.name),
             entries: &entries,
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(&p.name),
-            bind_group_layouts: &[
+        let layouts: Vec<Option<&wgpu::BindGroupLayout>> = if cfg!(target_arch = "wasm32") {
+            // WebGPU allows four bind groups: the buffers take the ids slot and the geometry
+            // indices group is omitted (the pack's shaders do not use either).
+            vec![
+                Some(&layout),
+                geometry.and_then(|g| g.table),
+                draw.then_some(draws),
+                (!interface.buffers.is_empty()).then_some(&pack.buffers.read_layout),
+            ]
+        } else {
+            vec![
                 Some(&layout),
                 geometry.and_then(|g| g.table),
                 draw.then_some(draws),
                 geometry.and_then(|g| g.ids),
-                (!interface.buffers.is_empty()).then_some(&pack.buffers.layout),
+                (!interface.buffers.is_empty()).then_some(&pack.buffers.read_layout),
                 pack.indices.filter(|_| p.geometry_triangles > 0),
-            ],
+            ]
+        };
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(&p.name),
+            bind_group_layouts: &layouts,
             ..Default::default()
         });
         let module = |mut m: naga::Module| {
             share_samplers(&mut m, &slots);
+            move_pack_buffers(&mut m);
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&p.name),
-                source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(m)),
+                source: pack_module(m),
             })
         };
+        // A varying location is shared by the two stages; when a pipeline fails to
+        // link, print what the translator gave each side (HORIZON_PACK_LINK=1).
+        if p.name.starts_with("gbuffers_") || std::env::var_os("HORIZON_PACK_LINK").is_some() {
+            let dump = |m: &naga::Module, side: &str| {
+                for ep in &m.entry_points {
+                    for arg in &ep.function.arguments {
+                        if let Some(naga::Binding::Location { location, .. }) = arg.binding {
+                            log::warn!(
+                                "pack link {} {} in @{location}: {:?}",
+                                p.name,
+                                side,
+                                m.types[arg.ty].inner
+                            );
+                        }
+                    }
+                    if let Some(result) = &ep.function.result
+                        && let naga::TypeInner::Struct { members, .. } = &m.types[result.ty].inner
+                    {
+                        for member in members {
+                            if let Some(naga::Binding::Location { location, .. }) = member.binding {
+                                log::warn!(
+                                    "pack link {} {} out @{location}: {:?}",
+                                    p.name,
+                                    side,
+                                    m.types[member.ty].inner
+                                );
+                            }
+                        }
+                    }
+                }
+            };
+            dump(&program.vertex, "vs");
+            dump(&program.fragment, "fs");
+        }
         let (vs, fs) = (module(program.vertex), module(program.fragment));
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(&p.name),
@@ -1555,22 +1654,33 @@ fn build_compute(
             label: Some(&name),
             entries: &entries,
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(&name),
-            bind_group_layouts: &[
+        let layouts: Vec<Option<&wgpu::BindGroupLayout>> = if cfg!(target_arch = "wasm32") {
+            vec![
+                Some(&layout),
+                None,
+                None,
+                (!interface.buffers.is_empty()).then_some(&pack.buffers.layout),
+            ]
+        } else {
+            vec![
                 Some(&layout),
                 None,
                 None,
                 None,
                 (!interface.buffers.is_empty()).then_some(&pack.buffers.layout),
-            ],
+            ]
+        };
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(&name),
+            bind_group_layouts: &layouts,
             ..Default::default()
         });
         let mut module = c.module;
         share_samplers(&mut module, &slots);
+        move_pack_buffers(&mut module);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&name),
-            source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
+            source: pack_module(module),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(&name),
@@ -1699,6 +1809,35 @@ impl PackPost {
         }
         // An image this device can't make or store into: the programs using it are skipped.
         let mut image_defs = std::mem::take(&mut post.images);
+        // A program can declare an image whose `image.<name>` is compiled out (the pack's
+        // sample voxel map, with FLOODFILL off, is still declared by its prepare compute).
+        // Bind a one-texel dummy of the declared format so the rest of that program, including
+        // its SSBO writes, still runs; the dead image is never read.
+        for p in &post.programs {
+            let declared = p
+                .program
+                .iter()
+                .flat_map(|p| &p.interface.images)
+                .chain(p.compute.iter().flat_map(|(_, c)| &c.interface.images));
+            for i in declared {
+                if image_defs.iter().any(|d| d.name == i.name) {
+                    continue;
+                }
+                image_defs.push(horizon_shaders::CustomImage {
+                    name: i.name.clone(),
+                    sampler: None,
+                    format: horizon_shaders::Format::parse(&i.format)
+                        .unwrap_or(horizon_shaders::Format::RGBA8),
+                    qualifier: i.format.clone(),
+                    size: if i.ty.ends_with("3D") {
+                        horizon_shaders::ImageSize::Volume([1, 1, 1])
+                    } else {
+                        horizon_shaders::ImageSize::Absolute([1, 1])
+                    },
+                    clear: false,
+                });
+            }
+        }
         let mut left_out = Vec::new();
         image_defs.retain(|def| {
             let made = pack_images::makeable(device, def).and_then(|()| {
@@ -1788,7 +1927,7 @@ impl PackPost {
                 computes = Vec::new();
                 last
             } else {
-                build_pass(
+                match build_pass(
                     device,
                     p,
                     if in_shadow { &shadow_space } else { &formats },
@@ -1799,7 +1938,17 @@ impl PackPost {
                     &custom_names,
                     &draws.layout,
                     &pack,
-                )?
+                ) {
+                    Some(pass) => pass,
+                    // A program whose fragment stage is empty but whose compute stages write
+                    // state (the pack's prepare2 environment SSBO) is compute-only.
+                    None => {
+                        let mut last = computes.pop()?;
+                        last.compute = computes;
+                        computes = Vec::new();
+                        last
+                    }
+                }
             };
             pass.compute.append(&mut computes);
             // A pass's attachments share a size: the depth buffer's, for the passes that draw
@@ -2574,7 +2723,7 @@ impl PackPost {
         if pass.buffers
             && let Some(g) = &self.buffers.group
         {
-            cp.set_bind_group(4, g, &[]);
+            cp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
         }
         cp.dispatch_workgroups(groups[0], groups[1], groups[2]);
         drop(cp);
@@ -2665,9 +2814,9 @@ impl PackPost {
             rp.set_pipeline(pass.render());
             rp.set_bind_group(0, &group, &[]);
             if pass.buffers
-                && let Some(g) = &self.buffers.group
+                && let Some(g) = &self.buffers.read_group
             {
-                rp.set_bind_group(4, g, &[]);
+                rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
             }
             if pass.draw {
                 let stage = if translucent {
@@ -2679,7 +2828,9 @@ impl PackPost {
             }
             let (groups, ids) = (&self.page_groups, pass.ids);
             let page = |rp: &mut wgpu::RenderPass<'_>, page: u32| {
-                if let Some((_, group)) = groups.get(&page).filter(|_| ids) {
+                if !cfg!(target_arch = "wasm32")
+                    && let Some((_, group)) = groups.get(&page).filter(|_| ids)
+                {
                     rp.set_bind_group(3, group, &[]);
                 }
             };
@@ -2743,6 +2894,11 @@ impl PackPost {
                 let rp = &mut open.as_mut().expect("open").0;
                 rp.set_pipeline(pass.render());
                 rp.set_bind_group(0, group, &[]);
+                if pass.buffers
+                    && let Some(g) = &self.buffers.read_group
+                {
+                    rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
+                }
                 sky.geometry.bind(rp, part.textured);
                 open.as_mut().expect("open").1 = i;
             }
@@ -2789,9 +2945,9 @@ impl PackPost {
                 rp.set_pipeline(pass.render());
                 rp.set_bind_group(0, &group, &[]);
                 if pass.buffers
-                    && let Some(g) = &self.buffers.group
+                    && let Some(g) = &self.buffers.read_group
                 {
-                    rp.set_bind_group(4, g, &[]);
+                    rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
                 }
                 rp.set_bind_group(1, &geometry.table_group, &[]);
                 rp.set_vertex_buffer(0, geometry.vertices());
@@ -2836,9 +2992,9 @@ impl PackPost {
             rp.set_pipeline(pass.render());
             rp.set_bind_group(0, &group, &[]);
             if pass.buffers
-                && let Some(g) = &self.buffers.group
+                && let Some(g) = &self.buffers.read_group
             {
-                rp.set_bind_group(4, g, &[]);
+                rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
             }
             rp.set_bind_group(1, &geometry.table_group, &[]);
             rp.set_vertex_buffer(0, geometry.vertices());
@@ -2951,9 +3107,9 @@ impl PackPost {
                 rp.set_pipeline(pass.render());
                 rp.set_bind_group(0, &group, &[]);
                 if pass.buffers
-                    && let Some(g) = &self.buffers.group
+                    && let Some(g) = &self.buffers.read_group
                 {
-                    rp.set_bind_group(4, g, &[]);
+                    rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
                 }
                 rp.set_bind_group(1, &geometry.group, &[]);
                 if pass.draw {
@@ -2990,9 +3146,9 @@ impl PackPost {
             rp.set_pipeline(pass.render());
             rp.set_bind_group(0, &group, &[]);
             if pass.buffers
-                && let Some(g) = &self.buffers.group
+                && let Some(g) = &self.buffers.read_group
             {
-                rp.set_bind_group(4, g, &[]);
+                rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
             }
             rp.set_bind_group(1, &clouds.group, &[]);
             if pass.draw {
@@ -3066,9 +3222,9 @@ impl PackPost {
                 rp.set_pipeline(pass.render());
                 rp.set_bind_group(0, &group, &[]);
                 if pass.buffers
-                    && let Some(g) = &self.buffers.group
+                    && let Some(g) = &self.buffers.read_group
                 {
-                    rp.set_bind_group(4, g, &[]);
+                    rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
                 }
                 if pass.draw {
                     self.draws.bind(&mut rp, "RAIN_SNOW");
@@ -3452,9 +3608,9 @@ impl PackPost {
                 rp.set_pipeline(pass.render());
                 rp.set_bind_group(0, &group, &[]);
                 if pass.buffers
-                    && let Some(g) = &self.buffers.group
+                    && let Some(g) = &self.buffers.read_group
                 {
-                    rp.set_bind_group(4, g, &[]);
+                    rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
                 }
                 rp.draw(0..6, 0..1);
             }
@@ -3832,9 +3988,9 @@ impl PackPost {
                 rp.set_pipeline(pass.render());
                 rp.set_bind_group(0, &group, &[]);
                 if pass.buffers
-                    && let Some(g) = &self.buffers.group
+                    && let Some(g) = &self.buffers.read_group
                 {
-                    rp.set_bind_group(4, g, &[]);
+                    rp.set_bind_group(PACK_BUFFER_GROUP, g, &[]);
                 }
                 rp.draw(0..6, 0..1);
             }

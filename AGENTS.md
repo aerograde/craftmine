@@ -48,6 +48,7 @@ Game workspace (root `Cargo.toml`); `launcher/` and `crates/horizon-telemetry-se
 | `horizon-server-files` | `server.properties`, eula, ops/whitelist/bans, usercache |
 | `horizon-anticheat` | The dedicated server's anticheat, off by default: `[anticheat]` settings, violation levels, the checks' rules; the hub runs them (`lan/anticheat.rs`) ([docs/anticheat.md](docs/anticheat.md)) |
 | `horizon-friends`, `horizon-relay` | Play with Friends: invite codes, encrypted tunnel, the relay ([docs/play-with-friends.md](docs/play-with-friends.md)) |
+| `horizon-webrtc`, `horizon-nearby` | Play Nearby: native WebRTC data channels (str0m), LAN multicast and public-MQTT presence, sealed signalling, join requests and invites, the secure pump into the integrated server ([docs/nearby.md](docs/nearby.md)). The browser path is `horizon-os::net::Peer` + MQTT over WSS |
 | `horizon-mods`, `cargo-horizon-mod` | Content mods (`.hmod`: manifest, content fence, no code), the registry index and `.hpack`, and `cargo horizon-mod` (`new`, `build`, `run`, `check`, `registry`) ([docs/mods.md](docs/mods.md)). Code mods are native, built by the launcher ([docs/native-mods.md](docs/native-mods.md)) |
 | `horizon-port-pack` | Porting Java modpacks ([docs/modpacks.md](docs/modpacks.md)) |
 | `horizon-shader-api` | Horizon's own WGSL shader packs ([docs/api/shaders.md](docs/api/shaders.md)): `horizon-shaders.toml`, the `.hshader` package; shared by the game, the launcher and the registry |
@@ -257,6 +258,7 @@ saves are kept in the browser's OPFS; a service worker keeps the large files. De
 ```sh
 web/build.sh                       # the browser build into web/dist (release: LTO + wasm-opt; PROFILE=fast to iterate; THREADS=0 for stable Rust)
 python3 web/serve.py               # http://localhost:8080, cross-origin isolated
+web/package.py single              # web/out/horizon.html: every resource and both builds in one offline file (music re-encoded with oggenc); launch.svg beside it
 cargo check --target wasm32-unknown-unknown -p horizon-client --bin horizon-client --no-default-features --features audio,controllers
 cargo clippy --target wasm32-unknown-unknown -p horizon-client --bin horizon-client --no-default-features --features audio,controllers -- -D warnings
 # the threaded build's own check (the flags web/build.sh sets)

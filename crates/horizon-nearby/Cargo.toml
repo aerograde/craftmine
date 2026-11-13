@@ -1,0 +1,34 @@
+[package]
+name = "horizon-nearby"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Play Nearby: LAN and MQTT discovery, join requests and invites, and WebRTC sessions to a host's world"
+
+[dependencies]
+horizon-os = { path = "../horizon-os" }
+horizon-friends = { path = "../horizon-friends" }
+horizon-protocol = { path = "../horizon-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10"
+getrandom = "0.3"
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+base64 = "0.22"
+log = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# spake2's rand_core reaches getrandom 0.2; the browser needs its js backend.
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+horizon-webrtc = { path = "../horizon-webrtc" }
+if-addrs = "0.13"
+socket2 = { version = "0.5", features = ["all"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[lints]
+workspace = true

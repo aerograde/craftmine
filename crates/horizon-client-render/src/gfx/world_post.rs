@@ -3,6 +3,12 @@
 //! anti-aliases it onto the screen, under the hand and HUD. With none on,
 //! the world renders straight to the screen.
 //!
+//! The Visual Vibrance profile's glow runs here too, at a quarter of the
+//! world's pixels: a bright pass (threshold and light shafts), a separable
+//! Gaussian, and one composite that applies it with the grade. The glow was a
+//! ring of full-resolution taps; a quarter-size chain spreads wider for a
+//! fraction of the samples.
+//!
 //! TAA jitters the world's projection by a sub-pixel offset each frame and blends
 //! the frame into a history reprojected through the depth buffer: its motion
 //! vectors are the camera's, so what moves on its own leans on the neighbourhood
@@ -12,6 +18,8 @@ use glam::{DMat4, DVec3, Mat4, Vec2};
 
 /// The TAA history format: 8 bits would band as frames accumulate.
 const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The glow chain's format: wide enough that a bright sun does not clamp.
+const BLOOM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 struct WorldTarget {
     size: [u32; 2],
@@ -19,6 +27,28 @@ struct WorldTarget {
     depth: wgpu::TextureView,
     group: wgpu::BindGroup,
     taa: Option<History>,
+    bloom: Option<Bloom>,
+}
+
+/// The quarter-resolution glow: the bright pass, its horizontal blur and the
+/// vertical one that lands in `blurred` (what the composite reads).
+struct Bloom {
+    bright: wgpu::TextureView,
+    temp: wgpu::TextureView,
+    blurred: wgpu::TextureView,
+    /// The world colour, depth and profile the bright pass reads.
+    bright_pass: wgpu::BindGroup,
+    /// Horizontal (from `bright`) and vertical (from `temp`).
+    blur: [wgpu::BindGroup; 2],
+    direction: [wgpu::Buffer; 2],
+}
+
+/// The same pipelines and layouts for every target size.
+struct BloomPasses {
+    bright_layout: wgpu::BindGroupLayout,
+    blur_layout: wgpu::BindGroupLayout,
+    bright: wgpu::RenderPipeline,
+    blur: wgpu::RenderPipeline,
 }
 
 /// TAA's two history textures at the output size (the world's, times the upscale), written
@@ -46,6 +76,10 @@ struct TaaUniform {
 struct VisualUniform {
     params: [f32; 4],
     extra: [f32; 4],
+    /// x: daylight (0 night, 1 noon), y: dawn/dusk, z/w: the sun's screen position.
+    mood: [f32; 4],
+    /// x: exposure.
+    post: [f32; 4],
 }
 
 /// TAA's GPU resources, absent when the device cannot compile the shader
@@ -58,9 +92,12 @@ struct TaaResources {
 }
 
 pub struct Post {
+    /// The composite and present pipelines' bindings: the world, its sampler,
+    /// the glow and the profile.
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     copy: wgpu::RenderPipeline,
+    present: wgpu::RenderPipeline,
     fxaa: wgpu::RenderPipeline,
     format: wgpu::TextureFormat,
     /// World resolution relative to the window (0.5..=2.0).
@@ -80,6 +117,12 @@ pub struct Post {
     taa_previous: Option<(DMat4, DVec3)>,
     taa_this_frame: TaaUniform,
     visual: wgpu::Buffer,
+    /// The profile is on this frame, and how strong its glow is (the tier's).
+    visual_on: bool,
+    bloom_strength: f32,
+    bloom_passes: BloomPasses,
+    /// Bound where a pass has no glow of its own.
+    blank: wgpu::TextureView,
 }
 
 impl Post {
@@ -87,37 +130,6 @@ impl Post {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon post"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../world_post.wgsl").into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Horizon post bindings"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
         });
         let texture = |binding, sample_type| wgpu::BindGroupLayoutEntry {
             binding,
@@ -129,13 +141,55 @@ impl Post {
             },
             count: None,
         };
+        let uniform = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let sampler = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
         let float = wgpu::TextureSampleType::Float { filterable: true };
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Horizon post"),
-            bind_group_layouts: &[Some(&layout)],
-            ..Default::default()
+        // 0 world, 1 sampler, 3 glow, 5 the profile.
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Horizon post bindings"),
+            entries: &[texture(0, float), sampler(1), texture(3, float), uniform(5)],
         });
-        let pipeline = |entry: &str, layout: &wgpu::PipelineLayout, format| {
+        // The bright pass: 0 world, 1 sampler, 2 depth, 5 the profile.
+        let bright_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Horizon glow bright pass"),
+            entries: &[
+                texture(0, float),
+                sampler(1),
+                texture(2, wgpu::TextureSampleType::Depth),
+                uniform(5),
+            ],
+        });
+        // One blur direction at a time: 0 source, 1 sampler, 5 the profile, 7 direction.
+        let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Horizon glow blur"),
+            entries: &[texture(0, float), sampler(1), uniform(5), uniform(7)],
+        });
+        let pipeline_layout = |label: &str, layouts: &[Option<&wgpu::BindGroupLayout>]| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: layouts,
+                ..Default::default()
+            })
+        };
+        let post_layout = pipeline_layout("Horizon post", &[Some(&layout)]);
+        let bright_layout_owned =
+            pipeline_layout("Horizon glow bright pass", &[Some(&bright_layout)]);
+        let blur_layout_owned = pipeline_layout("Horizon glow blur", &[Some(&blur_layout)]);
+        let pipeline = |layout: &wgpu::PipelineLayout, entry: &str, format| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Horizon post"),
                 layout: Some(layout),
@@ -170,59 +224,18 @@ impl Post {
                 label: Some("Horizon TAA bindings"),
                 entries: &[
                     texture(0, float),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    texture(2, float),
-                    texture(3, wgpu::TextureSampleType::Depth),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
+                    sampler(1),
+                    texture(2, wgpu::TextureSampleType::Depth),
+                    texture(3, float),
+                    uniform(4),
+                    uniform(5),
+                    texture(6, float),
                 ],
             });
-            let taa_pipeline_layout =
-                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("Horizon TAA"),
-                    bind_group_layouts: &[Some(&taa_layout)],
-                    ..Default::default()
-                });
+            let taa_pipeline_layout = pipeline_layout("Horizon TAA", &[Some(&taa_layout)]);
             let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
-            let taa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Horizon TAA"),
-                layout: Some(&taa_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_post"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_taa"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: HISTORY_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let taa_pipeline = pipeline(&taa_pipeline_layout, "fs_taa", HISTORY_FORMAT);
             let internal = horizon_os::block_on(internal.pop()).flatten();
             match internal.or(horizon_os::block_on(validation.pop()).flatten()) {
                 None => {
@@ -256,9 +269,32 @@ impl Post {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let blank = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("Horizon post blank"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
         Self {
-            copy: pipeline("fs_copy", &pipeline_layout, format),
-            fxaa: pipeline("fs_fxaa", &pipeline_layout, format),
+            copy: pipeline(&post_layout, "fs_copy", format),
+            present: pipeline(&post_layout, "fs_present", format),
+            fxaa: pipeline(&post_layout, "fs_fxaa", format),
+            bloom_passes: BloomPasses {
+                bright_layout,
+                blur_layout,
+                bright: pipeline(&bright_layout_owned, "fs_bloom_bright", BLOOM_FORMAT),
+                blur: pipeline(&blur_layout_owned, "fs_bloom_blur", BLOOM_FORMAT),
+            },
             layout,
             sampler,
             format,
@@ -273,6 +309,9 @@ impl Post {
             taa_previous: None,
             taa_this_frame: bytemuck::Zeroable::zeroed(),
             visual,
+            visual_on: false,
+            bloom_strength: 0.0,
+            blank,
         }
     }
 
@@ -339,11 +378,12 @@ impl Post {
         }
         let (size, output) = self.sizes(window);
         let history_size = self.taa_on.then_some(output);
-        if self
-            .target
-            .as_ref()
-            .is_none_or(|t| t.size != size || t.taa.as_ref().map(|h| h.size) != history_size)
-        {
+        let bloom = self.visual_on && self.bloom_strength > 0.0;
+        if self.target.as_ref().is_none_or(|t| {
+            t.size != size
+                || t.taa.as_ref().map(|h| h.size) != history_size
+                || (bloom && t.bloom.is_none())
+        }) {
             let make_tex = |label, size: [u32; 2], format, usage| {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -367,7 +407,7 @@ impl Post {
                 | wgpu::TextureUsages::COPY_SRC;
             let color = make_tex("Scaled world", size, self.format, sampled)
                 .create_view(&Default::default());
-            // TEXTURE_BINDING: occlusion culling and TAA read it.
+            // TEXTURE_BINDING: occlusion culling, the glow's bright pass and TAA read it.
             let depth = make_tex(
                 "Scaled world depth",
                 size,
@@ -375,7 +415,9 @@ impl Post {
                 sampled | wgpu::TextureUsages::COPY_SRC,
             )
             .create_view(&Default::default());
-            let group = self.bind(device, &color);
+            let glow = bloom.then(|| self.bloom_textures(device, &color, &depth, size));
+            let glow_view = glow.as_ref().map_or(&self.blank, |b| &b.blurred);
+            let group = self.bind(device, &color, glow_view);
             let taa = history_size.and_then(|output| {
                 let res = self.taa_resources.as_ref()?;
                 let history = [0, 1].map(|_| {
@@ -397,20 +439,28 @@ impl Post {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
-                                resource: wgpu::BindingResource::TextureView(&history[1 - i]),
+                                resource: wgpu::BindingResource::TextureView(&depth),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: wgpu::BindingResource::TextureView(&depth),
+                                resource: wgpu::BindingResource::TextureView(glow_view),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: res.uniform.as_entire_binding(),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: self.visual.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::TextureView(&history[1 - i]),
+                            },
                         ],
                     })
                 });
-                let show = [0, 1].map(|i| self.bind(device, &history[i]));
+                let show = [0, 1].map(|i| self.bind(device, &history[i], glow_view));
                 Some(History {
                     size: output,
                     history,
@@ -426,6 +476,7 @@ impl Post {
                 depth,
                 group,
                 taa,
+                bloom: glow,
             });
         }
         self.target
@@ -433,24 +484,140 @@ impl Post {
             .map(|t| (t.color.clone(), t.depth.clone()))
     }
 
+    /// The glow chain at a quarter of the world's size, bound to `color` and `depth`.
+    fn bloom_textures(
+        &self,
+        device: &wgpu::Device,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        size: [u32; 2],
+    ) -> Bloom {
+        let half = size.map(|v| (v / 4).max(1));
+        let make = |label| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: half[0],
+                        height: half[1],
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: BLOOM_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let bright = make("Horizon glow bright");
+        let temp = make("Horizon glow temp");
+        let blurred = make("Horizon glow");
+        let bright_pass = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Horizon glow bright pass"),
+            layout: &self.bloom_passes.bright_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(color),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.visual.as_entire_binding(),
+                },
+            ],
+        });
+        let direction = [0, 1].map(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Horizon glow direction"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let blur = [&bright, &temp]
+            .into_iter()
+            .enumerate()
+            .map(|(i, source)| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Horizon glow blur"),
+                    layout: &self.bloom_passes.blur_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(source),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.visual.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: direction[i].as_entire_binding(),
+                        },
+                    ],
+                })
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("two blur directions");
+        Bloom {
+            bright,
+            temp,
+            blurred,
+            bright_pass,
+            blur,
+            direction,
+        }
+    }
+
     /// The size of the world's own target, when it has one.
     pub fn size(&self) -> Option<[u32; 2]> {
         self.target.as_ref().map(|t| t.size)
     }
 
-    pub fn set_visual(&self, queue: &wgpu::Queue, params: [f32; 8]) {
+    pub fn set_visual(
+        &mut self,
+        queue: &wgpu::Queue,
+        params: [f32; 8],
+        mood: [f32; 4],
+        post: [f32; 4],
+    ) {
+        self.visual_on = params[0] > 0.5;
+        self.bloom_strength = params[4];
         queue.write_buffer(
             &self.visual,
             0,
             bytemuck::bytes_of(&VisualUniform {
                 params: [params[0], params[1], params[2], params[3]],
                 extra: [params[4], params[5], params[6], params[7]],
+                mood,
+                post,
             }),
         );
     }
 
     /// Bindings that copy (or anti-alias) `view` onto the screen in `finish_with`.
-    pub fn bind(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
+    pub fn bind(
+        &self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        bloom: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Horizon post"),
             layout: &self.layout,
@@ -462,6 +629,10 @@ impl Post {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(bloom),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -479,6 +650,15 @@ impl Post {
         screen: &wgpu::TextureView,
     ) {
         let Some(target) = &self.target else { return };
+        // A target built while the profile glowed keeps its chain: skip it while
+        // the profile is off or the tier has no glow, rather than clearing three
+        // textures a frame for nothing.
+        if let Some(bloom) = &target.bloom
+            && self.visual_on
+            && self.bloom_strength > 0.0
+        {
+            self.bloom(queue, encoder, bloom);
+        }
         let Some(taa) = target.taa.as_ref().filter(|_| self.taa_previous.is_some()) else {
             self.finish_with(encoder, screen, &target.group);
             return;
@@ -507,7 +687,58 @@ impl Post {
         pass.set_bind_group(0, &taa.resolve[i], &[]);
         pass.draw(0..3, 0..1);
         drop(pass);
-        self.finish_with(encoder, screen, &taa.show[i]);
+        // The history already carries the profile: showing it must not grade twice.
+        self.present_with(encoder, screen, &taa.show[i]);
+    }
+
+    /// The bright pass and its two blur directions, into the chain's textures.
+    fn bloom(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, bloom: &Bloom) {
+        for (i, view) in [&bloom.bright, &bloom.temp, &bloom.blurred]
+            .into_iter()
+            .enumerate()
+        {
+            if i == 0 {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Horizon glow bright pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&self.bloom_passes.bright);
+                pass.set_bind_group(0, &bloom.bright_pass, &[]);
+                pass.draw(0..3, 0..1);
+            } else {
+                let direction: [f32; 4] = if i == 1 {
+                    [1.0, 0.0, 0.0, 0.0]
+                } else {
+                    [0.0, 1.0, 0.0, 0.0]
+                };
+                queue.write_buffer(&bloom.direction[i - 1], 0, bytemuck::bytes_of(&direction));
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Horizon glow blur"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&self.bloom_passes.blur);
+                pass.set_bind_group(0, &bloom.blur[i - 1], &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
     }
 
     /// Draw what `group` binds (`bind`) onto `screen`.
@@ -516,6 +747,31 @@ impl Post {
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
         group: &wgpu::BindGroup,
+    ) {
+        let pipeline = if self.antialias {
+            &self.fxaa
+        } else {
+            &self.copy
+        };
+        self.draw(encoder, screen, group, pipeline);
+    }
+
+    /// `fs_present`: what TAA's resolve already graded, copied ungraded.
+    fn present_with(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        screen: &wgpu::TextureView,
+        group: &wgpu::BindGroup,
+    ) {
+        self.draw(encoder, screen, group, &self.present);
+    }
+
+    fn draw(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        screen: &wgpu::TextureView,
+        group: &wgpu::BindGroup,
+        pipeline: &wgpu::RenderPipeline,
     ) {
         let attachments = [Some(wgpu::RenderPassColorAttachment {
             view: screen,
@@ -531,11 +787,7 @@ impl Post {
             color_attachments: &attachments,
             ..Default::default()
         });
-        pass.set_pipeline(if self.antialias {
-            &self.fxaa
-        } else {
-            &self.copy
-        });
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, group, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -601,8 +853,203 @@ mod tests {
             return;
         };
         let post = Post::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-        // Copy and FXAA pipelines always compile; TAA compiles if supported by backend.
+        // Copy, present, FXAA and the glow chain always compile; TAA compiles if
+        // the backend supports it.
         let _ = post.supports_taa();
+    }
+
+    #[test]
+    fn the_glow_chain_runs_and_the_composite_keeps_the_world() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let size = [64u32, 64];
+        let mut post = Post::new(&device, format);
+        post.set_visual(
+            &queue,
+            [1.0, 1.06, 1.14, 0.22, 0.55, 0.82, 10.0, 0.06],
+            [1.0, 0.0, 0.5, 0.5],
+            [1.02, 0.0, 0.0, 0.0],
+        );
+        let Some((color, _)) = post.prepare(&device, size, true) else {
+            return;
+        };
+        let screen = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("post test screen"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = screen.create_view(&Default::default());
+        // A flat picture below the glow threshold stays neutral and passes through;
+        // a white one gains the glow and clips at white.
+        for (grey, expected) in [(0.5f64, 100..=180), (1.0, 250..=255)] {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                // The clear alone: the pass ends when the guard drops.
+                let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("post test world"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: grey,
+                                g: grey,
+                                b: grey,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
+            post.finish(&queue, &mut encoder, &view);
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("post test read"),
+                size: u64::from(size[0] * size[1] * 4),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                screen.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &read,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size[0] * 4),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([encoder.finish()]);
+            read.slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let mapped = read.slice(..).get_mapped_range().unwrap();
+            let centre = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
+            let pixel = [mapped[centre], mapped[centre + 1], mapped[centre + 2]];
+            assert!(
+                expected.contains(&pixel[0]),
+                "grey {grey}: {pixel:?} outside {expected:?}"
+            );
+            assert!(
+                pixel.iter().all(|c| u8::abs_diff(*c, pixel[0]) <= 8),
+                "grey {grey} must stay neutral: {pixel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_taa_resolve_runs_with_the_profile() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let size = [64u32, 64];
+        let mut post = Post::new(&device, format);
+        if !post.supports_taa() {
+            return;
+        }
+        post.taa = true;
+        post.set_visual(
+            &queue,
+            [1.0, 1.06, 1.14, 0.22, 0.55, 0.82, 10.0, 0.06],
+            [1.0, 0.0, 0.5, 0.5],
+            [1.02, 0.0, 0.0, 0.0],
+        );
+        // Jitter before prepare, as a frame does. The first jittered frame has no
+        // history: the resolve returns this frame and the present shows it.
+        post.jitter(size, true, Mat4::IDENTITY, DVec3::ZERO);
+        let Some((color, _)) = post.prepare(&device, size, true) else {
+            return;
+        };
+        let screen = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("taa test screen"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = screen.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("taa test world"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.15,
+                            g: 0.6,
+                            b: 0.15,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+        post.finish(&queue, &mut encoder, &view);
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("taa test read"),
+            size: u64::from(size[0] * size[1] * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            screen.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size[0] * 4),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let mapped = read.slice(..).get_mapped_range().unwrap();
+        let centre = ((size[1] / 2 * size[0] + size[0] / 2) * 4) as usize;
+        let pixel = [mapped[centre], mapped[centre + 1], mapped[centre + 2]];
+        assert!(
+            pixel[1] > pixel[0] && pixel[1] > pixel[2] && pixel[1] > 100,
+            "the resolved frame shows the world: {pixel:?}"
+        );
     }
 
     #[test]

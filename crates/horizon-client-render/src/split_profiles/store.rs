@@ -1,5 +1,6 @@
 //! Instance-local picker entries. Hiding an entry never removes settings or world saves.
-use std::{fs, io, path::Path};
+use horizon_os::fs;
+use std::{io, path::Path};
 
 const HIDDEN: &str = ".hidden";
 

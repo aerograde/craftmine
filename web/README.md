@@ -25,6 +25,20 @@ rustup target add wasm32-unknown-unknown
 rustup toolchain install nightly-2026-10-14 --component rust-src   # threads: std rebuilt with atomics
 cargo install wasm-bindgen-cli --version 0.2.129   # the version in Cargo.lock
 # and binaryen (wasm-opt, for the release build) from your package manager: pacman -S binaryen, apt install binaryen, brew install binaryen
+# for `web/package.py single`'s compressed music: oggenc from vorbis-tools plus ffmpeg, or an ffmpeg built with libvorbis
+brew install vorbis-tools   # pacman -S vorbis-tools, apt install vorbis-tools
+```
+
+On macOS, Xcode's clang cannot target wasm and the client's TLS (`ring`) has C
+sources, so cc-rs needs a wasm C compiler. Zig's `cc` works: point
+`CC_wasm32_unknown_unknown` at a wrapper that maps cc-rs's
+`--target=wasm32-unknown-unknown` to Zig's `--target=wasm32-freestanding`, and set
+`AR_wasm32_unknown_unknown` to `zig ar` and `CFLAGS_wasm32_unknown_unknown=-g0`
+(the C objects' debug sections fail rustc's archiver otherwise):
+
+```sh
+CC_wasm32_unknown_unknown=…/zigcc AR_wasm32_unknown_unknown='…/zig ar' \
+    CFLAGS_wasm32_unknown_unknown=-g0 web/build.sh
 ```
 
 Sounds come with the prepared resources when your Minecraft install has them
@@ -42,39 +56,75 @@ on Windows, macOS and ChromeOS. On Linux, Chromium-based browsers need it switch
 on: `brave --enable-unsafe-webgpu --enable-features=Vulkan http://localhost:8080`
 (or the same flags for `chromium` / `google-chrome`).
 
+### Terrain and visuals
+
+The page uses the same renderer and defaults as native: **Visual Vibrance** visuals on
+(the post profile and its quarter-resolution glow chain, with the quality tier chosen
+from the adapter; integrated and software GPUs start at Low, which keeps the grade,
+atmosphere and sun but drops the sun shadow map and the glow chain) and **Infinite
+Terrain** on for local worlds.
+Far terrain starts where the resident chunks end — the seed LOD never draws close to
+the player — with cells of 1 block to 192 blocks out, 2 blocks to 512, 4 to 768, 8 to
+1024 and 16 to 1536, then doubling out to Voxy-style 512-block cells at the
+65,536-block horizon, which aerial perspective fades into the sky. It runs on up to four sampling and two meshing Web Workers beside the near
+chunks; unlike finite LOD it does not hold back while they load, so the horizon keeps
+up with fast flight. The single-threaded build has no Web Workers, so it runs the same
+sample, summary and mesh jobs inline in 4 ms slices after each frame: the horizon
+fills more slowly, but it is there, and the page never waits.
+
 `web/build.sh` makes the release build: LTO, then `wasm-opt` when it is installed
 (slow to build; what players should get). `PROFILE=fast web/build.sh` skips both and
 rebuilds in about a minute while you work. `THREADS=0 web/build.sh` builds with
 stable Rust and no threads.
 
-### Packages for players: web folder and offline file
+### Packages for players: web folder, one file, and the launcher
 
-Like Eaglercraft, the game ships two ways:
+Like Eaglercraft, the game ships as a folder and as one file:
 
 ```sh
-web/package.py              # both, into web/out (builds threaded and single-threaded first)
+web/package.py              # the folder and the one file, into web/out
 web/package.py folder       # web/out/horizon-web/: upload to any static host
-web/package.py offline      # web/out/horizon-offline.html: one file, opened from the disk
-web/package.py offline --sounds all --languages   # with the music and every language
+web/package.py single       # web/out/horizon.html: one file, everything inside
+web/package.py offline      # web/out/horizon-offline.html: the old lazy file
+web/package.py single --audio tiny   # the smallest music (mono 24 kHz Vorbis)
 ```
 
-- **`horizon-web/`** works on any static host (GitHub Pages, Netlify, a plain
-  web server). Hosts that can't send the isolation headers get them from the
-  service worker, which reloads the page once on the first visit; where even
-  that fails (no service worker), the page runs the single-threaded build in
-  `pkg-st/`. Files the game reads later are fetched from `fs/res/` when read.
-- **`horizon-offline.html`** holds the single-threaded build and the resources
-  as base64 (a `file://` page can't fetch or be cross-origin isolated). Single
-  player runs there on green threads (below), which need WebAssembly stack
-  switching (JSPI: Chrome and Edge 137+). By default
-  it holds every sound but the music and music discs, and English only:
-  `--sounds none|effects|all` and `--languages` change that. The files it holds
-  for later are handed to the game's filesystem when read
-  (`globalThis.horizonHeldFile`, asked by `horizon_fetch_sync`). Saves go to the
-  browser's storage for `file://` pages, shared by every offline file.
+- **`horizon.html`** is the whole game in one file: both WebAssembly builds, every
+  texture, model, language, world generator file and sound, and the shader packs
+  in `web/packs/` (or `web/dist/packs/`), installed at the game root so the
+  shader-pack list finds them. It holds whatever the prepared resources tree
+  holds: `horizon-prepare sounds` and `horizon-prepare languages` add the sounds
+  and languages, and the builder warns loudly when a class is missing. The music is re-encoded to Vorbis
+  (`oggenc` from `vorbis-tools` with `ffmpeg` to decode, or an ffmpeg built
+  with libvorbis; `--audio off` keeps the originals). Nothing is fetched when it
+  runs: single player, the menus, every sound and every language are inside. The
+  only network use is the game's own multiplayer sockets. Opened from disk it
+  runs the single-threaded build; served cross-origin isolated it runs the
+  threaded one.
+- **`launch.svg`** (with `launch-sw.js`) is an optional launcher, in the same
+  shape as the reference single-file launchers: open it on any static host and
+  press Download. It stores `horizon.html` in the origin and serves it from a
+  service worker with `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin
+  isolated and the threaded build can start its Web Workers. `OPEN DIRECTLY`
+  opens the file without the worker (single-threaded); on `file://`, or a host
+  without service workers, open `horizon.html` itself.
+- **`horizon-offline.html`** is the older lazy file: the single-threaded build
+  and only the boot resources, fetching the rest from `fs/res/` when first read.
+  `--sounds none|effects|all` and `--languages` pick what it holds. `single` is
+  the one that is completely offline.
 
-`--no-build` packages what `web/dist` and `web/dist-st` hold; `PROFILE=fast`
-passes through to the builds.
+`single` writes both builds unless `--builds st` or `--builds threaded` says
+otherwise; `--no-build` packages what `web/dist` and `web/dist-st` already
+hold, and `--from-dist` rebuilds the resource archive from `web/dist/fs` when
+the prepared tree in `.local/` is gone. It accepts `web/dist/pkg-st` for the
+single-threaded build when `web/dist-st` does not exist. `PROFILE=fast` passes through to the builds. The single file needs
+`oggenc` for the compressed music (`brew install vorbis-tools`, or your
+package manager); without it, or an ffmpeg with libvorbis, the original sounds
+stay. A threaded-only file (`--builds threaded`) must be served by
+`launch.svg` (or with COOP/COEP headers); `--builds st` makes a smaller file
+that also runs from the disk.
+
 
 ### Without shared memory: green threads
 
@@ -258,6 +308,14 @@ world `Test` in creative mode at start.
   protocol is EaglerSPRelay's version 1; what goes over the channel is
   Horizon's own, so shared worlds are between Horizon pages, not Eaglercraft
   1.8 clients.
+- **Play Nearby** (`horizon_nearby`, `horizon_os::net::Peer`): the browser finds nearby
+  worlds and players through the public MQTT brokers (over WSS), asks to join or
+  invites, and opens the same WebRTC data channel the shared world uses; the
+  channel carries the SPAKE2 tunnel to the host's integrated server. The
+  public-address room comes from a throwaway `RTCPeerConnection` and its STUN
+  candidate, so no HTTP address service is used. The no-threads build
+  (`THREADS=0 web/build.sh`) has no networking, so Play Nearby reports
+  itself off.
 - **Chunk work** (`streaming.rs`): chunk workers are Web Workers. Without
   threads (`THREADS=0`), the frame runs queued generation, lighting and meshing
   jobs itself for up to 12 ms per update.

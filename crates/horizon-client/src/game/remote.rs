@@ -1432,8 +1432,8 @@ impl Game<'_> {
         }
         // PlayerChatMessage.hasExpiredClient: MESSAGE_EXPIRES_AFTER_CLIENT is
         // the server's five minutes and two more.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = horizon_os::time::SystemTime::now()
+            .duration_since(horizon_os::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let expired = now
             > timestamp.saturating_add(
@@ -4293,8 +4293,8 @@ impl Game<'_> {
                     self.handle_chat_message_error(&p.chat_type, signature.as_ref());
                     return Ok(());
                 }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let now = horizon_os::time::SystemTime::now()
+                    .duration_since(horizon_os::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64);
                 let incoming = secure_chat::Incoming {
                     sender: p.sender,
@@ -9712,9 +9712,9 @@ fn snapshot_value(s: &play::AttributeSnapshot) -> f64 {
 
 /// `Util.getMillis` for the level load tracker's timeouts.
 fn client_millis() -> u64 {
-    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static ORIGIN: std::sync::OnceLock<horizon_os::time::Instant> = std::sync::OnceLock::new();
     ORIGIN
-        .get_or_init(std::time::Instant::now)
+        .get_or_init(horizon_os::time::Instant::now)
         .elapsed()
         .as_millis() as u64
 }

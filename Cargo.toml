@@ -28,6 +28,8 @@ members = [
     "crates/horizon-bench",
     "crates/horizon-friends",
     "crates/horizon-relay",
+    "crates/horizon-webrtc",
+    "crates/horizon-nearby",
     "crates/horizon-mods",
     "crates/cargo-horizon-mod",
     "crates/horizon-port-pack",

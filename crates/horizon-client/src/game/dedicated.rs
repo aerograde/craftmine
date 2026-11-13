@@ -1868,10 +1868,8 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{capture_log, log, log_from};
-    use horizon_os::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use horizon_os::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use std::{
         io::{self, BufRead, BufReader, Read, Write},
         process::{Command, Stdio},

@@ -708,15 +708,13 @@ fn entity_uuids(cx: &mut Cx) {
             "minecraft:bee" | "minecraft:zombified_piglin" => {
                 replace_uuid_string(e, "HurtBy", "HurtBy");
             }
-            "minecraft:fox" => {
-                if e.get("TrustedUUIDs").is_some() {
-                    let trusted: Vec<Tag> = stream(e.get("TrustedUUIDs"))
-                        .into_iter()
-                        .map(|t| uuid_from_longs(&t, "M", "L").unwrap_or(t))
-                        .collect();
-                    remove(e, "TrustedUUIDs");
-                    set(e, "Trusted", Tag::List(trusted));
-                }
+            "minecraft:fox" if e.get("TrustedUUIDs").is_some() => {
+                let trusted: Vec<Tag> = stream(e.get("TrustedUUIDs"))
+                    .into_iter()
+                    .map(|t| uuid_from_longs(&t, "M", "L").unwrap_or(t))
+                    .collect();
+                remove(e, "TrustedUUIDs");
+                set(e, "Trusted", Tag::List(trusted));
             }
             "minecraft:item" => {
                 replace_ml(e, "Owner", "Owner");

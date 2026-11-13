@@ -194,11 +194,8 @@ fn connection(shared: &Arc<Shared>, settings: &Settings, stream: &TcpStream) {
     let client = CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     while let Ok(Some(text)) = socket.read_text() {
         match receive(shared, client, &text) {
-            Some(Ok(reply)) => {
-                if socket.send_text(&reply.to_string()).is_err() {
-                    return;
-                }
-            }
+            Some(Ok(reply)) if socket.send_text(&reply.to_string()).is_err() => return,
+            Some(Ok(_)) => {}
             Some(Err(())) => break,
             None => {}
         }

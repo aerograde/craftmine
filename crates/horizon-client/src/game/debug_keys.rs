@@ -372,6 +372,25 @@ impl Game<'_> {
                 limit.to_string()
             },
         ));
+        if let Some(lod) = self.lod.as_ref() {
+            let (active, cached) = lod.stats();
+            d.line(format!(
+                "Far: {} {} chunks, {active} tiles ({cached} cached, {} nodes)",
+                if self.settings.horizon.lod_infinite {
+                    "infinite"
+                } else {
+                    "LOD"
+                },
+                self.lod_distance(),
+                lod.plan_nodes()
+            ));
+        }
+        if let Some(renderer) = self.renderer.as_ref() {
+            d.line(format!(
+                "Sun shadow: {} caster sections",
+                renderer.visual_shadow_draws()
+            ));
+        }
     }
     /// `DebugEntrySimplePerformanceImpactors`.
     pub(super) fn debug_performance_lines(&self, d: &mut debug_overlay::Displayer) {
