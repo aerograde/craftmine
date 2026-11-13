@@ -566,12 +566,30 @@ globalThis.horizonOffline = async () => {
     await glue.default({
         module_or_path: await gunzip(held(threaded ? "horizon-wasm-threaded" : "horizon-wasm")),
     });
-    status.textContent = "Unpacking all resources…";
+    status.textContent = "Unpacking resources…";
     const tar = await gunzip(held("horizon-boot"));
+    // Files the game reads later stay out of the virtual filesystem until it
+    // asks for them: the same manifest path the served build uses, backed by
+    // this file instead of the page's origin. Sounds and world generation are
+    // the large part, and an 8 GB Chromebook cannot install them all at boot.
+    const store = await gunzip(held("horizon-store"));
+    const manifest = document.getElementById("horizon-manifest").textContent;
+    const index = new Map();
+    let at = 0;
+    for (const line of manifest.split("\\n")) {
+        if (!line) continue;
+        const [rel, length] = line.split("\\t");
+        index.set(rel, [at, Number(length)]);
+        at += Number(length);
+    }
+    globalThis.horizonHeldFile = (url) => {
+        const file = url.startsWith("held:") && index.get(url.slice(5));
+        return file ? store.subarray(file[0], file[0] + file[1]) : undefined;
+    };
     // Shader packs live in `/shaderpacks`, not under the resource root.
     const packs = document.getElementById("horizon-packs")
         ? await gunzip(held("horizon-packs")) : null;
-    return { glue, tar, packs, manifest: "", base: "held:" };
+    return { glue, tar, packs, manifest, base: "held:" };
 };
 """
 
@@ -620,8 +638,23 @@ def single(
     out.mkdir(parents=True, exist_ok=True)
     target = out / "horizon.html"
     with tempfile.TemporaryDirectory(dir=out, prefix=".horizon-single-") as temp:
+        # Boot is what the game needs to show its first screen; sounds, world
+        # generation and the other lazy classes stay in one held store and are
+        # installed the first time the game reads them. Installing all 28k
+        # files at boot cost a Chromebook gigabytes before the title appeared.
+        boot_files, store_files = [], []
+        for rel, path in files:
+            if not bundle.lazy(rel) or rel.split("/")[0] in bundle.PACKED_DIRS:
+                boot_files.append((rel, path))
+            else:
+                store_files.append((rel, path))
+        boot_files.sort()
+        store_files.sort()
+        manifest = "".join(f"{rel}\t{path.stat().st_size}\n" for rel, path in store_files)
         boot = Path(temp) / "boot.tar.gz"
-        single_archive(boot, files)
+        single_archive(boot, boot_files)
+        store = Path(temp) / "store.gz"
+        store.write_bytes(gz(b"".join(path.read_bytes() for _, path in store_files)))
         packs_tar = None
         if packs:
             packs_tar = Path(temp) / "packs.tar.gz"
@@ -662,6 +695,8 @@ def single(
                 gzip_file(threaded / "horizon-client_bg.wasm", wasm_threaded)
                 write_base64_block(f, "horizon-wasm-threaded", wasm_threaded)
             write_base64_block(f, "horizon-boot", boot)
+            write_base64_block(f, "horizon-store", store)
+            f.write(f'<script type="text/plain" id="horizon-manifest">{manifest}</script>\n')
             if packs_tar:
                 write_base64_block(f, "horizon-packs", packs_tar)
             f.write("<script type=\"module\">\n")

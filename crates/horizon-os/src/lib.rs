@@ -7,6 +7,58 @@
 pub mod env;
 #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 pub mod fibers;
+
+/// `navigator.deviceMemory`, in GiB, as the page's bootstrap records it; 0 when
+/// the browser does not report it. Native builds have no such hint.
+pub fn device_memory_gib() -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_number("horizonDeviceMemory") as f32
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0.0
+    }
+}
+
+/// The CPU threads the device actually has, not the page's green-thread count.
+pub fn hardware_threads() -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let reported = js_number("horizonHardwareConcurrency");
+        if reported > 0.0 {
+            return reported as usize;
+        }
+    }
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// A public address the page's bootstrap looked up over HTTP, for the browser
+/// builds where WebRTC STUN is unavailable or blocked. Never used by the game
+/// unless Nearby is opened.
+pub fn public_ip_hint() -> Option<std::net::IpAddr> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let value = js_sys::Reflect::get(
+            &js_sys::global(),
+            &wasm_bindgen::JsValue::from_str("horizonPublicIp"),
+        )
+        .ok()?;
+        value.as_string()?.parse().ok()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_number(name: &str) -> f64 {
+    js_sys::Reflect::get(&js_sys::global(), &wasm_bindgen::JsValue::from_str(name))
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+}
 pub mod fs;
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub mod net;

@@ -78,13 +78,17 @@ const WORLD_SPLIT: i32 = 3;
 /// How far (in blocks) infinite terrain keeps level-0 tiles at any level:
 /// 128 blocks. The resident chunks are exact inside a full render distance;
 /// the LOD's 1-block cells only stand in while they load, and `split_width`
-/// keeps them to 192 blocks beyond. Cells then coarsen 2, 4, 8, 16, 32 and 64
+/// keeps them to 256 blocks beyond. Cells then coarsen 2, 4, 8, 16, 32 and 64
 /// blocks in steps, the Voxy-style far terrain.
 const INFINITE_NEAR: i32 = 128;
+/// Reduced far detail starts coarsening only past this distance on infinite
+/// terrain. Close and mid cells keep their full resolution; an 8 GB machine
+/// saves the far tile count, not the trees beside the player.
+const REDUCED_FROM: i32 = 1024;
 /// How many of its own widths out an infinite-terrain tile of `level` splits
 /// (`Plan::visit`). A tile at level L (16<<L blocks) splits into children at
 /// L-1 (cells of 2^(L-1) blocks), so this sets where each cell size ends:
-/// 1-block cells to 192 blocks, then 2-block cells to 512, 4-block to 768,
+/// 1-block cells to 256 blocks, then 2-block cells to 640, 4-block to 768,
 /// 8-block to 1024 and 16-block to 1536. Past that the rings double at the old
 /// rate: the haze has the horizon by then, and the tile count is what the plan
 /// costs. A uniform ratio is either blocky right next to the player (a small
@@ -94,8 +98,8 @@ const INFINITE_NEAR: i32 = 128;
 /// 8-block cells reads as a blob.
 fn split_width(level: u8) -> i32 {
     match level {
-        1 => 6,
-        2 => 8,
+        1 => 8,
+        2 => 10,
         3 => 6,
         4 => 4,
         5 => 3,
@@ -647,8 +651,8 @@ impl Plan {
         // Keep distant cells small on screen; finest tiles retain individual
         // blocks. Reduced keeps them twice as large (a quarter of the cells).
         // Infinite terrain grows its cells in steps, not in jumps: a level
-        // splits several of its own widths out, so 1-block cells reach 192
-        // blocks, 2-block 512, 4-block 768, 8-block 1024 and 16-block 1536
+        // splits several of its own widths out, so 1-block cells reach 256
+        // blocks, 2-block 640, 4-block 768, 8-block 1024 and 16-block 1536
         // before doubling at the old rate. That is what keeps a tree a tree
         // until it is far enough to read as colour; the rings' tile counts stay
         // bounded (a wider split covers the levels a uniform ratio would add),
@@ -666,8 +670,8 @@ impl Plan {
         let threshold = key.size()
             * if key.distance(camera) >= WORLD_START {
                 if infinite { 2 } else { WORLD_SPLIT }
-            } else if reduced && !infinite {
-                split / 2
+            } else if reduced && (!infinite || key.distance(camera) >= REDUCED_FROM) {
+                (split / 2).max(1)
             } else {
                 split
             };
@@ -947,6 +951,8 @@ struct Inline {
     mesher: mesh::Mesher,
     context: Arc<WorkerContext>,
     tx: mpsc::Sender<Done>,
+    /// Frames to leave the queue alone after a slice that ran long.
+    skip: u8,
 }
 /// One background worker and at most two outstanding sample jobs. Only the
 /// current view's quadtree and a bounded set of visited summaries are retained.
@@ -1095,6 +1101,7 @@ impl Lod {
                 mesher: mesh::Mesher::default(),
                 context: context.clone(),
                 tx: tx.clone(),
+                skip: 0,
             })
         } else {
             None
@@ -2000,8 +2007,13 @@ impl Lod {
         let Some(mut inline) = self.inline.take() else {
             return;
         };
-        let deadline =
-            horizon_os::time::Instant::now() + horizon_os::time::Duration::from_millis(4);
+        if inline.skip > 0 {
+            inline.skip -= 1;
+            self.inline = Some(inline);
+            return;
+        }
+        let started = horizon_os::time::Instant::now();
+        let deadline = started + horizon_os::time::Duration::from_millis(4);
         loop {
             let job = lock(&self.shared.jobs).pop_front();
             let Some(job) = job else { break };
@@ -2082,6 +2094,11 @@ impl Lod {
                 };
                 let _ = inline.tx.send(done);
             }
+        }
+        if started.elapsed() > horizon_os::time::Duration::from_millis(12) {
+            // One unlucky grid or mesh overshot the slice. Give the frame loop
+            // two frames of breathing room instead of stacking another one.
+            inline.skip = 2;
         }
         self.inline = Some(inline);
     }
@@ -2958,10 +2975,12 @@ mod tests {
                 );
                 // Near tiles now reach the resident chunks' own grid (level 0
                 // within 128 blocks); the far horizon stays 64-block cells.
-                // 8,192-block horizon at 64-block cells: the observed worst
-                // case is a few hundred nodes; the guard catches an unbounded plan.
+                // The near rings are deliberately finer than a halving, which
+                // costs nodes but keeps trees readable; the guard still catches
+                // an unbounded plan. `Reduced` far detail trims these again on
+                // the low-memory web profile.
                 assert!(
-                    plan.nodes.len() < 4096,
+                    plan.nodes.len() < 5200,
                     "{camera:?} detail {detail}: {} nodes",
                     plan.nodes.len()
                 );
@@ -2992,7 +3011,7 @@ mod tests {
     #[test]
     fn infinite_cells_grow_in_steps_from_the_resident_view() {
         // A drawn tile's split ring is where its cells end: 1-block cells to
-        // 192 blocks, 2-block to 512, 4-block to 768, 8-block to 1024, 16-block
+        // 256 blocks, 2-block to 640, 4-block to 768, 8-block to 1024, 16-block
         // to 1536. A tree stays a tree through the near rings instead of
         // jumping from blocks to blobs, and each step is a smaller share of
         // the distance than the old halving.
@@ -3012,9 +3031,9 @@ mod tests {
             }
             let distance = key.distance([0, 0]);
             let cell = key.size() / CELLS as i32;
-            let limit = if distance < 192 {
+            let limit = if distance < 256 {
                 1
-            } else if distance < 512 {
+            } else if distance < 640 {
                 2
             } else if distance < 768 {
                 4

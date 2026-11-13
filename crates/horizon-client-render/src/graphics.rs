@@ -333,10 +333,23 @@ pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
 /// are integrated too, with memory and bandwidth enough for every distance.
 /// Software and virtual GPUs share the same limits as other integrated ones.
 pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
+    if web_low_memory() {
+        return true;
+    }
     match info.device_type {
         wgpu::DeviceType::IntegratedGpu => !info.name.starts_with("Apple"),
         wgpu::DeviceType::Cpu | wgpu::DeviceType::VirtualGpu => true,
         _ => false,
+    }
+}
+
+/// An 8 GB-or-less browser device (or a four-thread one): low-power Chromebooks
+/// and tablets report `Other` for their GPU, so the adapter class alone would
+/// pick the full shadow and bloom path there.
+pub fn web_low_memory() -> bool {
+    cfg!(target_arch = "wasm32") && {
+        let memory = horizon_os::device_memory_gib();
+        (memory > 0.0 && memory <= 8.0) || horizon_os::hardware_threads() <= 4
     }
 }
 /// A LOD distance as far terrain uses it on this adapter.
@@ -366,17 +379,27 @@ pub fn auto_visual_quality() -> VisualQuality {
 /// The tier `Auto` picks for an adapter: Apple's integrated GPUs are fast
 /// enough for the full look, other integrated and software ones are not.
 pub fn auto_quality_for(info: &wgpu::AdapterInfo) -> VisualQuality {
-    let cores = horizon_os::thread::available_parallelism().map_or(4, |n| n.get());
+    let cores = horizon_os::hardware_threads();
     // Browser adapters report `Other` for real hardware (and for software
-    // rasterisers alike): the device type cannot choose the look there.
+    // rasterisers alike): the device type cannot choose the look there. The
+    // page records `navigator.deviceMemory` and its thread count; use them so
+    // an 8 GB Chromebook does not start on the full shadow/bloom path.
     if info.backend == wgpu::Backend::BrowserWebGpu {
         let name = info.name.to_ascii_lowercase();
+        let memory = horizon_os::device_memory_gib();
         let software = info.device_type == wgpu::DeviceType::Cpu
             || name.contains("swiftshader")
             || name.contains("llvmpipe")
             || name.contains("software");
-        return if software {
+        let low_end = name.contains("intel")
+            || name.contains("mali")
+            || name.contains("adreno")
+            || name.contains("powervr")
+            || name.contains("chromebook");
+        return if software || (memory > 0.0 && memory <= 4.0) || cores <= 2 {
             VisualQuality::Low
+        } else if (memory > 0.0 && memory <= 8.0) || cores <= 4 || low_end {
+            VisualQuality::Medium
         } else {
             VisualQuality::High
         };
@@ -517,6 +540,7 @@ pub struct Graphics {
 }
 impl Default for Graphics {
     fn default() -> Self {
+        let low = web_low_memory();
         Self {
             preset: Preset::Custom,
             visuals: true,
@@ -526,9 +550,9 @@ impl Default for Graphics {
             far_detail: FarDetail::Full,
             cave_culling: true,
             entity_culling: false,
-            chunk_updates: 0,
-            upload_budget_kib: 0,
-            texture_budget_mib: 0,
+            chunk_updates: if low { 48 } else { 0 },
+            upload_budget_kib: if low { 2048 } else { 0 },
+            texture_budget_mib: if low { 64 } else { 0 },
             sky: true,
             fog: true,
             weather: true,
@@ -538,8 +562,8 @@ impl Default for Graphics {
             pacing: Pacing::Efficient,
             workers: 0,
             overlay: Overlay::Off,
-            resolution_scale: 100,
-            fxaa: false,
+            resolution_scale: if low { 80 } else { 100 },
+            fxaa: low,
             taa: false,
             upscaling: Upscaling::Native,
             screenshot_quality: 1,
@@ -564,6 +588,30 @@ impl Graphics {
         let mut g: Self = fs::read_to_string(dir.join(FILE))
             .map(|t| Self::parse(&t))
             .unwrap_or_default();
+        if web_low_memory() {
+            // A file written before the device profile existed must not put an
+            // 8 GB Chromebook back on full resolution or an unbounded upload
+            // queue just because it says so.
+            g.resolution_scale = g.resolution_scale.min(80);
+            g.upload_budget_kib = if g.upload_budget_kib == 0 {
+                2048
+            } else {
+                g.upload_budget_kib.min(4096)
+            };
+            g.texture_budget_mib = if g.texture_budget_mib == 0 {
+                64
+            } else {
+                g.texture_budget_mib.min(64)
+            };
+            if g.chunk_updates == 0 {
+                g.chunk_updates = 48;
+            } else {
+                g.chunk_updates = g.chunk_updates.min(96);
+            }
+            if !g.taa {
+                g.fxaa = true;
+            }
+        }
         if fs::remove_file(dir.join(HDR_MARKER)).is_ok() && g.hdr {
             g.hdr = false;
             g.save(dir);

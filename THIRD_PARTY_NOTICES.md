@@ -39,6 +39,17 @@ and `optical_flow.rs` follows the SDK's `sdk/src/components/opticalflow/ffx_opti
 Inc., under the MIT license, whose text heads each file. AMD and FidelityFX are AMD's
 trademarks; Horizon is not affiliated with AMD.
 
+## Visual Vibrance shader pack
+
+`Visual-Vibrance-v0.3.5a.zip` (the pack in `web/packs` and in the single-file launcher's
+`/shaderpacks`) is by **Josh Britain (jbritain)**, Copyright © 2025, and is distributed
+**unmodified** for personal, non-commercial use under its own source-available license. It is
+**not OSI open source**: modification is allowed for personal use, and redistribution is allowed
+only without direct or indirect financial benefit and with credit. The pack's `LICENSE` travels in
+the zip and must remain with it. Source and author: <https://jbritain.net>. Horizon's built-in
+fast post profile is a separate clean-room implementation; selecting the pack runs its original
+shader code through Horizon's pack translator.
+
 ## Mod loader logos
 
 The launcher shows the logo of the mod loader an instance plays with.

@@ -30,7 +30,7 @@ if [ "${THREADS:-1}" != 0 ]; then
     # worker, and the thread-local storage symbols wasm-bindgen sets up per thread.
     flags=(
         '--cfg getrandom_backend="wasm_js"'
-        -C target-feature=+atomics,+bulk-memory,+mutable-globals
+        -C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128
         -C link-arg=--shared-memory -C link-arg=--import-memory
         -C link-arg=--max-memory=4294967296
         -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size
@@ -41,7 +41,7 @@ if [ "${THREADS:-1}" != 0 ]; then
 else
     # Threads are green threads on the page's (horizon-os's fibers), which
     # switch Rust's stack pointer: the page reaches it as an export.
-    export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C link-arg=--export=__stack_pointer'
+    export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C target-feature=+simd128 -C link-arg=--export=__stack_pointer'
 fi
 "${cargo[@]}" build --target wasm32-unknown-unknown --profile "$profile" \
     -p horizon-client --bin horizon-client --no-default-features --features audio,controllers
@@ -58,7 +58,7 @@ if [ "$profile" = release ] && [ "${WASM_OPT:-1}" != 0 ]; then
         # The features rustc's wasm32 target turns on, and the threaded build's atomics.
         wasm-opt -O2 --enable-threads --enable-bulk-memory --enable-mutable-globals \
             --enable-sign-ext --enable-nontrapping-float-to-int --enable-reference-types \
-            --enable-multivalue "$wasm" -o "$wasm.opt"
+            --enable-multivalue --enable-simd "$wasm" -o "$wasm.opt"
         mv "$wasm.opt" "$wasm"
     else
         echo "wasm-opt not found: the module is left as rustc made it (install binaryen)" >&2

@@ -178,7 +178,7 @@ var DRIVE_KEY = "AIzaSyC5HrSEXwPdoHF3jCvp6gUwzCCyjc6Mimo";
 var DRIVE_URL = "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(DRIVE_ID) + "?alt=media&key=" + encodeURIComponent(DRIVE_KEY);
 var SOURCE = Q.get("src") ? new URL(Q.get("src"), location.href).href : DRIVE_URL;
 var SW_URL = "horizon-launch-sw.js";
-var SW_BUILD = "ada127908db7";
+var SW_BUILD = "02ac2ab32d40";
 var DB_NAME = "horizon-launcher";
 var DB_VERSION = 1;
 var CHUNK = 4 << 20;

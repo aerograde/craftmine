@@ -2282,6 +2282,10 @@ struct Game<'a> {
     fps: f32,
     fps_frames: u64,
     fps_at: Instant,
+    /// When the low-memory web profile last changed the resolution scale.
+    adapt_at: Instant,
+    /// Consecutive healthy intervals before it scales back up.
+    adapt_good: u8,
     ticks: u64,
     health_hud: hud_layout::HealthHud,
     /// What ends the game with an error; kept as it is, so main can tell a debug crash.
@@ -6721,10 +6725,53 @@ impl Game<'_> {
         };
         self.with_level(|b, level, ticks| b.notify_written(level, ticks, position, flags));
     }
+    /// On a low-memory browser, trade a little world resolution for a steady
+    /// frame rate. It only ever moves within 60..=80 percent, and only for the
+    /// in-world screen; menus and screenshots stay at the configured scale.
+    fn adapt_resolution(&mut self) {
+        if !horizon_client::graphics::web_low_memory()
+            || self.screen != Screen::Playing
+            || self.player.is_none()
+            || self.fps <= 0.0
+            || self.adapt_at.elapsed() < Duration::from_secs(2)
+        {
+            return;
+        }
+        self.adapt_at = Instant::now();
+        let current = self.settings.horizon.resolution_scale;
+        let next = if self.fps < 48.0 && current > 60 {
+            self.adapt_good = 0;
+            current.saturating_sub(10).max(60)
+        } else if self.fps > 57.0 && current < 80 {
+            self.adapt_good = self.adapt_good.saturating_add(1);
+            if self.adapt_good >= 3 {
+                self.adapt_good = 0;
+                (current + 5).min(80)
+            } else {
+                current
+            }
+        } else {
+            self.adapt_good = 0;
+            current
+        };
+        if next == current {
+            return;
+        }
+        self.settings.horizon.resolution_scale = next;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_world_post(
+                next as f32 / 100.0,
+                self.settings.horizon.fxaa,
+                self.settings.horizon.taa,
+                self.settings.horizon.upscaling.ratio(),
+            );
+        }
+    }
     fn tick(&mut self) -> Result<()> {
         if self.agent.hold_server {
             return Ok(());
         }
+        self.adapt_resolution();
         #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
         self.poll_shared_world();
         // `Player.entityInteractionRange`/`blockInteractionRange` for the tick's
@@ -17531,6 +17578,8 @@ impl<'a> Game<'a> {
             fps: 0.0,
             fps_frames: 0,
             fps_at: now,
+            adapt_at: now,
+            adapt_good: 0,
             ticks: 0,
             error: None,
             message: None,

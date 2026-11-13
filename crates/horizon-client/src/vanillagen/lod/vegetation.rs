@@ -301,11 +301,11 @@ impl Vegetation {
         }
     }
     pub(super) fn apply(&self, column: &mut Column, x: i32, z: i32, width: i32, light: u16) {
-        // A cell 32 blocks and wider would draw a whole cell of leaves: too
+        // A cell 8 blocks and wider would draw a whole cell of leaves: too
         // large to read as a tree, and it would pop when the real canopies
-        // arrive. Crowns reach 16-block cells; beyond that the ground keeps
+        // arrive. Crowns reach 4-block cells; beyond that the ground keeps
         // its colour and the resident chunks supply the real trees.
-        if width > 16 {
+        if width > 4 {
             return;
         }
         let Some(surface) = column.surface else {

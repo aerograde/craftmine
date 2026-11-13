@@ -5,6 +5,22 @@
 // sets globalThis.horizonOffline, which hands over the files it holds instead.
 import "./audio.js"; // before the game's glue, which keeps the AudioContext it finds
 
+// Device facts the renderer uses to pick its defaults, and the public address
+// Nearby falls back to when the browser has no WebRTC STUN. The lookup never
+// blocks the game; Nearby retries its room until it arrives.
+const pageParams = new URLSearchParams(location.search);
+globalThis.horizonDeviceMemory = Number(
+    pageParams.get("deviceMemory") || navigator.deviceMemory || 0);
+globalThis.horizonHardwareConcurrency = Number(
+    pageParams.get("cores") || navigator.hardwareConcurrency || 0);
+globalThis.horizonPublicIp = "";
+fetch("https://api64.ipify.org?format=json", { cache: "no-store" })
+    .then((response) => response.json())
+    .then((value) => {
+        if (typeof value.ip === "string") globalThis.horizonPublicIp = value.ip;
+    })
+    .catch(() => {});
+
 const ROOT = ".local/horizon-client/26.3";
 const status = document.getElementById("status");
 const startupErrors = [];

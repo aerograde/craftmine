@@ -16,13 +16,27 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 /// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`); with no
-/// file yet, the pack's own `potato` profile, the light preset (a pack without profiles gets
-/// its defaults). Any saved value overrides the profile.
+/// file yet, the pack's own preset for this device: `dgpu` on a full machine, `igpu` on a
+/// low-memory browser, `potato` on a two-thread one. Any saved value overrides the profile.
 fn chosen_shader_options(name: &str, pack: &Pack) -> BTreeMap<String, String> {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(name));
     match horizon_os::fs::read_to_string(file) {
         Ok(text) => horizon_shaders::parse_chosen(&text),
-        Err(_) => horizon_shaders::profile(pack, "potato"),
+        Err(_) => {
+            let profile = if !horizon_client::graphics::web_low_memory() {
+                "dgpu"
+            } else if horizon_os::hardware_threads() <= 2 {
+                "potato"
+            } else {
+                "igpu"
+            };
+            let chosen = horizon_shaders::profile(pack, profile);
+            if chosen.is_empty() {
+                horizon_shaders::profile(pack, "potato")
+            } else {
+                chosen
+            }
+        }
     }
 }
 

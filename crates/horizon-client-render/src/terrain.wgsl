@@ -140,10 +140,9 @@ fn sample_rgss(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv: v
 // Distant terrain tiles (lod/mesh.rs) count their UVs in blocks past 1: each block takes the
 // sprite again, as separate faces would under the clamped sampler. Sprite UVs in [0, 1] stay.
 fn tile_uv(uv: vec2<f32>) -> vec2<f32> {
-    // Wrap per block. The old `ceil(uv) - 1` mapped an exact integer UV to
-    // 1.0, so every block boundary sampled the sprite's edge texel instead of
-    // its first: a visible one-texel seam between merged cells.
-    return uv - floor(uv);
+    // Wrap per block; an exact integer keeps the sprite's edge texel, as a
+    // single face's 1.0 does under the clamped sampler.
+    return uv - max(ceil(uv) - vec2<f32>(1.0), vec2<f32>(0.0));
 }
 fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {
     // terrain.fsh's two sampling paths: sampleRGSS for RGSS, sampleNearest otherwise.

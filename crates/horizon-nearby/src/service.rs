@@ -29,6 +29,10 @@ const INVITE_TTL: Duration = Duration::from_secs(120);
 const SESSION_TTL: Duration = Duration::from_secs(90);
 const EXPIRE_EVERY: Duration = Duration::from_secs(1);
 const SEEN_TTL: Duration = Duration::from_secs(120);
+/// Where peers meet when neither STUN nor the browser's HTTP address lookup
+/// gave a public address. The no-auth brokers still carry the room, so a LAN
+/// pair can find each other; a code keeps a group private.
+const PUBLIC_ROOM: &str = "nearby-public";
 const MAX_REQUESTS_PER_MINUTE: usize = 5;
 
 /// What the client starts the service with.
@@ -73,6 +77,7 @@ impl Default for Config {
 pub fn default_brokers() -> Vec<String> {
     vec![
         "mqtts://broker.emqx.io:8883".into(),
+        "mqtts://broker.hivemq.com:8883".into(),
         "mqtts://test.mosquitto.org:8883".into(),
         "mqtts://mqtt.eclipseprojects.io:8883".into(),
     ]
@@ -81,6 +86,7 @@ pub fn default_brokers() -> Vec<String> {
 pub fn default_brokers() -> Vec<String> {
     vec![
         "wss://broker.emqx.io:8084/mqtt".into(),
+        "wss://broker.hivemq.com:8884/mqtt".into(),
         "wss://test.mosquitto.org:8081".into(),
         "wss://mqtt.eclipseprojects.io:443/mqtt".into(),
     ]
@@ -519,10 +525,13 @@ impl Inner {
             }
         }
         let public = probe_public_ip(&self.config.stun);
-        self.room = room::resolve(self.config.room.as_deref(), public);
-        if self.room.is_none() {
-            self.notice = Some("No nearby room — local network only".into());
-        }
+        let resolved = room::resolve(self.config.room.as_deref(), public);
+        self.room = resolved.clone().or_else(|| Some(PUBLIC_ROOM.to_owned()));
+        self.notice = if resolved.is_none() {
+            Some("Public nearby room — use a code for privacy".into())
+        } else {
+            None
+        };
         self.start_brokers();
         self.publish_presence();
         self.write_snapshot();
@@ -1281,6 +1290,14 @@ impl Inner {
         if envelope.to != self.id || envelope.v != VERSION {
             return;
         }
+        // The same envelope is published to every broker, and may also arrive
+        // over LAN. Its nonce makes the copies identical; answer it once.
+        if !self
+            .seen
+            .insert(&format!("envelope:{}:{}", envelope.from, envelope.nonce))
+        {
+            return;
+        }
         let signal = if !envelope.eph.is_empty() {
             self.key.open(&envelope)
         } else if let Some(session) = envelope.session {
@@ -1641,18 +1658,20 @@ impl Inner {
         self.requests.clear();
         self.invites.clear();
         let custom = code.as_deref().and_then(room::custom);
-        self.room = if let Some(custom) = custom {
+        let resolved = if let Some(custom) = custom {
             Some(custom)
         } else {
             room::automatic(probe_public_ip(&self.config.stun))
         };
+        let fallback = resolved.is_none();
+        self.room = resolved.or_else(|| Some(PUBLIC_ROOM.to_owned()));
         self.start_brokers();
         self.publish_presence();
-        self.notice = if self.room.is_some() {
-            Some("Looking for nearby players…".into())
+        self.notice = Some(if fallback {
+            "Public nearby room — use a code for privacy".into()
         } else {
-            Some("No nearby room — local network only".into())
-        };
+            "Looking for nearby players…".into()
+        });
         self.dirty = true;
     }
 
@@ -1706,10 +1725,14 @@ fn probe_public_ip(stun: &[String]) -> Option<std::net::IpAddr> {
             }
         })
         .collect();
-    horizon_os::net::public_address(&ice, Duration::from_secs(6)).ok()
+    horizon_os::net::public_address(&ice, Duration::from_secs(6))
+        .ok()
+        .or_else(horizon_os::public_ip_hint)
 }
 
 #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 fn probe_public_ip(_stun: &[String]) -> Option<std::net::IpAddr> {
-    None
+    // The page's HTTP lookup runs from main.js without WebRTC; it is already
+    // cached by the time Nearby starts in practice.
+    horizon_os::public_ip_hint()
 }

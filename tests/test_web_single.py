@@ -105,10 +105,14 @@ class SingleFileTests(unittest.TestCase):
         with tarfile.open(fileobj=io.BytesIO(block(html, "horizon-boot")), mode="r:") as tar:
             names = tar.getnames()
             self.assertIn("assets/minecraft/lang/en_us.json", names)
-            self.assertIn("assets/minecraft/sounds/music/calm.ogg", names)
             self.assertIn("horizon-resources.json", names)
+            # Sounds are lazy: installed from the held store the first time the
+            # game reads them, not unpacked into the VFS at boot.
+            self.assertNotIn("assets/minecraft/sounds/music/calm.ogg", names)
             self.assertNotIn("shaderpacks/test.zip", names)
-            self.assertEqual(tar.extractfile("assets/minecraft/sounds/music/calm.ogg").read(), b"OGG")
+        manifest = html.split('id="horizon-manifest">', 1)[1].split("</script>", 1)[0]
+        self.assertIn("assets/minecraft/sounds/music/calm.ogg\t3\n", manifest)
+        self.assertEqual(block(html, "horizon-store"), b"OGG")
         # Packs install at `/shaderpacks`, where the settings scan them; inside
         # the resource archive they landed under the resource root and never
         # appeared in the list.

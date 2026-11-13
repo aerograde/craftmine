@@ -119,6 +119,7 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         |key: &str, names: &'static [&'static str], d: i32| def(key, O(Named(names)), V::Int(d));
     let id = |key: &str, count: i32, d: i32| def(key, O(Id(count)), V::Int(d));
     let pb = |key: &str, d: bool| def(key, PB, V::Bool(d));
+    let low = crate::graphics::web_low_memory();
     let mut t = vec![
         b("ao", true),
         i("biomeBlendRadius", 0, 7, 2),
@@ -162,8 +163,13 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         b("reducedDebugInfo", false),
         def("renderClouds", O(Clouds), V::Int(2)),
         i("cloudRange", 2, 128, 128),
-        i("renderDistance", 2, MAX_RENDER_DISTANCE, 12),
-        i("simulationDistance", 5, 32, 12),
+        i(
+            "renderDistance",
+            2,
+            MAX_RENDER_DISTANCE,
+            if low { 8 } else { 12 },
+        ),
+        i("simulationDistance", 5, 32, if low { 8 } else { 12 }),
         u("screenEffectScale", 1.0),
         def("soundDevice", O(AnyStr), V::Str(String::new())),
         b("vignette", true),
@@ -603,6 +609,16 @@ impl OptionsFile {
         // A fixer failure abandons the whole file, leaving the defaults.
         if crate::options_fixes::update(&mut raw, version).is_ok() {
             file.apply(&raw);
+        }
+        if crate::graphics::web_low_memory() {
+            // Files written before the web device profile carry the old 12-chunk
+            // defaults. A deliberate larger distance is left alone.
+            if file.int("renderDistance") == 12 {
+                file.set("renderDistance", V::Int(8));
+            }
+            if file.int("simulationDistance") == 12 {
+                file.set("simulationDistance", V::Int(8));
+            }
         }
         file
     }
