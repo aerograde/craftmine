@@ -12,7 +12,7 @@ Google Drive as anyone-with-link:
 
 Open the launcher from jsDelivr:
 
-<https://cdn.jsdelivr.net/gh/nobuildersnotools/horizon-web@web/single/launch.svg>
+<https://cdn.jsdelivr.net/gh/retrograde-sdk/horizon-single@main/launch.svg>
 
 The Google API key in `launch.svg` is restricted to the jsDelivr referrer, so
 the launcher must be opened from `cdn.jsdelivr.net`, not copied to another
