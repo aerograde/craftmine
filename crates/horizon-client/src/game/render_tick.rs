@@ -145,8 +145,18 @@ impl Game<'_> {
             night_vision: self.fog_night_vision(),
         };
         let mut fog = horizon_client::fog::setup_fog(tables, &self.fog, &input);
-        if !self.settings.horizon.fog || (infinite_lod && aerial) {
+        if !self.settings.horizon.fog {
             horizon_client::fog::clear_distance_fog(&mut fog, &input);
+        } else if infinite_lod && aerial && fog_type == FogType::Atmospheric {
+            // A light far haze is what keeps the infinite LOD readable: the
+            // near rings stay crisp, while the coarse horizon dissolves before
+            // its tile silhouettes become obvious. This is deliberately far enough
+            // to hide the last coarse LOD ring, but well past the near detail.
+            let (start, end) = (512.0, 1536.0);
+            fog.render_distance_start = start;
+            fog.render_distance_end = end;
+            fog.environmental_start = start;
+            fog.environmental_end = end;
         }
         fog
     }

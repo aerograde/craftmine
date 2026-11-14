@@ -111,6 +111,9 @@ fn split_width(level: u8) -> i32 {
 /// at the far roots. The giant far cells are what let the horizon reach
 /// 65,536 blocks with a bounded quad count; the haze hides their size.
 const INFINITE_LEVEL: u8 = 9;
+/// Past this cell width the seed mesh is a silhouette, not terrain: the far
+/// horizon is left to fog instead of drawing obvious coarse blocks.
+const MAX_VISIBLE_CELL: i32 = 8;
 /// Main-thread result budget per update. Workers can finish hundreds of tiles
 /// in a burst; taking them all in one frame is a hitch. Accepting a mesh is
 /// cheap (it is only moved into the upload queue), so take enough that the
@@ -2600,6 +2603,9 @@ impl Lod {
     fn rebuild_wanted(&mut self, camera: [i32; 2]) {
         self.wanted.clear();
         for &key in &self.plan.nodes {
+            if key.size() / 16 > MAX_VISIBLE_CELL {
+                continue;
+            }
             if self.ready.contains_key(&key) || self.fully_covered(key) {
                 continue;
             }
@@ -3067,9 +3073,8 @@ mod tests {
             true,
         );
         lod.rebuild_wanted([0, 0]);
-        // The root over the camera is sampled: its coarse shell is the
-        // fallback that stops newly exposed ground from becoming sky/void
-        // while the leaves are still arriving.
+        // Coarse roots are deliberately outside the draw cap: the far
+        // horizon is fog, not a 512-block-cell silhouette.
         let containing = lod
             .plan
             .roots
@@ -3087,8 +3092,21 @@ mod tests {
             })
         };
         assert!(
-            wanted(&lod, containing),
-            "the coarse root over the camera must fill the near view"
+            !wanted(&lod, containing),
+            "coarse roots beyond the cell cap must be left to fog"
+        );
+        assert!(
+            lod.wanted.iter().all(|w| {
+                TileKey {
+                    x: w.0.x,
+                    z: w.0.z,
+                    level: w.0.level,
+                }
+                .size()
+                    / 16
+                    <= MAX_VISIBLE_CELL
+            }),
+            "a wanted tile exceeds the visible LOD cell cap"
         );
         // Samples go nearest first by screen-space size: the near resident
         // tiles and the fallback over the camera share the front, and the

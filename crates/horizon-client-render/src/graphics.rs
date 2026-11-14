@@ -612,6 +612,12 @@ impl Graphics {
                 g.fxaa = true;
             }
         }
+        // The exact original Visual Vibrance pack runs its own code (with its
+        // own licence and credit). When it is installed, make it the default
+        // look instead of silently substituting the fast approximation.
+        if g.shader_pack.is_empty() && fs::exists("shaderpacks/Visual-Vibrance-v0.3.5a.zip") {
+            g.shader_pack = "Visual-Vibrance-v0.3.5a.zip".into();
+        }
         if fs::remove_file(dir.join(HDR_MARKER)).is_ok() && g.hdr {
             g.hdr = false;
             g.save(dir);
