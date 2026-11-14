@@ -61,9 +61,12 @@ Two channels run at once and are merged:
    is split into numbered chunks and sent twice. This works with the internet
    unplugged.
 2. **MQTT** through the public brokers below. The topic room is:
-   - `auto-<hash>` of the public address STUN reports, so everyone behind one
-     NAT shares a room; or
+   - `auto-<hash>` of the public address STUN (or the browser's HTTP lookup)
+     reports, so everyone behind one NAT shares a room; or
    - `lan-<hash>` of the private networks when STUN fails; or
+   - `nearby-public` when neither is available (a single-threaded browser has
+     no WebRTC and cannot enumerate LAN interfaces), so the brokers still
+     start; or
    - a code the player sets (`nearbyRoom` or the screen's code), for a VPN or
      two different networks.
 
@@ -77,13 +80,19 @@ The default brokers, in order:
 | Broker | Native | Browser |
 |---|---|---|
 | EMQX | `mqtts://broker.emqx.io:8883` | `wss://broker.emqx.io:8084/mqtt` |
-| Mosquitto test | `mqtts://test.mosquitto.org:8883` | `wss://test.mosquitto.org:8081` |
-| Eclipse | `mqtts://mqtt.eclipseprojects.io:8883` | `wss://mqtt.eclipseprojects.io:443/mqtt` |
+| Mosquitto test (Eclipse) | `mqtts://test.mosquitto.org:8883` | `wss://test.mosquitto.org:8081` |
+
+The old `mqtt.eclipseprojects.io` host is deliberately not used: it resolves
+but no longer accepts TLS (8883) or HTTPS (443), so it was a dead half of
+every pair. `test.mosquitto.org` is the live Eclipse Mosquitto broker.
+HiveMQ is not in the pool.
 
 No other external service is used. STUN is Google's (`stun.l.google.com`,
-`stun1`, `stun2`, with `stun.cloudflare.com` as a fallback). There is no TURN
-and no HTTP IP lookup; the browser finds its public address with a throwaway
-`RTCPeerConnection` and reads the server-reflexive candidate.
+`stun1`, `stun2`, with `stun.cloudflare.com` as a fallback). There is no TURN.
+The threaded browser finds its public address with a throwaway
+`RTCPeerConnection`; the single-threaded page, which has no WebRTC, gets an
+HTTP lookup from `main.js` (`api64.ipify.org`); if it has not arrived by the
+time Nearby starts, the public room is used.
 
 ### A join
 

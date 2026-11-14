@@ -56,7 +56,7 @@ wasm="$dist/pkg/horizon-client_bg.wasm"
 if [ "$profile" = release ] && [ "${WASM_OPT:-1}" != 0 ]; then
     if command -v wasm-opt > /dev/null; then
         # The features rustc's wasm32 target turns on, and the threaded build's atomics.
-        wasm-opt -O2 --enable-threads --enable-bulk-memory --enable-mutable-globals \
+        wasm-opt -O3 --enable-threads --enable-bulk-memory --enable-mutable-globals \
             --enable-sign-ext --enable-nontrapping-float-to-int --enable-reference-types \
             --enable-multivalue --enable-simd "$wasm" -o "$wasm.opt"
         mv "$wasm.opt" "$wasm"

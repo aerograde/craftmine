@@ -77,18 +77,17 @@ impl Default for Config {
 pub fn default_brokers() -> Vec<String> {
     vec![
         "mqtts://broker.emqx.io:8883".into(),
-        "mqtts://broker.hivemq.com:8883".into(),
+        // Eclipse's Mosquitto public broker. The old
+        // `mqtt.eclipseprojects.io` host resolves but no longer accepts TLS
+        // (8883) or HTTPS (443), so every pair had one dead link.
         "mqtts://test.mosquitto.org:8883".into(),
-        "mqtts://mqtt.eclipseprojects.io:8883".into(),
     ]
 }
 #[cfg(target_arch = "wasm32")]
 pub fn default_brokers() -> Vec<String> {
     vec![
         "wss://broker.emqx.io:8084/mqtt".into(),
-        "wss://broker.hivemq.com:8884/mqtt".into(),
         "wss://test.mosquitto.org:8081".into(),
-        "wss://mqtt.eclipseprojects.io:443/mqtt".into(),
     ]
 }
 
@@ -1735,4 +1734,28 @@ fn probe_public_ip(_stun: &[String]) -> Option<std::net::IpAddr> {
     // The page's HTTP lookup runs from main.js without WebRTC; it is already
     // cached by the time Nearby starts in practice.
     horizon_os::public_ip_hint()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_brokers;
+
+    #[test]
+    fn nearby_uses_the_live_emqx_and_eclipse_mosquitto_brokers() {
+        let brokers = default_brokers();
+        assert!(
+            brokers.iter().any(|url| url.contains("broker.emqx.io")),
+            "{brokers:?}"
+        );
+        assert!(
+            brokers.iter().any(|url| url.contains("test.mosquitto.org")),
+            "{brokers:?}"
+        );
+        assert!(
+            !brokers
+                .iter()
+                .any(|url| url.contains("hivemq") || url.contains("eclipseprojects")),
+            "dead or disallowed broker in {brokers:?}"
+        );
+    }
 }
