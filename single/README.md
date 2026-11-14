@@ -4,11 +4,11 @@
 Drive through a service worker, adding the COOP/COEP headers the game's Web
 Workers need.
 
-The 228,521,697-byte `horizon.html` is not in this repository. It is shared from
+The 228,124,049-byte `horizon.html` is not in this repository. It is shared from
 Google Drive as anyone-with-link:
 
 - file id: `1o_7XgQ39hX1HHayNF9pLmzn0bbPqRWov`
-- build: `02ac2ab32d40` (first 12 hex digits of the file's SHA-256)
+- build: `b29433c2c907` (first 12 hex digits of the file's SHA-256)
 
 Open the launcher from jsDelivr:
 
