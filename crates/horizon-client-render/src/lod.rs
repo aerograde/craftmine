@@ -1038,6 +1038,14 @@ pub struct Lod {
     /// The columns left out: `full` and `retiring`.
     covered: FxHashSet<(i32, i32)>,
     covered_bounds: Option<[i32; 4]>,
+    /// Columns a chunk has loaded, meshed or not. Their stand-ins are hidden
+    /// too: a coarse tile drawn over a column whose real terrain is about to
+    /// appear is the slab seen over a newly loaded area. Only `covered` (every
+    /// section meshed and faded) cuts tiles out for good.
+    claimed: FxHashSet<(i32, i32)>,
+    /// `covered` and `claimed`: what the mesher leaves out.
+    hide: FxHashSet<(i32, i32)>,
+    hide_bounds: Option<[i32; 4]>,
     /// The full-detail columns `update` was last given.
     full: FxHashSet<(i32, i32)>,
     /// Columns that left the full-detail area, still left out (their
@@ -1420,6 +1428,9 @@ impl Lod {
             removed: Vec::new(),
             covered: FxHashSet::default(),
             covered_bounds: None,
+            claimed: FxHashSet::default(),
+            hide: FxHashSet::default(),
+            hide_bounds: None,
             full: FxHashSet::default(),
             retiring: FxHashSet::default(),
             cutout: None,
@@ -2313,7 +2324,38 @@ impl Lod {
             self.retiring.retain(|column| !full.contains(column));
             self.full = full;
             self.leave_out();
+            self.refresh_hide();
         }
+    }
+    /// Columns the world has loaded, meshed or not (`update`'s `covered` is
+    /// the narrower set whose sections are all drawn). Their stand-ins are
+    /// hidden, so a freshly loaded column is filled by its own terrain rather
+    /// than by an overlapping coarse tile.
+    pub fn set_claimed(&mut self, claimed: FxHashSet<(i32, i32)>) {
+        if self.claimed != claimed {
+            self.claimed = claimed;
+            self.refresh_hide();
+        }
+    }
+    /// Rebuilds the union the mesher hides and its bounds.
+    fn refresh_hide(&mut self) {
+        if self.claimed.is_empty() {
+            self.hide = self.covered.clone();
+            self.hide_bounds = self.covered_bounds;
+            return;
+        }
+        self.hide = self.covered.union(&self.claimed).copied().collect();
+        self.hide_bounds = self.hide.iter().fold(None, |bounds, &(x, z)| {
+            Some(match bounds {
+                None => [x * 16, z * 16, (x + 1) * 16, (z + 1) * 16],
+                Some([x0, z0, x1, z1]) => [
+                    x0.min(x * 16),
+                    z0.min(z * 16),
+                    x1.max((x + 1) * 16),
+                    z1.max((z + 1) * 16),
+                ],
+            })
+        });
     }
     /// Releases retiring columns whose replacement is ready, then leaves out
     /// the full-detail and retiring columns: tiles touching a change remesh.
@@ -2509,7 +2551,8 @@ impl Lod {
                 built
             }
         };
-        let covered = Arc::new(self.covered.clone());
+        let covered = Arc::new(self.hide.clone());
+        let bounds = self.hide_bounds;
         let mut queued = lock(&self.shared.mesh_jobs);
         let count = keys.len();
         for (key, version) in keys {
@@ -2527,7 +2570,7 @@ impl Lod {
                     version,
                     finer,
                     covered: covered.clone(),
-                    bounds: self.covered_bounds,
+                    bounds,
                     canceled,
                     min_y: self.min_y,
                 },

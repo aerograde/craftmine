@@ -798,11 +798,6 @@ pub struct Renderer {
     readback: readback::Readback,
     pub info: wgpu::AdapterInfo,
     pub suspended: bool,
-    /// A size the window took since the last frame. `resize` only records it:
-    /// the surface is reconfigured once, at the start of the next frame,
-    /// before its texture is acquired. Configuring per event raced the
-    /// acquire and presented black frames while the window was dragged.
-    pending_size: Option<[u32; 2]>,
     /// Consecutive frames whose surface acquisition failed validation. The
     /// first gets the swapchain a fresh configuration; later ones reattach
     /// the window, as a lost surface does.
@@ -3584,7 +3579,6 @@ impl Renderer {
             readback: readback::Readback::default(),
             info,
             suspended: !drawable_size(size.width, size.height, max_side),
-            pending_size: None,
             acquire_validation_failures: 0,
             surface_unconfigured: false,
             drawn_sections: 0,
@@ -3751,19 +3745,12 @@ impl Renderer {
     pub fn resize(&mut self, width: u32, height: u32) {
         let max = self.device.limits().max_texture_dimension_2d;
         self.suspended = !drawable_size(width, height, max);
-        if !self.suspended {
-            // One reconfigure per frame, before the acquire (`apply_pending_size`).
-            self.pending_size = Some([width, height]);
-        }
-    }
-    /// The window size recorded by `resize`, applied at the start of a frame:
-    /// configure the swapchain, then rebuild the depth and offscreen targets at
-    /// the new size. Doing this between frames raced the surface acquire and
-    /// presented black frames for as long as the window was being dragged.
-    fn apply_pending_size(&mut self) {
-        let Some([width, height]) = self.pending_size.take() else {
+        if self.suspended {
             return;
-        };
+        }
+        // A repeated size (the platform sends several events per drag step)
+        // must not reconfigure the swapchain again: that races the acquire
+        // and is what made a live resize stutter.
         if [width, height] == [self.config.width, self.config.height] {
             return;
         }
@@ -4897,7 +4884,6 @@ impl Renderer {
         }
     }
     pub fn render(&mut self, frame: &Frame) -> Result<bool> {
-        self.apply_pending_size();
         let scaled = self.screenshot_size();
         let rendered = match scaled {
             Some(size) => self.draw_scaled_frame(frame, size),

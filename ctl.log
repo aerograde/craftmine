@@ -1,0 +1,232 @@
+Horizon 0.1.0
+Horizon: block sprites: 1291 layers at 64 px (largest 64 px, budget 128 MiB)
+load core tables: 1.94s
+load pack tables: 1.99s
+load items: 2.83s
+Horizon: resources loaded in 3.7s; 35723 block states, 1658 items, 67 biomes; 11 worker threads
+Horizon: no sound: audio off: HORIZON_NO_AUDIO is set
+Horizon: control socket /Users/rohan/cyan/ctl.sock
+Horizon: worldgen data loaded in 2.429952211s
+Horizon renderer: AMD Radeon Pro 560X (Metal, DiscreteGpu)
+Horizon renderer: requesting the device (driver unnamed) with features [TEXTURE_FORMAT_16BIT_NORM | TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | MAPPABLE_PRIMARY_BUFFERS | VERTEX_WRITABLE_STORAGE | CLEAR_TEXTURE | TEXTURE_ATOMIC | SUBGROUP | INDIRECT_FIRST_INSTANCE | RG11B10UFLOAT_RENDERABLE | FLOAT32_BLENDABLE] and the adapter's limits (buffers up to 3221225472 bytes, storage bindings up to 3221225472 bytes, 2048 texture layers)
+Horizon renderer: creating the pipelines
+Horizon renderer: pipelines ready (multi-draw on, occlusion culling on, GPU timer off)
+Horizon: live features ready in 86.943542ms
+Horizon: world data preloaded for the launch's world in 3747 ms
+Horizon renderer: acquiring the first frame
+Horizon renderer: submitting the first frame
+Horizon: first frame after 6370 ms
+[13:46:14] [Server thread/INFO]: Player73331[/127.0.0.1:0] logged in with entity id 57 at (200.43526478976523, 66.0, 200.4820056061948)
+[13:46:14] [Server thread/INFO]: System chat: Player73331 joined the game
+shader pack Miniature: mc_Entity for 318 of 1291 block sprites in 40 ms
+pack link gbuffers_terrain vs in @0: Vector { size: Quad, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_terrain vs in @1: Vector { size: Bi, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_terrain vs in @2: Scalar(Scalar { kind: Uint, width: 4 })
+pack link gbuffers_terrain vs in @4: Vector { size: Bi, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_terrain vs in @3: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs out @2: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs in @0: Vector { size: Quad, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_water vs in @1: Vector { size: Bi, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_water vs in @2: Scalar(Scalar { kind: Uint, width: 4 })
+pack link gbuffers_water vs in @4: Vector { size: Bi, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_water vs in @3: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @8: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @9: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_water vs out @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @7: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_water vs out @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water vs out @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_water fs in @8: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs in @9: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs in @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs in @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_water fs in @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs in @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs in @7: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs in @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_water fs in @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs in @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_water fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_water fs out @2: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_skybasic vs in @0: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_skybasic vs in @1: Scalar(Scalar { kind: Uint, width: 4 })
+pack link gbuffers_skybasic vs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_skybasic vs out @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_skybasic fs in @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_skybasic fs in @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_skybasic fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @0: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @1: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @2: Scalar(Scalar { kind: Uint, width: 4 })
+pack link gbuffers_entities vs in @3: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @4: Vector { size: Quad, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_entities vs in @5: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs out @2: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs in @0: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs in @1: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs in @2: Scalar(Scalar { kind: Uint, width: 4 })
+pack link gbuffers_terrain vs in @3: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs in @4: Vector { size: Quad, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_terrain vs in @5: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain vs out @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain vs out @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs in @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_terrain fs in @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_terrain fs out @2: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @0: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @1: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @2: Scalar(Scalar { kind: Uint, width: 4 })
+pack link gbuffers_entities vs in @3: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs in @4: Vector { size: Quad, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_entities vs in @5: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities vs out @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities vs out @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs in @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_entities fs in @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_entities fs out @2: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs in @0: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs in @1: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs in @2: Scalar(Scalar { kind: Uint, width: 4 })
+pack link gbuffers_hand vs in @3: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs in @4: Vector { size: Quad, scalar: Scalar { kind: Uint, width: 4 } }
+pack link gbuffers_hand vs in @5: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @8: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @7: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @12: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_hand vs out @5: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @1: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_hand vs out @6: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @10: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_hand vs out @11: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @0: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_hand vs out @3: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @9: Vector { size: Tri, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand vs out @2: Scalar(Scalar { kind: Float, width: 4 })
+pack link gbuffers_hand vs out @4: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand fs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_hand fs out @2: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_weather vs out @1: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_weather vs out @0: Vector { size: Bi, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_weather fs out @0: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+pack link gbuffers_clouds vs out @4: Vector { size: Quad, scalar: Scalar { kind: Float, width: 4 } }
+shader pack Miniature: terrain draws with gbuffers_terrain
+shader pack Miniature: translucent terrain draws with gbuffers_water
+shader pack Miniature: the sky draw with gbuffers_skybasic
+shader pack Miniature: clouds draw with gbuffers_clouds
+shader pack Miniature: the hand draws with gbuffers_hand
+shader pack Miniature: rain and snow draw with gbuffers_weather
+shader pack Miniature: entities draw with gbuffers_entities
+shader pack Miniature: block entities draw with gbuffers_terrain
+shader pack Miniature: translucent entities draw with gbuffers_entities
+shader pack Miniature: folder `world0`, 1 programs (final) in 391 ms
+[13:46:21] [Server thread/INFO]: System chat: [Player73331: Set minecraft:overworld to time marker minecraft:noon]

@@ -2286,6 +2286,12 @@ struct Game<'a> {
     adapt_at: Instant,
     /// Consecutive healthy intervals before it scales back up.
     adapt_good: u8,
+    /// Extra resident chunks granted while the frame rate has headroom
+    /// (`adapt_chunk_distance`): the near band is real terrain instead of far
+    /// cells, which is what a house, a cave or a familiar place can afford.
+    adaptive_chunks: i32,
+    adaptive_good: u8,
+    adaptive_at: Instant,
     ticks: u64,
     health_hud: hud_layout::HealthHud,
     /// What ends the game with an error; kept as it is, so main can tell a debug crash.
@@ -6767,11 +6773,48 @@ impl Game<'_> {
             );
         }
     }
+    /// Grows the resident radius by up to `ADAPTIVE_CHUNKS` while the frame
+    /// rate has headroom, and gives it back when it does not. The extra chunks
+    /// are generated and meshed ahead of the LOD, so standing still somewhere
+    /// cheap (a house, a cave) does not leave the near band as coarse cells.
+    fn adapt_chunk_distance(&mut self) {
+        const ADAPTIVE_CHUNKS: i32 = 4;
+        if self.screen != Screen::Playing
+            || self.player.is_none()
+            || self.fps <= 0.0
+            || self.adaptive_at.elapsed() < Duration::from_secs(2)
+        {
+            return;
+        }
+        self.adaptive_at = Instant::now();
+        let next = if self.fps < 50.0 {
+            self.adaptive_good = 0;
+            (self.adaptive_chunks - 2).max(0)
+        } else if self.fps > 70.0 && self.adaptive_chunks < ADAPTIVE_CHUNKS {
+            // Two healthy intervals (four seconds) before another chunk: a
+            // single lucky second must not start a churn of ring rebuilds.
+            self.adaptive_good = self.adaptive_good.saturating_add(1);
+            if self.adaptive_good >= 2 {
+                self.adaptive_good = 0;
+                self.adaptive_chunks + 1
+            } else {
+                self.adaptive_chunks
+            }
+        } else {
+            self.adaptive_good = 0;
+            self.adaptive_chunks
+        };
+        if next != self.adaptive_chunks {
+            self.adaptive_chunks = next;
+            self.streaming.radius = self.settings.render_distance + next;
+        }
+    }
     fn tick(&mut self) -> Result<()> {
         if self.agent.hold_server {
             return Ok(());
         }
         self.adapt_resolution();
+        self.adapt_chunk_distance();
         #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
         self.poll_shared_world();
         // `Player.entityInteractionRange`/`blockInteractionRange` for the tick's
@@ -13374,7 +13417,7 @@ impl Game<'_> {
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);
-        self.streaming.radius = self.settings.render_distance;
+        self.streaming.radius = self.settings.render_distance + self.adaptive_chunks;
         // Options.biomeBlendRadius, ambientOcclusion and cutoutLeaves:
         // LevelExtractor.allChanged when they change.
         let (s, st) = (&self.settings, &self.streaming);
@@ -15810,6 +15853,18 @@ impl Game<'_> {
                             .collect()
                     })
                 });
+                // The columns the world has loaded, whether their sections are
+                // meshed yet: their coarse stand-ins are hidden so a column that
+                // just arrived is filled by its own terrain, not by a slab of far
+                // cells over it.
+                let claimed: horizon_client::fast_hash::FxHashSet<(i32, i32)> = self
+                    .world
+                    .chunks
+                    .keys()
+                    .copied()
+                    .filter(|&(x, z)| horizon_client::streaming::in_view_distance(at.1, at.2, x, z))
+                    .collect();
+                lod.set_claimed(claimed);
                 let meshes = horizon_client::spans::time("lod_update", || {
                     lod.update(
                         [player.position.x, player.position.y, player.position.z],
@@ -17588,6 +17643,9 @@ impl<'a> Game<'a> {
             fps_at: now,
             adapt_at: now,
             adapt_good: 0,
+            adaptive_chunks: 0,
+            adaptive_good: 0,
+            adaptive_at: now,
             ticks: 0,
             error: None,
             message: None,
