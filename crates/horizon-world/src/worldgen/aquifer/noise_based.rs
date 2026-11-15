@@ -473,7 +473,7 @@ impl<P: FluidPicker, F: PositionalRandom, B: AquiferBlockStates> NoiseBasedAquif
             let n = 3. + edge;
             if n > 0. { n / 3. } else { n / 10. }
         };
-        let barrier = if q < -2. || q > 2. {
+        let barrier = if !(-2. ..=2.).contains(&q) {
             0.
         } else {
             if memo.is_nan() {

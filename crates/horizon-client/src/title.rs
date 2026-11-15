@@ -156,6 +156,8 @@ enum WorldToast {
     Failed(String),
     /// `SystemToast.onWorldAccessFailure`: the folder of a world that couldn't be locked.
     AccessFailure(String),
+    /// A nearby join request or invite.
+    Nearby(String),
 }
 impl WorldToast {
     fn text(&self) -> (String, String) {
@@ -176,6 +178,7 @@ impl WorldToast {
                 lang::get_or("selectWorld.access_failure", "Failed to access world"),
                 folder.clone(),
             ),
+            Self::Nearby(message) => ("Play Nearby".to_owned(), message.clone()),
         }
     }
 }
@@ -330,6 +333,8 @@ pub enum Mode {
         alert: Option<Alert>,
     },
     Multiplayer(crate::multiplayer::Screen),
+    /// Play Nearby: local worlds and people, from the service (game/nearby.rs).
+    Nearby,
     /// SafetyScreen: the warning before the first Multiplayer click, with its
     /// "Do not show this screen again" box.
     MultiplayerWarning {
@@ -386,6 +391,8 @@ pub enum Action {
         dir: PathBuf,
         selected: Vec<String>,
     },
+    /// A button on the Play Nearby screen (game/nearby.rs applies it).
+    Nearby(crate::nearby_screen::Action),
 }
 pub struct Title {
     pub mode: Mode,
@@ -433,6 +440,8 @@ pub struct Title {
     open_request: Option<String>,
     /// EditWorldScreen's and WorldOpenFlows' `SystemToast` and its slide.
     toast: Option<(crate::toasts::Slide, WorldToast)>,
+    /// What Play Nearby shows; the game fills it once a frame.
+    pub nearby: crate::nearby_screen::NearbyView,
     icons: RefCell<
         std::collections::HashMap<PathBuf, (horizon_os::time::SystemTime, Option<Vec<u8>>)>,
     >,
@@ -705,6 +714,7 @@ impl Title {
             erase_check: Cell::new([0.0; 4]),
             open_request: None,
             toast: None,
+            nearby: crate::nearby_screen::NearbyView::default(),
             icons: RefCell::new(std::collections::HashMap::new()),
             splash: choose_splash(&splashes, seed, (today.month(), today.day())),
             splash_you,
@@ -1172,6 +1182,10 @@ impl Title {
     /// Whether the system toast holds the `ToastManager`'s first slot.
     pub fn has_toast(&self) -> bool {
         self.toast.is_some()
+    }
+    /// Show a nearby request or invite on the title.
+    pub fn nearby_toast(&mut self, message: String) {
+        self.toast = Some((crate::toasts::Slide::default(), WorldToast::Nearby(message)));
     }
     /// The world a finished backup made before its upgrade opens next.
     pub fn take_open_request(&mut self) -> Option<String> {
@@ -1654,6 +1668,12 @@ impl Title {
                         7,
                         "icon/accessibility",
                     ),
+                    (
+                        "nearby.title",
+                        "Play Nearby",
+                        9,
+                        "pause_menu/social_interactions",
+                    ),
                 ]
                 .into_iter()
                 .enumerate()
@@ -2069,6 +2089,7 @@ impl Title {
                     .collect()
             }
             Mode::Backup { .. } => Vec::new(),
+            Mode::Nearby => Vec::new(),
             Mode::Multiplayer(screen) => screen
                 .buttons(w, h)
                 .into_iter()
@@ -2253,7 +2274,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     ),
                 ),
             ),
-            Mode::Multiplayer(_) => return None,
+            Mode::Multiplayer(_) | Mode::Nearby => return None,
         };
         Some(info)
     }
@@ -2282,6 +2303,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         let narratable = match b.id {
             5 => icon("gui.friends.open.narration", "gui.friends.open.tooltip"),
             6 => icon("options.language.narration", "options.language.tooltip"),
+            9 => Narratable::named("Play Nearby", rect, b.enabled),
             7 => icon(
                 "accessibility.onboarding.accessibility.button.narration",
                 "options.accessibility.tooltip",
@@ -2291,7 +2313,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         // TitleScreen.init adds the icon row after Minecraft Realms and before
         // Options... and Quit Game, which Horizon draws first.
         narratable.order(match b.id {
-            5..=7 => 1,
+            5..=7 | 9 => 1,
             2 | 3 => 2,
             _ => 0,
         })
@@ -3001,6 +3023,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 self.ban_buttons
                     .set([layout.buttons[0], layout.buttons[1], layout.buttons[2]]);
             }
+            Mode::Nearby => crate::nearby_screen::draw(batch, atlas, cursor, &self.nearby, false),
             Mode::Multiplayer(screen) => screen.draw(
                 atlas,
                 batch,
@@ -3286,6 +3309,11 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 self.mode = Mode::Multiplayer(crate::multiplayer::Screen::friend());
                 Action::None
             }
+            (Mode::Main, Some(9)) => {
+                self.mode = Mode::Nearby;
+                Action::None
+            }
+            (Mode::Nearby, _) => Action::None,
             (Mode::Main, Some(8)) => {
                 self.edit_profile(false);
                 Action::None

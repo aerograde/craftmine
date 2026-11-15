@@ -5,6 +5,22 @@
 // sets globalThis.horizonOffline, which hands over the files it holds instead.
 import "./audio.js"; // before the game's glue, which keeps the AudioContext it finds
 
+// Device facts the renderer uses to pick its defaults, and the public address
+// Nearby falls back to when the browser has no WebRTC STUN. The lookup never
+// blocks the game; Nearby retries its room until it arrives.
+const pageParams = new URLSearchParams(location.search);
+globalThis.horizonDeviceMemory = Number(
+    pageParams.get("deviceMemory") || navigator.deviceMemory || 0);
+globalThis.horizonHardwareConcurrency = Number(
+    pageParams.get("cores") || navigator.hardwareConcurrency || 0);
+globalThis.horizonPublicIp = "";
+fetch("https://api64.ipify.org?format=json", { cache: "no-store" })
+    .then((response) => response.json())
+    .then((value) => {
+        if (typeof value.ip === "string") globalThis.horizonPublicIp = value.ip;
+    })
+    .catch(() => {});
+
 const ROOT = ".local/horizon-client/26.3";
 const status = document.getElementById("status");
 const startupErrors = [];
@@ -243,15 +259,33 @@ async function served() {
     const tar = new Uint8Array(
         await new Response(gz.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
     const manifest = await (await fetch("fs/manifest.txt")).text();
-    return { glue, tar, manifest, base: "fs/res/" };
+    // The served build ships the same pack archive the single file embeds, so
+    // the bundled Miniature pack lands in `/shaderpacks` before options load.
+    let packs = null;
+    try {
+        const packResponse = await fetch("packs.tar.gz");
+        if (packResponse.ok) {
+            packs = new Uint8Array(await new Response(
+                packResponse.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+        }
+    } catch (e) {
+        console.warn(`Horizon: no bundled shader packs: ${e}`);
+    }
+    return { glue, tar, packs, manifest, base: "fs/res/" };
 }
 
 async function main() {
     if (!(await webgpu())) return;
-    const { glue, tar, manifest, base } = await (globalThis.horizonOffline ?? served)();
+    const { glue, tar, packs, manifest, base } = await (globalThis.horizonOffline ?? served)();
     status.textContent = "Installing resources…";
+    // The single-file archive can be large: let the status paint before the
+    // copy into the virtual filesystem blocks this thread.
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
     const t0 = performance.now();
     const installed = glue.horizon_install_tar(ROOT, tar);
+    // The single file's shader packs install at the game root, where the
+    // shader-pack list scans `/shaderpacks`.
+    if (packs) glue.horizon_install_tar("/", packs);
     glue.horizon_install_manifest(ROOT, base, manifest);
     console.log(`Horizon: ${installed} files installed in ${Math.round(performance.now() - t0)} ms`);
 
@@ -307,7 +341,9 @@ main().catch((e) => {
     reset.onclick = async () => {
         reset.disabled = true;
         try {
-            if ("serviceWorker" in navigator) {
+            // The single file may be served by its launcher's worker: unregistering
+            // that would leave __horizon.html with nothing to serve it.
+            if ("serviceWorker" in navigator && !globalThis.horizonOffline) {
                 const registrations = await navigator.serviceWorker.getRegistrations();
                 await Promise.all(registrations.map((registration) => registration.unregister()));
             }

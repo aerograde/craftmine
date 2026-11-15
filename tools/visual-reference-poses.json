@@ -1,0 +1,30 @@
+[
+  {
+    "name": "day-ground",
+    "pos": [0, 96, 0],
+    "look": [0, -8],
+    "time": 6000,
+    "wait": 40
+  },
+  {
+    "name": "day-horizon",
+    "pos": [0, 160, 0],
+    "look": [35, -4],
+    "time": 6000,
+    "wait": 40
+  },
+  {
+    "name": "dusk-horizon",
+    "pos": [0, 160, 0],
+    "look": [35, -4],
+    "time": 12500,
+    "wait": 40
+  },
+  {
+    "name": "night",
+    "pos": [0, 128, 0],
+    "look": [0, 10],
+    "time": 18000,
+    "wait": 40
+  }
+]

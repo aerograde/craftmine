@@ -342,6 +342,15 @@ pub(super) fn preload_world_data(
     match &mut *preload {
         Preload::Used => {}
         Preload::Idle if on_world_screens => {
+            // The page's single-threaded build has nowhere to run this
+            // optional preload; retrying it every frame only spammed the
+            // console. The world opening reads the same data itself.
+            #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+            {
+                let _ = (resources, registry);
+                *preload = Preload::Used;
+                return;
+            }
             let resources = resources.to_owned();
             let spawned = horizon_os::thread::Builder::new()
                 .name("World data preload".into())

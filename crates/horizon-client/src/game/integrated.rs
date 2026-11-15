@@ -60,6 +60,9 @@ struct Flags {
     /// Splitscreen players joined through memory (offline uuids): let in although the world is
     /// not open to the LAN, and the game no longer pauses while they play.
     split_players: Mutex<Vec<u128>>,
+    /// Nearby WebRTC guests whose tunnel is up: the server keeps ticking while
+    /// the host pauses, exactly as it does for LAN guests.
+    nearby_guests: AtomicU32,
     /// The generators of the levels the server has run, by dimension: what
     /// F3's chunk generation entry asks `ServerChunkCache.getGenerator`.
     terrain: Mutex<
@@ -124,7 +127,17 @@ impl Integrated {
     /// `IntegratedServer.tickServer` skips the world while the game is paused.
     pub fn set_paused(&self, paused: bool) {
         let split = !self.flags.split_players.lock().unwrap().is_empty();
-        self.flags.paused.store(paused && !split, Ordering::Relaxed);
+        let nearby = self.flags.nearby_guests.load(Ordering::Relaxed) > 0;
+        self.flags
+            .paused
+            .store(paused && !split && !nearby, Ordering::Relaxed);
+    }
+    /// How many nearby guests are carrying the world; their presence keeps
+    /// the server ticking while the host pauses.
+    pub fn set_nearby_guests(&self, guests: usize) {
+        self.flags
+            .nearby_guests
+            .store(guests.min(u32::MAX as usize) as u32, Ordering::Relaxed);
     }
     /// Splitscreen: `name` left; the game pauses again once every such player has. The owner's
     /// permissions it was given go with it (a LAN player could otherwise join under that name).
@@ -381,7 +394,7 @@ impl Game<'_> {
         // The window plays against the world's own biome table (its chunks
         // carry the packs' ids past the built-in list, `set_registries`
         // names them through it), as the server thread's copy does.
-        let world = std::env::current_dir()?.join("saves").join(folder);
+        let world = horizon_os::env::current_dir()?.join("saves").join(folder);
         let enabled_features = horizon_client::save::Level::read(&world)
             .map(|l| l.enabled_features)
             .unwrap_or_default();

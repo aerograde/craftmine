@@ -367,7 +367,10 @@ pub(super) fn spawn_loader(
             loaded.pack_error = loaded.pack_error.or(pack_error);
             loaded
         })
-        .map_err(|error| error.to_string());
+        .map_err(|error| {
+            log::warn!("Horizon: resource loading failed: {error}");
+            error.to_string()
+        });
         let _ = sender.send(LoaderMsg::Done(result));
     };
     // On the page, a worker: the renderer opens and the loading screen draws

@@ -1,0 +1,6 @@
+/locate biome minecraft:ice_spikes
+/tp @a 3288 63 -1240
+/time set
+/time set minecraft:midnight
+/time set minecraft:night
+/time set minecraft:noon

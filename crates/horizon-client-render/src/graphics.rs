@@ -331,8 +331,26 @@ pub fn hdr_offered() -> bool {
 pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
 /// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
 /// are integrated too, with memory and bandwidth enough for every distance.
+/// Software and virtual GPUs share the same limits as other integrated ones.
 pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
-    info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
+    if web_low_memory() {
+        return true;
+    }
+    match info.device_type {
+        wgpu::DeviceType::IntegratedGpu => !info.name.starts_with("Apple"),
+        wgpu::DeviceType::Cpu | wgpu::DeviceType::VirtualGpu => true,
+        _ => false,
+    }
+}
+
+/// An 8 GB-or-less browser device (or a four-thread one): low-power Chromebooks
+/// and tablets report `Other` for their GPU, so the adapter class alone would
+/// pick the full shadow and bloom path there.
+pub fn web_low_memory() -> bool {
+    cfg!(target_arch = "wasm32") && {
+        let memory = horizon_os::device_memory_gib();
+        (memory > 0.0 && memory <= 8.0) || horizon_os::hardware_threads() <= 4
+    }
 }
 /// A LOD distance as far terrain uses it on this adapter.
 pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
@@ -343,10 +361,70 @@ pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
         distance
     }
 }
+/// The automatic visual tier, chosen from the adapter when the renderer opens
+/// (`VisualQuality::Auto`): integrated and software GPUs get the cheap path.
+static AUTO_VISUAL_QUALITY: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(VisualQuality::High as u8);
+pub fn set_auto_visual_quality(quality: VisualQuality) {
+    AUTO_VISUAL_QUALITY.store(quality as u8, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn auto_visual_quality() -> VisualQuality {
+    match AUTO_VISUAL_QUALITY.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => VisualQuality::Auto,
+        1 => VisualQuality::High,
+        2 => VisualQuality::Medium,
+        _ => VisualQuality::Low,
+    }
+}
+/// The tier `Auto` picks for an adapter: Apple's integrated GPUs are fast
+/// enough for the full look, other integrated and software ones are not.
+pub fn auto_quality_for(info: &wgpu::AdapterInfo) -> VisualQuality {
+    let cores = horizon_os::hardware_threads();
+    // Browser adapters report `Other` for real hardware (and for software
+    // rasterisers alike): the device type cannot choose the look there. The
+    // page records `navigator.deviceMemory` and its thread count; use them so
+    // an 8 GB Chromebook does not start on the full shadow/bloom path.
+    if info.backend == wgpu::Backend::BrowserWebGpu {
+        let name = info.name.to_ascii_lowercase();
+        let memory = horizon_os::device_memory_gib();
+        let software = info.device_type == wgpu::DeviceType::Cpu
+            || name.contains("swiftshader")
+            || name.contains("llvmpipe")
+            || name.contains("software");
+        let low_end = name.contains("intel")
+            || name.contains("mali")
+            || name.contains("adreno")
+            || name.contains("powervr")
+            || name.contains("chromebook");
+        return if software || (memory > 0.0 && memory <= 4.0) || cores <= 2 {
+            VisualQuality::Low
+        } else if (memory > 0.0 && memory <= 8.0) || cores <= 4 || low_end {
+            VisualQuality::Medium
+        } else {
+            VisualQuality::High
+        };
+    }
+    match info.device_type {
+        wgpu::DeviceType::DiscreteGpu => VisualQuality::High,
+        wgpu::DeviceType::IntegratedGpu if info.name.starts_with("Apple") => VisualQuality::High,
+        wgpu::DeviceType::IntegratedGpu if cores <= 4 => VisualQuality::Low,
+        wgpu::DeviceType::IntegratedGpu => VisualQuality::Medium,
+        wgpu::DeviceType::Cpu | wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => {
+            VisualQuality::Low
+        }
+    }
+}
 impl Graphics {
-    /// `lod_distance` as far terrain uses it on this adapter.
+    /// `lod_distance` as far terrain uses it on this adapter. Infinite terrain
+    /// ignores both the slider and the integrated GPU's finite cap: its
+    /// camera-centred plan costs the same number of nodes at any distance, and
+    /// low-end machines get coarser far cells instead of a nearer horizon.
     pub fn lod_distance_on(&self, info: &wgpu::AdapterInfo) -> u32 {
-        lod_distance_capped(self.lod_distance, info)
+        if self.lod_infinite {
+            crate::lod::INFINITE_CHUNKS
+        } else {
+            lod_distance_capped(self.lod_distance, info)
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -385,12 +463,15 @@ impl VisualQuality {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Graphics {
     pub preset: Preset,
-    /// The built-in Vibrant Lux visual profile (tone/grade now; shadows, bloom and
-    /// volumetrics on the same profile). On by default.
+    /// The built-in Miniature Shader profile: grade, atmosphere, sun shading,
+    /// water glint, glow and the near sun shadow. On by default.
     pub visuals: bool,
     pub visual_quality: VisualQuality,
     /// Distant surface terrain range, in chunks; 0 disables LODs.
     pub lod_distance: u32,
+    /// Seed-generated terrain to the far horizon, whatever `lod_distance`
+    /// says. On by default; local worlds only (a remote server has no seed).
+    pub lod_infinite: bool,
     /// How finely far terrain is drawn; Full unless the player picks Reduced.
     pub far_detail: FarDetail,
     /// Skip sections hidden behind closed ones (vanilla's occlusion graph).
@@ -459,17 +540,19 @@ pub struct Graphics {
 }
 impl Default for Graphics {
     fn default() -> Self {
+        let low = web_low_memory();
         Self {
             preset: Preset::Custom,
             visuals: true,
             visual_quality: VisualQuality::Auto,
             lod_distance: 0,
+            lod_infinite: true,
             far_detail: FarDetail::Full,
             cave_culling: true,
             entity_culling: false,
-            chunk_updates: 0,
-            upload_budget_kib: 0,
-            texture_budget_mib: 0,
+            chunk_updates: if low { 48 } else { 0 },
+            upload_budget_kib: if low { 2048 } else { 0 },
+            texture_budget_mib: if low { 64 } else { 0 },
             sky: true,
             fog: true,
             weather: true,
@@ -479,8 +562,8 @@ impl Default for Graphics {
             pacing: Pacing::Efficient,
             workers: 0,
             overlay: Overlay::Off,
-            resolution_scale: 100,
-            fxaa: false,
+            resolution_scale: if low { 80 } else { 100 },
+            fxaa: low,
             taa: false,
             upscaling: Upscaling::Native,
             screenshot_quality: 1,
@@ -493,7 +576,11 @@ impl Default for Graphics {
             battery: false,
             shadow_cache: false,
             api: GraphicsApi::Auto,
-            shader_pack: String::new(),
+            shader_pack: if cfg!(target_arch = "wasm32") {
+                String::new()
+            } else {
+                "Miniature".into()
+            },
         }
     }
 }
@@ -505,6 +592,30 @@ impl Graphics {
         let mut g: Self = fs::read_to_string(dir.join(FILE))
             .map(|t| Self::parse(&t))
             .unwrap_or_default();
+        if web_low_memory() {
+            // A file written before the device profile existed must not put an
+            // 8 GB Chromebook back on full resolution or an unbounded upload
+            // queue just because it says so.
+            g.resolution_scale = g.resolution_scale.min(80);
+            g.upload_budget_kib = if g.upload_budget_kib == 0 {
+                2048
+            } else {
+                g.upload_budget_kib.min(4096)
+            };
+            g.texture_budget_mib = if g.texture_budget_mib == 0 {
+                64
+            } else {
+                g.texture_budget_mib.min(64)
+            };
+            if g.chunk_updates == 0 {
+                g.chunk_updates = 48;
+            } else {
+                g.chunk_updates = g.chunk_updates.min(96);
+            }
+            if !g.taa {
+                g.fxaa = true;
+            }
+        }
         if fs::remove_file(dir.join(HDR_MARKER)).is_ok() && g.hdr {
             g.hdr = false;
             g.save(dir);
@@ -534,6 +645,7 @@ impl Graphics {
                 "lodDistance" => {
                     g.lod_distance = number(g.lod_distance).min(crate::lod::MAX_CHUNKS)
                 }
+                "lodInfinite" => g.lod_infinite = flag(g.lod_infinite),
                 "farDetail" => g.far_detail = FarDetail::parse(value),
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
                 "entityCulling" => g.entity_culling = flag(g.entity_culling),
@@ -556,7 +668,7 @@ impl Graphics {
                     }
                 }
                 "workers" => g.workers = number(g.workers).min(64),
-                "resolutionScale" => g.resolution_scale = number(g.resolution_scale).clamp(50, 200),
+                "resolutionScale" => g.resolution_scale = number(g.resolution_scale).clamp(25, 200),
                 "fxaa" => g.fxaa = flag(g.fxaa),
                 "taa" => g.taa = flag(g.taa),
                 "upscaling" => g.upscaling = Upscaling::parse(value),
@@ -601,11 +713,12 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "preset:{}\nvisuals:{}\nvisualQuality:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
+            "preset:{}\nvisuals:{}\nvisualQuality:{}\nlodDistance:{}\nlodInfinite:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
             self.preset.name(),
             bool_text(self.visuals),
             self.visual_quality.name(),
             self.lod_distance,
+            bool_text(self.lod_infinite),
             self.far_detail.name(),
             bool_text(self.cave_culling),
             bool_text(self.entity_culling),
@@ -672,27 +785,26 @@ impl Graphics {
             n => n,
         }
     }
-    /// The Vibrant Lux post profile: x enabled, y contrast, z saturation, w warmth.
-    /// Auto currently starts at the High look; the adaptive tier is wired in the effect
-    /// layer, not guessed here.
+    /// The tier in effect: Auto resolves to the adapter's class, and the
+    /// renderer gates its sun shadow pass and bloom on this, not on the
+    /// setting's `Auto` (or on the adapter alone when the player pinned Low).
+    pub fn effective_visual_quality(&self) -> VisualQuality {
+        match self.visual_quality {
+            VisualQuality::Auto => auto_visual_quality(),
+            tier => tier,
+        }
+    }
+    /// The Miniature Shader profile's parameters, owned by [`crate::visual`].
+    pub fn visual_params(&self) -> crate::visual::Params {
+        crate::visual::Params::for_quality(self.effective_visual_quality(), self.visuals)
+    }
+    /// The post profile uniform: x enabled, grade and glow in the rest.
     pub fn visual_uniform(&self) -> [f32; 8] {
-        let (contrast, saturation, warmth, bloom, threshold, radius, vignette) = match self
-            .visual_quality
-        {
-            VisualQuality::Auto | VisualQuality::High => (1.06, 1.14, 1.0, 0.45, 0.72, 5.0, 0.14),
-            VisualQuality::Medium => (1.03, 1.09, 0.8, 0.28, 0.82, 3.0, 0.10),
-            VisualQuality::Low => (1.01, 1.05, 0.5, 0.12, 0.92, 2.0, 0.06),
-        };
-        [
-            if self.visuals { 1.0 } else { 0.0 },
-            contrast,
-            saturation,
-            warmth,
-            bloom,
-            threshold,
-            radius,
-            vignette,
-        ]
+        self.visual_params().uniform()
+    }
+    /// What the post pass adds: exposure and the light-shaft enable.
+    pub fn post_uniform(&self) -> [f32; 4] {
+        self.visual_params().post_uniform()
     }
     /// Worker threads for chunk generation and meshing.
     pub fn worker_threads(&self) -> usize {
@@ -779,14 +891,40 @@ mod tests {
     }
 
     #[test]
-    fn vibrant_lux_is_on_by_default() {
+    fn visual_vibrance_is_on_by_default() {
         let g = Graphics::default();
         assert!(g.visuals);
         assert_eq!(g.visual_quality, VisualQuality::Auto);
         assert_eq!(g.visual_uniform()[0], 1.0);
-        let mut off = Graphics::default();
-        off.visuals = false;
+        assert!(g.post_uniform()[0] > 0.0);
+        let off = Graphics {
+            visuals: false,
+            ..Graphics::default()
+        };
         assert_eq!(off.visual_uniform()[0], 0.0);
+    }
+
+    #[test]
+    fn the_low_tier_keeps_the_grade_and_drops_the_bloom() {
+        let tier = |quality| {
+            Graphics {
+                visual_quality: quality,
+                ..Graphics::default()
+            }
+            .visual_uniform()
+        };
+        let (high, medium, low) = (
+            tier(VisualQuality::High),
+            tier(VisualQuality::Medium),
+            tier(VisualQuality::Low),
+        );
+        assert_eq!(low[4], 0.0, "the pack draws no bloom taps");
+        assert_eq!(high, medium);
+        assert_eq!(medium, low);
+        // The pack's look is in the terrain/sky passes, not a post grade.
+        assert_eq!(low[1], 1.0);
+        assert_eq!(low[2], 1.0);
+        assert_eq!(low[0], 1.0);
     }
 
     #[test]
@@ -796,6 +934,7 @@ mod tests {
             visuals: false,
             visual_quality: VisualQuality::Low,
             lod_distance: 256,
+            lod_infinite: false,
             far_detail: FarDetail::Reduced,
             cave_culling: false,
             entity_culling: true,
@@ -882,12 +1021,15 @@ mod tests {
         );
         let m4 = adapter("Apple M4 Pro", wgpu::DeviceType::IntegratedGpu);
         let discrete = adapter("NVIDIA GeForce RTX 4070", wgpu::DeviceType::DiscreteGpu);
+        let software = adapter("llvmpipe (LLVM)", wgpu::DeviceType::Cpu);
         for (distance, capped) in [(0, 0), (64, 64), (128, 128), (256, 128), (1024, 128)] {
             let g = Graphics {
                 lod_distance: distance,
+                lod_infinite: false,
                 ..Graphics::default()
             };
             assert_eq!(g.lod_distance_on(&hd620), capped);
+            assert_eq!(g.lod_distance_on(&software), capped);
             assert_eq!(g.lod_distance_on(&m4), distance);
             assert_eq!(g.lod_distance_on(&discrete), distance);
         }
@@ -895,9 +1037,84 @@ mod tests {
             crate::graphics_ui::rows(crate::graphics_ui::Level::Simple)
                 .iter()
                 .any(|row| matches!(row, crate::graphics_ui::Row::Setting(s)
-                    if s.text.contains(&format!("{INTEGRATED_LOD_DISTANCE} chunks")))),
-            "the LOD Distance description names the cap"
+                    if s.text.contains("fading into the sky"))),
+            "the Infinite Terrain description names the horizon"
         );
+    }
+
+    #[test]
+    fn infinite_terrain_is_on_by_default_and_has_no_distance_cap() {
+        let hd620 = wgpu::AdapterInfo {
+            name: "Intel(R) HD Graphics 620 (KBL GT2)".into(),
+            vendor: 0,
+            device: 0,
+            device_type: wgpu::DeviceType::IntegratedGpu,
+            device_pci_bus_id: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+            backend: wgpu::Backend::Vulkan,
+            subgroup_min_size: 0,
+            subgroup_max_size: 0,
+            transient_saves_memory: None,
+            limit_bucket: None,
+        };
+        let g = Graphics::default();
+        assert!(g.lod_infinite);
+        assert_eq!(g.lod_distance, 0, "the slider stays off behind infinite");
+        assert_eq!(g.lod_distance_on(&hd620), crate::lod::INFINITE_CHUNKS);
+        // Explicit Off persists, and the finite slider returns.
+        let off = Graphics::parse("lodInfinite:false\nlodDistance:256\n");
+        assert!(!off.lod_infinite);
+        assert_eq!(off.lod_distance_on(&hd620), INTEGRATED_LOD_DISTANCE);
+        assert_eq!(Graphics::parse(&off.serialize()), off);
+        let on = Graphics::parse("lodInfinite:true\n");
+        assert!(on.lod_infinite);
+    }
+
+    #[test]
+    fn automatic_visual_quality_follows_the_adapter() {
+        let adapter = |name: &str, device_type| wgpu::AdapterInfo {
+            name: name.into(),
+            vendor: 0,
+            device: 0,
+            device_type,
+            device_pci_bus_id: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+            backend: wgpu::Backend::Vulkan,
+            subgroup_min_size: 0,
+            subgroup_max_size: 0,
+            transient_saves_memory: None,
+            limit_bucket: None,
+        };
+        assert_eq!(
+            auto_quality_for(&adapter("NVIDIA RTX", wgpu::DeviceType::DiscreteGpu)),
+            VisualQuality::High
+        );
+        assert_eq!(
+            auto_quality_for(&adapter("Apple M4", wgpu::DeviceType::IntegratedGpu)),
+            VisualQuality::High
+        );
+        assert_eq!(
+            auto_quality_for(&adapter("llvmpipe", wgpu::DeviceType::Cpu)),
+            VisualQuality::Low
+        );
+        // Auto resolves to the adapter's tier; a pinned tier ignores it.
+        set_auto_visual_quality(VisualQuality::Low);
+        let mut g = Graphics::default();
+        assert_eq!(g.visual_uniform(), {
+            g.visual_quality = VisualQuality::Low;
+            g.visual_uniform()
+        });
+        g.visual_quality = VisualQuality::High;
+        assert_ne!(
+            crate::visual::Params::for_quality(g.effective_visual_quality(), g.visuals).shadow,
+            {
+                g.visual_quality = VisualQuality::Low;
+                crate::visual::Params::for_quality(g.effective_visual_quality(), g.visuals).shadow
+            }
+        );
+        set_auto_visual_quality(VisualQuality::High);
     }
 
     #[test]

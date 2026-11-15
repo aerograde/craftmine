@@ -108,7 +108,9 @@ impl Game<'_> {
 /// The registries and tags a server sends without data packs over them, read
 /// on a helper thread while a server's world prepares: most worlds have no
 /// packs, so it is what `sync_data` would load once the world is open.
-pub(super) struct SyncPreload(std::thread::JoinHandle<std::result::Result<SyncData, String>>);
+pub(super) struct SyncPreload(
+    horizon_os::thread::JoinHandle<std::result::Result<SyncData, String>>,
+);
 
 /// Start reading the server's data beside the world's preparation; `None`
 /// when it is read already, or being read (`preload_world_data`).
@@ -117,7 +119,7 @@ pub(super) fn preload_sync_data(root: &std::path::Path) -> Option<SyncPreload> {
         return None;
     }
     let root = root.to_owned();
-    std::thread::Builder::new()
+    horizon_os::thread::Builder::new()
         .name("Server data preload".into())
         .spawn(move || SyncData::load(&root, &horizon_world::loot::PackOverlay::NONE))
         .map(SyncPreload)

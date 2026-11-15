@@ -24,7 +24,7 @@ pub fn preference(dir: &Path, key: &str) -> Option<String> {
     })
 }
 /// Set (or with None remove) one preference, keeping the others.
-pub(crate) fn set_preference(dir: &Path, key: &str, value: Option<&str>) {
+pub fn set_preference(dir: &Path, key: &str, value: Option<&str>) {
     let text = horizon_os::fs::read_to_string(dir.join("horizon.txt")).unwrap_or_default();
     let mut lines: Vec<String> = text
         .lines()

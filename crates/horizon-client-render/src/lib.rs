@@ -97,6 +97,7 @@ pub mod title_edition;
 pub mod trims;
 pub mod ui;
 pub mod vault;
+pub mod visual;
 pub mod weather;
 pub mod widgets;
 pub mod world;

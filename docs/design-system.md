@@ -313,11 +313,23 @@ detail to 1024 px.
   square with 22 % corners).
 - Exports and where they go: `docs/media/brand/README.md`.
 
-## Visual vibrancy
+## Miniature Shader
 
-**Vibrant Lux** is Horizon's one built-in visual profile: a clean-room combination of the
-vibrant/deferred look and the Luxium low-cost approach. It is **on by default** (an owner-approved
-exception to the usual off-by-default rule for Horizon-only looks), with a master switch in Video
-Settings and Auto/High/Medium/Low quality. Auto starts high where the GPU allows and falls to the
-Luxium-style cheap path; explicit Off restores the vanilla look and is covered by parity tests.
-Shader packs keep ownership of passes they replace.
+**Miniature Shader** is the bundled visual look. The checkout ships
+[Minecraft Miniature Shader](https://github.com/mateuskreuch/minecraft-miniature-shader) by Mateus
+A. Kreuch (MIT) in `shaderpacks/Miniature` — the pack's own sources, unmodified, with its licence
+beside them and an entry in `THIRD_PARTY_NOTICES.md`. Horizon's Iris translator runs it, so the
+look is the pack's by construction, not a reimplementation of it. Nothing in Horizon selects a
+preset: with no `shaderpacks/Miniature.txt` the pack's own `#define` defaults apply, which is the
+look its author tuned (1024² near shadow over 128 blocks, reflections, the pack's fog and sky). A
+player who picks a profile in Shader Options writes that file and it overrides the defaults. The
+pack is **on by default** (an owner-approved exception to the usual off-by-default rule for
+Horizon-only looks) and Off restores the vanilla look.
+
+The Rust-owned profile in `crates/horizon-client-render/src/visual/` is the fallback for a checkout
+or install without the pack folder. It implements the same formulas in `terrain.wgsl`: the
+lightmap ambient lift, directional sun/moon diffuse, warm three-colour torch ramp, blue shadow tint,
+the time-of-day fog multiplier and sky-coloured height gradient, the snow step, and the glint water
+albedo. It has no post grade, bloom or vignette, so the built-in post stays neutral. Distant
+terrain samples its block sprite at the mip its own footprint asks for, so a far cell becomes its
+average colour continuously instead of switching look at a tile level.

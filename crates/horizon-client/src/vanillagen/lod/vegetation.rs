@@ -301,6 +301,11 @@ impl Vegetation {
         }
     }
     pub(super) fn apply(&self, column: &mut Column, x: i32, z: i32, width: i32, light: u16) {
+        // Crowns are sampled at four-block cells. A wider cell would turn one
+        // tree into a leaf slab, and changing the cell width would move it.
+        if width > 4 {
+            return;
+        }
         let Some(surface) = column.surface else {
             return;
         };
@@ -324,6 +329,9 @@ impl Vegetation {
                 | "minecraft:mycelium"
                 | "minecraft:rooted_dirt"
                 | "minecraft:moss_block"
+                // Our snow-capped seed surface: snowy biomes keep their spruces.
+                | "minecraft:snow"
+                | "minecraft:snow_block"
         ) {
             return;
         }
@@ -341,59 +349,57 @@ impl Vegetation {
             }
             &trees[trees.len() - 1]
         };
+        // Tree origins live in fixed four-block cells, so the same tree is
+        // found at every LOD level and at every camera position.
+        let radius = trees.iter().map(|t| t.radius).max().unwrap_or(2);
         let mut best = None;
-        if width >= 16 {
-            let n = hash(self.seed, x.div_euclid(4), z.div_euclid(4));
-            let tree = choose(n);
-            let coverage = 1.
-                - (-total * f64::from(tree.radius * tree.radius) * std::f64::consts::PI / 256.)
-                    .exp();
-            if coverage >= 0.25 {
-                let height = tree.height + ((n >> 32) & 1) as i32;
-                best = Some((
-                    surface.height + height.max(4),
-                    surface.height + height.max(4) - tree.radius * 2,
-                    *tree,
-                    false,
-                ));
-            }
-        } else {
-            let radius = trees.iter().map(|t| t.radius).max().unwrap_or(2);
-            for cz in (z - radius).div_euclid(4)..=(z + radius).div_euclid(4) {
-                for cx in (x - radius).div_euclid(4)..=(x + radius).div_euclid(4) {
-                    let n = hash(self.seed, cx, cz);
-                    if (n as u32 as f64 / u32::MAX as f64) >= (total / 16.).min(1.) {
-                        continue;
+        // The trunk belongs to the one cell whose footprint holds the tree's
+        // origin; `x`/`z` are cell corners, so testing `x == tx` only ever
+        // fired for one-block cells and wide rings drew canopies with no trunk
+        // under them. Kept apart from `best`, since a taller neighbour's crown
+        // can win this cell while its trunk lives in another.
+        let mut trunk = None;
+        for cz in (z - radius).div_euclid(4)..=(z + radius).div_euclid(4) {
+            for cx in (x - radius).div_euclid(4)..=(x + radius).div_euclid(4) {
+                let n = hash(self.seed, cx, cz);
+                if (n as u32 as f64 / u32::MAX as f64) >= (total / 16.).min(1.) {
+                    continue;
+                }
+                let tree = *choose(n.rotate_left(21));
+                let tx = cx * 4 + ((n >> 32) & 3) as i32;
+                let tz = cz * 4 + ((n >> 34) & 3) as i32;
+                let height = tree.height + ((n >> 40) % (tree.variation.max(0) + 1) as u64) as i32;
+                // `x`/`z` are the cell's corner, so `x..x + width` is its footprint.
+                if (x..x + width).contains(&tx) && (z..z + width).contains(&tz) {
+                    let bottom = (surface.height + height - tree.radius).max(surface.height + 1);
+                    let log = (bottom as i16, tree.log);
+                    if trunk.is_none_or(|(max, _)| log.0 > max) {
+                        trunk = Some(log);
                     }
-                    let tree = *choose(n.rotate_left(21));
-                    let tx = cx * 4 + ((n >> 32) & 3) as i32;
-                    let tz = cz * 4 + ((n >> 34) & 3) as i32;
-                    let d2 = (x - tx).pow(2) + (z - tz).pow(2);
-                    if d2 > tree.radius.pow(2) {
-                        continue;
-                    }
-                    let height =
-                        tree.height + ((n >> 40) % (tree.variation.max(0) + 1) as u64) as i32;
-                    let cap = ((tree.radius.pow(2) - d2) as f32).sqrt().ceil() as i32;
-                    let top = surface.height + height + cap.min(2);
-                    let bottom = surface.height + height - tree.radius;
-                    if best.as_ref().is_none_or(|&(y, _, _, _)| top > y) {
-                        best = Some((top, bottom, tree, x == tx && z == tz));
-                    }
+                }
+                let d2 = (x - tx).pow(2) + (z - tz).pow(2);
+                if d2 > tree.radius.pow(2) {
+                    continue;
+                }
+                let cap = ((tree.radius.pow(2) - d2) as f32).sqrt().ceil() as i32;
+                let top = surface.height + height + cap.min(2);
+                let bottom = surface.height + height - tree.radius;
+                if best.as_ref().is_none_or(|&(y, _, _)| top > y) {
+                    best = Some((top, bottom, tree));
                 }
             }
         }
-        if let Some((top, bottom, tree, trunk)) = best {
+        if let Some((bottom, state)) = trunk {
+            column.push(Span {
+                min: surface.height as i16,
+                max: bottom,
+                state,
+                biome: surface.biome,
+                light,
+            });
+        }
+        if let Some((top, bottom, tree)) = best {
             let bottom = bottom.max(surface.height + 1);
-            if trunk {
-                column.push(Span {
-                    min: surface.height as i16,
-                    max: bottom as i16,
-                    state: tree.log,
-                    biome: surface.biome,
-                    light,
-                });
-            }
             column.push(Span {
                 min: bottom as i16,
                 max: top.max(bottom + 1) as i16,
@@ -401,11 +407,10 @@ impl Vegetation {
                 biome: surface.biome,
                 light,
             });
-            column.surface = Some(Surface {
-                height: top.max(bottom + 1),
-                state: tree.leaves,
-                ..surface
-            });
+            // Keep the ground as the surface. Recording the canopy here made
+            // the heightmap rings stretch the leaves down to bedrock: a leaf
+            // pillar where the real chunk shows grass, dirt and stone.
+            column.surface = Some(surface);
         }
     }
     /// A chorus plant as its place-and-grow feature leaves it: a 2..=5 block
@@ -442,11 +447,8 @@ impl Vegetation {
             biome: surface.biome,
             light,
         });
-        column.surface = Some(Surface {
-            height: top + 1,
-            state: chorus.flower,
-            ..surface
-        });
+        // The end stone stays the ground (see the tree branch above).
+        column.surface = Some(surface);
     }
     #[cfg(test)]
     pub(super) fn chorus_count(&self, biome: u16) -> Option<f64> {

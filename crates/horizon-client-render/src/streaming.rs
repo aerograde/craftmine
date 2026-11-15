@@ -144,6 +144,8 @@ pub trait LodSampler: Send {
     /// Reduced far detail (`graphics::FarDetail::Reduced`): `grid` may then
     /// approximate wide cells.
     fn set_approximate(&mut self, _approximate: bool) {}
+    /// Infinite terrain: far samples only, no full-detail chunks or decoration.
+    fn set_infinite(&mut self, _infinite: bool) {}
     fn sample(&mut self, x: i32, z: i32) -> Option<crate::lod::Surface>;
     fn column(&mut self, x: i32, z: i32) -> crate::lod::Column {
         crate::lod::Column::from_surface(self.sample(x, z))
@@ -804,10 +806,16 @@ impl Streaming {
                                             queue = shared.ready.wait(queue).unwrap();
                                             continue;
                                         }
-                                        let (woken, wait) =
-                                            shared.ready.wait_timeout(queue, IDLE_RELEASE).unwrap();
+                                        let (woken, timed_out) =
+                                            horizon_os::sync::wait_timeout_while(
+                                                &shared.queue,
+                                                &shared.ready,
+                                                queue,
+                                                IDLE_RELEASE,
+                                                |queue| queue.is_empty(),
+                                            );
                                         queue = woken;
-                                        if wait.timed_out() && queue.is_empty() {
+                                        if timed_out && queue.is_empty() {
                                             drop(queue);
                                             work(None);
                                             released = true;

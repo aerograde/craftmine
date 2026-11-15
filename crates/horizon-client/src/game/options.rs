@@ -130,7 +130,7 @@ impl Game<'_> {
             self.pack_folder = None;
             return;
         }
-        let now = std::time::Instant::now();
+        let now = horizon_os::time::Instant::now();
         if self
             .pack_folder
             .as_ref()
@@ -138,8 +138,8 @@ impl Game<'_> {
         {
             return;
         }
-        let signature: Vec<(String, u64, Option<std::time::SystemTime>)> =
-            std::fs::read_dir(super::packs::packs_dir())
+        let signature: Vec<(String, u64, Option<horizon_os::time::SystemTime>)> =
+            horizon_os::fs::read_dir(super::packs::packs_dir())
                 .into_iter()
                 .flatten()
                 .flatten()

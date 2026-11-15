@@ -107,13 +107,17 @@ impl Game<'_> {
         } else {
             self.res.fog()
         };
+        let infinite_lod = self.lod.is_some() && self.settings.horizon.lod_infinite;
         let input = FogInputs {
             fog_type,
             sky,
             water_fog_color,
             biome,
             render_distance_chunks: self.terrain_distance(),
-            distant_terrain: self.lod.is_some(),
+            // Infinite terrain is real geometry to its last ring: distance fog
+            // is never its horizon. Only the finite slider extends the
+            // vanilla-range atmosphere.
+            distant_terrain: self.lod.is_some() && !infinite_lod,
             cloud_range_chunks: self.settings.cloud_range,
             camera_y: camera.y,
             min_y: self.level_min_y(),
@@ -166,7 +170,7 @@ impl Game<'_> {
         }
     }
     /// `Level.getMinY`: the current dimension type's minimum y.
-    fn level_min_y(&self) -> i32 {
+    pub(super) fn level_min_y(&self) -> i32 {
         match self.remote.as_ref() {
             Some(r) => r.dimension.min_y,
             None => self.world.shape.min_y,

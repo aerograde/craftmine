@@ -260,6 +260,16 @@ struct Globals {
     sunrise_fan: [[f32; 4]; 2 * sunrise_fan::TRIANGLES],
     /// x: `Options.textureFiltering` (0 none, 1 RGSS, 2 anisotropic); y: the sprite arrays' width.
     filtering: [f32; 4],
+    /// Miniature Shader's daylight pass: x on, y direct sun, z specular, w sun-tinted fog.
+    /// Zero when the profile is off or a shader pack owns the post stage.
+    visual: [f32; 4],
+    /// Miniature Shader's near sun shadow map: camera-relative light clip space.
+    shadow_view_proj: [[f32; 4]; 4],
+    /// x: the map is live, y: texel size, z: sampling bias, w: filter taps.
+    shadow_params: [f32; 4],
+    /// The camera's world position, xyz: patterns anchored to the world (the
+    /// cloud shadows) rather than to the screen.
+    camera: [f32; 4],
 }
 pub type SectionKey = (i32, i32, i32);
 /// The water mirror's targets: the world as a camera mirrored about the water plane sees
@@ -350,9 +360,14 @@ pub struct Frame<'a> {
     /// Opt-in reuse of the shader pack's last shadow map when the key still matches
     /// (`horizon-graphics.txt` `shadowCache`; off by default).
     pub shadow_cache: bool,
-    /// Vibrant Lux profile: x enabled, y contrast, z saturation, w warmth,
+    /// Miniature Shader profile: x enabled, y contrast, z saturation, w warmth,
     /// and bloom/threshold/radius/vignette in the second half.
     pub visual: [f32; 8],
+    /// The profile's post knobs: x exposure (y/z/w spare).
+    pub visual_post: [f32; 4],
+    /// The player's effective visual tier (`Graphics::effective_visual_quality`):
+    /// Low drops the sun shadow pass and the glow chain.
+    pub visual_tier: crate::graphics::VisualQuality,
     /// Render distance in blocks (fog end).
     pub distance: f32,
     /// Full-detail terrain distance in blocks; distant LODs bypass the cave graph.
@@ -627,6 +642,19 @@ pub struct Renderer {
     entity_capacity: u64,
     entity_batch: EntityBatch,
     group: wgpu::BindGroup,
+    /// Miniature Shader's near sun shadow map, its settings, its terrain pipeline
+    /// and the group casters draw with (a blank map: the real one is the
+    /// render target and cannot also be bound in the pass).
+    visual_shadow: native_shadow::ShadowMap,
+    visual_shadow_settings: horizon_shaders::Shadow,
+    visual_shadow_pipeline: wgpu::RenderPipeline,
+    /// The same casters when the frame draws the flat index list.
+    visual_shadow_flat: Option<wgpu::RenderPipeline>,
+    visual_shadow_cast_group: wgpu::BindGroup,
+    /// Terrain sections the last frame cast into the sun shadow map (0 when off).
+    visual_shadow_draws: u32,
+    /// `HORIZON_VISUAL_DEBUG=shadowblack|shadowfactor`: QA views of the sun shadow.
+    visual_debug: f32,
     globals: wgpu::Buffer,
     /// The resource packs' LabPBR maps (normals, specular), for native shader packs.
     pbr_maps: Option<[wgpu::Texture; 2]>,
@@ -758,6 +786,9 @@ pub struct Renderer {
     pack_atlas: Option<pack_atlas::PackAtlas>,
     /// The pack's terrain program reads flat draws' vertices (`pack_terrain_inputs`).
     pack_terrain_flat: bool,
+    /// The pack's gbuffer has the cheap far-LOD path (`encodeNormal`/`outData1`); its distant
+    /// LOD tiles then skip PBR instead of running it over the whole horizon.
+    pack_far_lod: bool,
     pub hud: HudRenderer,
     /// Vanilla's menu background blur, made on first use.
     menu_blur: Option<crate::menu_blur::MenuBlur>,
@@ -909,6 +940,8 @@ fn terrain_group(
     lightmap: &wgpu::TextureView,
     lightmap_sampler: &wgpu::Sampler,
     emission_thresholds: &wgpu::TextureView,
+    shadow_view: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let view = |binding, view| wgpu::BindGroupEntry {
         binding,
@@ -940,6 +973,11 @@ fn terrain_group(
             view(10, &sprites[6]),
             view(11, &sprites[7]),
             view(12, emission_thresholds),
+            view(13, shadow_view),
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: wgpu::BindingResource::Sampler(shadow_sampler),
+            },
         ],
     })
 }
@@ -1458,6 +1496,9 @@ async fn open_backend(
         Ok((device, queue)) => {
             let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let lost = device_lost.clone();
+            device.on_uncaptured_error(std::sync::Arc::new(|error| {
+                log::error!("Horizon renderer: an uncaptured wgpu error: {error:?}");
+            }));
             device.set_device_lost_callback(move |reason, message| {
                 // A device destroyed on purpose was not lost.
                 if reason == wgpu::DeviceLostReason::Destroyed {
@@ -1611,7 +1652,23 @@ impl Renderer {
             log::info!("Horizon: {split} block textures per array (the GPU's limit)");
         }
         let info = adapter.get_info();
+        let shadow_quality = std::env::var("HORIZON_VISUAL_TIER")
+            .ok()
+            .map(|value| crate::graphics::VisualQuality::parse(&value))
+            .filter(|tier| *tier != crate::graphics::VisualQuality::Auto)
+            .unwrap_or_else(|| crate::graphics::auto_quality_for(&info));
+        crate::graphics::set_auto_visual_quality(shadow_quality);
         crate::graphics::suggest_reduced_far_detail(crate::graphics::lod_capped(&info));
+        // The map is allocated for the adapter class; its reach and filter
+        // follow the player's quality tier per frame (below). High covers the
+        // first few hundred blocks, where the resident chunks end and the far
+        // terrain used to be visibly unshadowed.
+        let shadow_plan = crate::visual::Tier::from_quality(shadow_quality).shadow();
+        let (shadow_resolution, shadow_distance) = if shadow_plan.resolution == 0 {
+            (1024, 128.0)
+        } else {
+            (shadow_plan.resolution, shadow_plan.distance)
+        };
         let size = window.inner_size();
         let max_side = device.limits().max_texture_dimension_2d;
         let (config, present_modes, hdr_output) = if let Some(surface) = &surface {
@@ -1757,6 +1814,20 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
+                entry(
+                    13,
+                    vf,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                entry(
+                    14,
+                    vf,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                ),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1896,6 +1967,44 @@ impl Renderer {
             true,
             Some(alpha_blend),
         );
+        // Miniature Shader's near sun shadow: the same section draws through the
+        // light's orthographic camera, cut out by the sprite's alpha.
+        let visual_shadow_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Miniature Shader terrain shadow"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &terrain_buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: tri,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_shadow"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
         let sky = pipeline(
             "Sky",
             "vs_sky",
@@ -2124,6 +2233,35 @@ impl Renderer {
         });
         let emission_stats =
             hdr_stats::EmissionStats::new(&device, split, sprite_textures.len() as u32);
+        // Miniature Shader's near sun shadow map. The same draw lists the packs'
+        // shadow stage uses; the adapter class picks the reach and resolution.
+        let shadow_manifest = horizon_shader_api::manifest::Shadow {
+            resolution: shadow_resolution.min(device.limits().max_texture_dimension_2d),
+            distance: shadow_distance,
+            solid_materials: Vec::new(),
+        };
+        let visual_shadow = native_shadow::ShadowMap::new(&device, Some(&shadow_manifest));
+        let visual_shadow_settings = native_shadow::camera(&shadow_manifest);
+        let blank_shadow = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Miniature Shader blank shadow"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let blank_shadow_view = blank_shadow.create_view(&Default::default());
+        let blank_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Miniature Shader blank shadow comparison"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
         let group = terrain_group(
             &device,
             "Horizon terrain resources",
@@ -2134,6 +2272,21 @@ impl Renderer {
             &lightmap_view,
             &lightmap_sampler,
             &emission_stats.view,
+            &visual_shadow.view,
+            &visual_shadow.sampler,
+        );
+        let visual_shadow_cast_group = terrain_group(
+            &device,
+            "Miniature Shader shadow casters",
+            &bindings,
+            &globals,
+            &sprite_views,
+            &sprite_sampler,
+            &lightmap_view,
+            &lightmap_sampler,
+            &emission_stats.view,
+            &blank_shadow_view,
+            &blank_shadow_sampler,
         );
         let crosshair_group = terrain_group(
             &device,
@@ -2145,6 +2298,8 @@ impl Renderer {
             &lightmap_view,
             &lightmap_sampler,
             &emission_stats.view,
+            &visual_shadow.view,
+            &visual_shadow.sampler,
         );
         let mirror_group = terrain_group(
             &device,
@@ -2156,6 +2311,8 @@ impl Renderer {
             &lightmap_view,
             &lightmap_sampler,
             &emission_stats.view,
+            &visual_shadow.view,
+            &visual_shadow.sampler,
         );
         let index_quads = 1 << 16;
         let indices = Self::quad_indices(&device, index_quads);
@@ -3128,6 +3285,53 @@ impl Renderer {
                 },
             )
         });
+        let visual_shadow_flat = flat.as_ref().map(|flat| {
+            let flat_buffers = [Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<TerrainVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &TERRAIN_ATTRIBUTES,
+            })];
+            let flat_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Miniature Shader flat shadow layout"),
+                bind_group_layouts: &[Some(&bindings), Some(&flat.draw_layout)],
+                ..Default::default()
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Miniature Shader flat terrain shadow"),
+                layout: Some(&flat_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_shadow_flat"),
+                    compilation_options: Default::default(),
+                    buffers: &flat_buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: tri,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_shadow"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        });
         let sorted_indices = arena::Arena::indices(&device, 1 << 16, flat.is_some());
         let multi_draw = device
             .features()
@@ -3281,6 +3485,17 @@ impl Renderer {
             entity_capacity,
             entity_batch: EntityBatch::default(),
             group,
+            visual_shadow,
+            visual_shadow_settings,
+            visual_shadow_pipeline,
+            visual_shadow_flat,
+            visual_shadow_cast_group,
+            visual_shadow_draws: 0,
+            visual_debug: match std::env::var("HORIZON_VISUAL_DEBUG").as_deref() {
+                Ok("shadowblack") => 2.0,
+                Ok("shadowfactor") => 3.0,
+                _ => 0.0,
+            },
             globals,
             pbr_maps,
             lightmap,
@@ -3357,6 +3572,7 @@ impl Renderer {
             pack_weather: None,
             pack_atlas: None,
             pack_terrain_flat: false,
+            pack_far_lod: false,
             hud,
             menu_blur: None,
             post_effects: None,
@@ -3530,6 +3746,12 @@ impl Renderer {
         let max = self.device.limits().max_texture_dimension_2d;
         self.suspended = !drawable_size(width, height, max);
         if self.suspended {
+            return;
+        }
+        // A repeated size (the platform sends several events per drag step)
+        // must not reconfigure the swapchain again: that races the acquire
+        // and is what made a live resize stutter.
+        if [width, height] == [self.config.width, self.config.height] {
             return;
         }
         self.config.width = width;
@@ -3932,11 +4154,49 @@ impl Renderer {
     fn complete_column(&self) -> SectionMask {
         SectionMask::below(self.layout.sections())
     }
-    pub fn lod_detail_columns(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+    /// The columns far terrain may leave out: every section of them has its
+    /// mesh *and* is fully drawn. A section still fading in (its chunk fade,
+    /// or its fade over far terrain) is dithered: clipping the tile under it
+    /// then shows the sky through the holes, which read as missing chunks or
+    /// x-ray. `chunk_fade`: `Options.chunkSectionFadeInTime`.
+    pub fn lod_detail_columns(&self, chunk_fade: f32) -> impl Iterator<Item = (i32, i32)> + '_ {
         let complete = self.complete_column();
+        let now = horizon_os::time::Instant::now();
+        let fade_ms = fade_millis(chunk_fade);
+        let lod_fade_ms = lod::FADE.as_millis() as u64;
         self.detail_columns
             .iter()
-            .filter_map(move |(&column, &mask)| (mask == complete).then_some(column))
+            .filter_map(move |(&column, &mask)| {
+                (mask == complete && self.column_opaque(column, now, fade_ms, lod_fade_ms))
+                    .then_some(column)
+            })
+    }
+    /// Whether every nonzero section of `column` has finished its fade-in, so
+    /// no pixel of it is still dithered out.
+    fn column_opaque(
+        &self,
+        (x, z): (i32, i32),
+        now: horizon_os::time::Instant,
+        fade_ms: u64,
+        lod_fade_ms: u64,
+    ) -> bool {
+        let elapsed = |since: horizon_os::time::Instant| {
+            now.saturating_duration_since(since).as_millis() as u64
+        };
+        (0..self.layout.sections() as i32).all(|sy| {
+            let key = (x, sy, z);
+            let Some(section) = self.sections.find(key) else {
+                // An empty section draws nothing to fade in.
+                return true;
+            };
+            match section.fading {
+                Some(since) => elapsed(since) >= lod_fade_ms,
+                None => self
+                    .section_uploaded
+                    .get(&key)
+                    .is_none_or(|since| elapsed(*since) >= fade_ms),
+            }
+        })
     }
     /// Changes whenever `lod_detail_columns` does.
     pub fn lod_detail_revision(&self) -> u64 {
@@ -4244,7 +4504,9 @@ impl Renderer {
         dimension: i32,
         pack: Option<horizon_shaders::Post>,
         block_ids: &[i32],
+        far_lod: bool,
     ) -> Option<(Vec<String>, Vec<String>)> {
+        self.pack_far_lod = far_lod;
         if pack.is_none() {
             self.pack_atlas = None;
         }
@@ -4404,7 +4666,7 @@ impl Renderer {
         Some(
             self.pack_atlas
                 .as_ref()?
-                .terrain_inputs(self.pack_terrain_flat),
+                .terrain_inputs(self.pack_terrain_flat, self.pack_far_lod),
         )
     }
     /// Times the shader pack's passes on the GPU while `on` (the F3 overlay is open), or always
@@ -4477,6 +4739,10 @@ impl Renderer {
             .create_sampler(&sprite_sampler_descriptor(anisotropy));
         self.rebuild_terrain_group();
     }
+    /// Solid terrain sections drawn into Miniature Shader's sun shadow map last frame.
+    pub fn visual_shadow_draws(&self) -> u32 {
+        self.visual_shadow_draws
+    }
     fn rebuild_terrain_group(&mut self) {
         let views = sprite_views(
             &self.sprite_textures,
@@ -4493,6 +4759,8 @@ impl Renderer {
             &self.lightmap_view,
             &self.lightmap_sampler,
             &self.emission_stats.view,
+            &self.visual_shadow.view,
+            &self.visual_shadow.sampler,
         );
     }
     /// The Mipmap Levels option: block textures sample at most `levels`
@@ -4826,6 +5094,77 @@ impl Renderer {
         let builtin_visuals = frame.visual[0] > 0.0
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
             && self.native.as_ref().is_none_or(|n| n.post.is_none());
+        // A pack's own shadow stage takes the draw list when it has one; the
+        // built-in near cascade only runs otherwise.
+        let other_shadow_view = self
+            .pack_post
+            .as_ref()
+            .and_then(|p| p.1.as_ref())
+            .filter(|_| !frame.title)
+            .and_then(|p| p.shadow_view(frame))
+            .or_else(|| {
+                let native = self.native.as_ref().filter(|_| !frame.title)?;
+                native.shadow.as_ref()?;
+                native.frame.shadow_view(frame)
+            });
+        // The sun shadow map is a second terrain pass: worth it on a discrete
+        // or Apple GPU, not on the integrated path the Low tier exists for.
+        let visual_tier = if builtin_visuals {
+            frame.visual_tier
+        } else {
+            crate::graphics::VisualQuality::Low
+        };
+        // The player's tier, not only the adapter's, decides the reach and the
+        // filter: pinning High on an integrated GPU used to keep the near,
+        // single-tap map, and pinning Medium on a discrete one kept High's.
+        let mut shadow_settings = self.visual_shadow_settings.clone();
+        let shadow_plan = crate::visual::Tier::from_quality(visual_tier).shadow();
+        let visual_taps = shadow_plan.taps;
+        shadow_settings.distance = if shadow_plan.resolution == 0 {
+            128.0
+        } else {
+            shadow_plan.distance
+        };
+        shadow_settings.far = pack_uniforms::SHADOW_EYE + 2.0 * shadow_settings.distance + 384.0;
+        let visual_passes = crate::visual::passes(
+            crate::visual::Tier::from_quality(frame.visual_tier),
+            builtin_visuals,
+            false,
+        );
+        let visual_shadow = (visual_passes.shadow && !frame.title && other_shadow_view.is_none())
+            .then(|| {
+                pack_post::ShadowView {
+                    cull: pack_uniforms::shadow_culling(frame, &shadow_settings),
+                    light: pack_uniforms::shadow_light(frame, &shadow_settings),
+                    distance: Some(shadow_settings.distance),
+                    // The distance above already bounds the list; take it whole
+                    // rather than trust the grazing-angle orthographic frustum.
+                    // The map projection still culls what falls outside its box.
+                    unculled: Some(shadow_settings.distance),
+                }
+            });
+        let visual_shadow_on = visual_shadow.is_some();
+        let visual_shadow_matrix = visual_shadow.as_ref().map_or(Mat4::ZERO, |v| v.cull);
+        // The grade's mood: clean vivid daylight, easing into a warm golden
+        // hour as the sun drops. `sunrise_color.a` peaks with the
+        // sunrise fan; `sky_light_factor` is the day's light.
+        let day = frame.sky.sky_light_factor.clamp(0.0, 1.0);
+        let dusk = frame.sky.sunrise_color[3].clamp(0.0, 1.0);
+        // The light the shadow map uses: the sun by day, the moon by night, turned by the
+        // pack's `sunPathRotation`. Shading and shadows must agree on its direction.
+        let sun = pack_uniforms::shadow_light(frame, &shadow_settings);
+        // The sun's screen position, for the golden-hour light shafts. The
+        // view projection is camera-relative, so the direction is projected
+        // as a far point without the world position.
+        let sun_uv = {
+            let clip = view_proj * (sun * 1000.0).extend(1.0);
+            if clip.w <= 1e-4 {
+                [-10.0, -10.0]
+            } else {
+                let ndc = clip.truncate() / clip.w;
+                [ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5]
+            }
+        };
         self.world_post.set_visual(
             &self.queue,
             if builtin_visuals {
@@ -4833,6 +5172,8 @@ impl Renderer {
             } else {
                 [0.0; 8]
             },
+            [day, dusk, sun_uv[0], sun_uv[1]],
+            frame.visual_post,
         );
         // TAA runs where the world post pass does, not under a shader pack's own.
         let taa = !frame.title
@@ -4854,9 +5195,6 @@ impl Renderer {
             );
         }
         let view = views.primary().view;
-        let sun_angle = frame.sky.sun_angle.to_radians();
-        // Celestial bodies rotate around the X axis; angle 0 = noon.
-        let sun = Vec3::new(0.0, sun_angle.cos(), -sun_angle.sin());
         let (fog_color, fog) = if let Some(f) = frame.fog {
             (
                 f.color,
@@ -4967,6 +5305,39 @@ impl Renderer {
                 0.0,
                 0.0,
             ],
+            visual: if builtin_visuals {
+                // The direct sun, its specular (stronger on water) and the
+                // atmosphere warmth. Cheap enough to keep in every tier.
+                [
+                    1.0,
+                    1.0,
+                    0.65,
+                    if self.visual_debug > 0.0 {
+                        self.visual_debug
+                    } else {
+                        0.9
+                    },
+                ]
+            } else {
+                [0.0; 4]
+            },
+            shadow_view_proj: visual_shadow_matrix.to_cols_array_2d(),
+            shadow_params: if visual_shadow_on {
+                [
+                    1.0,
+                    1.0 / self.visual_shadow_settings.resolution as f32,
+                    0.0008,
+                    visual_taps,
+                ]
+            } else {
+                [0.0; 4]
+            },
+            camera: [
+                frame.camera.x as f32,
+                frame.camera.y as f32,
+                frame.camera.z as f32,
+                0.0,
+            ],
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));
@@ -5062,27 +5433,41 @@ impl Renderer {
         if frame.title {
             visible.clear();
         } else {
-            visible_lods.extend(
-                self.lods
-                    .iter()
-                    .filter_map(|(&key, tile)| tile.visible(key, camera, &view, now)),
-            );
+            visible_lods.extend(self.lods.iter().filter_map(|(&key, tile)| {
+                // The tile's whole footprint is drawn by resident columns now
+                // (`lod_cutout`), even if its mesh still holds them: drawing
+                // it over them was the far terrain's coarse blocks showing on
+                // top of the real ones up close until the tile remeshed.
+                if lod::cut_out(key, &self.lod_cutout) {
+                    return None;
+                }
+                tile.visible(key, camera, &view, now)
+            }));
             visible_lods.sort_unstable_by_key(|v| (v.distance, v.key));
         }
         // A shader pack's shadow pass draws the sections in its camera's box, all of them (the
         // occlusion graph follows the eye, not the light), within shadowDistanceRenderMul.
-        let shadow_view = self
-            .pack_post
-            .as_ref()
-            .and_then(|p| p.1.as_ref())
-            .filter(|_| !frame.title)
-            .and_then(|p| p.shadow_view(frame))
-            .or_else(|| {
-                // One of Horizon's own packs with `[shadow]` uses the same lists.
-                let native = self.native.as_ref().filter(|_| !frame.title)?;
-                native.shadow.as_ref()?;
-                native.frame.shadow_view(frame)
-            });
+        let builtin_shadow = visual_shadow.is_some();
+        let shadow_view = other_shadow_view.or(visual_shadow);
+        // Distant tiles near enough to fall in the map cast too: the first LOD
+        // ring is where the resident chunks end, so leaving them out made the
+        // seam a line between shadowed and fully lit terrain. Only the built-in
+        // pass understands the tiled vertices; a pack's shadow shader is its own.
+        let shadow_lods: Vec<usize> = match &shadow_view {
+            Some(view) if builtin_shadow && view.unculled.is_some() => {
+                let reach = view.distance.unwrap_or(160.0);
+                visible_lods
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| {
+                        let half = v.key.size() as f32;
+                        v.origin[0].abs() <= reach + half && v.origin[2].abs() <= reach + half
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         let mut shadow_visible = std::mem::take(&mut self.shadow_visible);
         shadow_visible.clear();
         if let Some(v) = &shadow_view {
@@ -5161,7 +5546,7 @@ impl Renderer {
             self.animate(&mut encoder, frame.ticks, !frame.title);
         }
         self.drawn_sections = visible.len() + visible_lods.len();
-        let instances = self.drawn_sections + shadow_visible.len();
+        let instances = self.drawn_sections + shadow_visible.len() + shadow_lods.len();
         if instances as u64 > self.instance_capacity {
             self.instance_capacity = (instances as u64).next_power_of_two();
             self.instances = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -5201,6 +5586,11 @@ impl Renderer {
                     shadow_visible
                         .iter()
                         .map(|v| section_instance(v.origin, 0, visibility(v.key))),
+                )
+                .chain(
+                    shadow_lods
+                        .iter()
+                        .map(|&index| lod::instance(visible_lods[index].origin, 0)),
                 ),
         );
         if !self.origins.is_empty() {
@@ -5491,6 +5881,24 @@ impl Renderer {
                         (s.page, Some(index_page)),
                     ));
                 }
+            }
+            // The distant tiles that fall in the map, after the sections (their
+            // instances follow the sections' in `self.origins`).
+            for (k, &index) in shadow_lods.iter().enumerate() {
+                let v = &visible_lods[index];
+                let s = self.lods[&v.key].drawn();
+                let before = self.draws.len();
+                let instance = (base + shadow_visible.len() + k) as u32;
+                let h = glam::Vec3::from(v.origin).dot(view.light);
+                let depth = f64::from((top - h).max(0.0));
+                let distance = (depth * depth).to_bits();
+                facing_runs_from(&s.sides, Some(toward), None, v.origin, |first, quads| {
+                    let start = s.start as u32 + first * 4;
+                    self.draws.push([quads * 6, 1, 0, start, instance]);
+                    self.draw_pages.push((s.page, None));
+                });
+                let len = self.draws.len() - before;
+                self.shadow_runs.push(distance, s.page, before, len, [0; 3]);
             }
         }
         let shadow_solid = self.draws.len() as u32 - shadow_first;
@@ -6112,6 +6520,40 @@ impl Renderer {
                 pass.draw_indexed(0..shadow_only_quads * 6, first as i32, 0..1);
             }
         }
+        // Miniature Shader's near sun shadow: the same solid sections the light sees,
+        // into our own map. The casters' group carries a blank map so the real
+        // one is only the render target here.
+        self.visual_shadow_draws = if visual_shadow_on {
+            if flat_frame {
+                self.flat
+                    .as_ref()
+                    .map_or(0, |f| (f.shadow_calls[1] - f.shadow_calls[0]) as u32)
+            } else {
+                shadow_solid
+            }
+        } else {
+            0
+        };
+        if visual_shadow_on {
+            let mut pass = self
+                .visual_shadow
+                .begin(&mut encoder, "Miniature Shader terrain shadow");
+            pass.set_bind_group(0, &self.visual_shadow_cast_group, &[]);
+            if flat_frame {
+                if let (Some(flat), Some(pipeline)) = (&self.flat, &self.visual_shadow_flat) {
+                    pass.set_pipeline(pipeline);
+                    let [first, second] = flat.shadow_calls;
+                    flat.draw(&mut pass, &flat.calls[first..second], |p| {
+                        self.arena.buffer(p)
+                    });
+                }
+            } else {
+                pass.set_pipeline(&self.visual_shadow_pipeline);
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(1, self.instances.slice(..));
+                self.draw_sections(&mut pass, &self.indirect, 0, shadow_first, shadow_solid);
+            }
+        }
         if native_sky_pass
             && let Some(native) = &mut self.native
             && let Some(sky) = &native.sky
@@ -6596,7 +7038,8 @@ impl Renderer {
                 _ if pack_draws_water => {}
                 // LevelRenderer.executeOit in place of the classic blend; what
                 // follows draws over its composite in a pass of its own.
-                flat if let Some(oit) = oit => {
+                flat if oit.is_some() => {
+                    let oit = oit.expect("the guard checked it");
                     drop(pass);
                     // LevelRenderer.executeOitWaterMask and CloudRenderer.renderOit.
                     let mask = |pass: &mut wgpu::RenderPass<'_>| {
@@ -8207,6 +8650,29 @@ mod tests {
         assert_eq!(tile_uv(1023.5, 3.75), [0.5, 0.75]);
     }
     #[test]
+    fn the_terrain_shader_validates() {
+        let module = naga::front::wgsl::parse_str(include_str!("terrain.wgsl"))
+            .expect("terrain.wgsl parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("terrain.wgsl validates");
+    }
+    #[test]
+    fn the_entity_shader_validates() {
+        // The overlay constants `entity_shader` prepends define its names.
+        let source = super::entity_shader();
+        let module = naga::front::wgsl::parse_str(&source).expect("entity.wgsl parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("entity.wgsl validates");
+    }
+    #[test]
     fn shader_globals_match_the_rust_layout() {
         // terrain.wgsl and entity.wgsl bind the same buffer: same fields, same order.
         let fields = |source: &str| -> Vec<String> {
@@ -8493,7 +8959,7 @@ struct DisplayWatch {
     wayland: Option<horizon_hdr::wayland::Watch>,
     /// Without Wayland's event, what wgpu last read and when to read it again: the OS
     /// sends no event for a moved window or a changed SDR brightness slider.
-    polled: Option<(Option<crate::graphics::Reported>, std::time::Instant)>,
+    polled: Option<(Option<crate::graphics::Reported>, horizon_os::time::Instant)>,
 }
 /// How often [`DisplayWatch`] reads the OS's values again where no event says they changed.
 const DISPLAY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -8518,7 +8984,7 @@ impl DisplayWatch {
         let watch = Self {
             #[cfg(target_os = "linux")]
             wayland: None,
-            polled: Some((now, std::time::Instant::now() + DISPLAY_POLL)),
+            polled: Some((now, horizon_os::time::Instant::now() + DISPLAY_POLL)),
         };
         (watch, now)
     }
@@ -8533,7 +8999,7 @@ impl DisplayWatch {
             return wayland.changed().map(|now| now.map(reported));
         }
         let (last, next) = self.polled.as_mut()?;
-        let time = std::time::Instant::now();
+        let time = horizon_os::time::Instant::now();
         if time < *next {
             return None;
         }

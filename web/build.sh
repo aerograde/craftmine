@@ -30,7 +30,7 @@ if [ "${THREADS:-1}" != 0 ]; then
     # worker, and the thread-local storage symbols wasm-bindgen sets up per thread.
     flags=(
         '--cfg getrandom_backend="wasm_js"'
-        -C target-feature=+atomics,+bulk-memory,+mutable-globals
+        -C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128
         -C link-arg=--shared-memory -C link-arg=--import-memory
         -C link-arg=--max-memory=4294967296
         -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size
@@ -41,7 +41,7 @@ if [ "${THREADS:-1}" != 0 ]; then
 else
     # Threads are green threads on the page's (horizon-os's fibers), which
     # switch Rust's stack pointer: the page reaches it as an export.
-    export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C link-arg=--export=__stack_pointer'
+    export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C target-feature=+simd128 -C link-arg=--export=__stack_pointer'
 fi
 "${cargo[@]}" build --target wasm32-unknown-unknown --profile "$profile" \
     -p horizon-client --bin horizon-client --no-default-features --features audio,controllers
@@ -56,23 +56,42 @@ wasm="$dist/pkg/horizon-client_bg.wasm"
 if [ "$profile" = release ] && [ "${WASM_OPT:-1}" != 0 ]; then
     if command -v wasm-opt > /dev/null; then
         # The features rustc's wasm32 target turns on, and the threaded build's atomics.
-        wasm-opt -O2 --enable-threads --enable-bulk-memory --enable-mutable-globals \
+        wasm-opt -O3 --enable-threads --enable-bulk-memory --enable-mutable-globals \
             --enable-sign-ext --enable-nontrapping-float-to-int --enable-reference-types \
-            --enable-multivalue "$wasm" -o "$wasm.opt"
+            --enable-multivalue --enable-simd "$wasm" -o "$wasm.opt"
         mv "$wasm.opt" "$wasm"
     else
         echo "wasm-opt not found: the module is left as rustc made it (install binaryen)" >&2
     fi
 fi
 cp web/index.html web/main.js web/audio.js web/worker.js web/sw.js "$dist/"
+# The packs as a tar the served page installs into `/shaderpacks`: the single
+# file embeds the same archive. It reads `shaderpacks/` (the folder the game
+# reads natively), so the desktop and browser builds share one copy; folders
+# (the bundled MIT Miniature pack) are walked too, not only `.zip` packs.
+python3 - "$dist" <<'PY'
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("horizon_package", "web/package.py")
+package = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(package)
+out = Path(sys.argv[1]) / "packs.tar.gz"
+packs = package.pack_files()
+if packs:
+    package.packs_archive(out, packs)
+elif out.exists():
+    out.unlink()
+PY
 
-[ "${BUNDLE:-1}" = 0 ] && { ls -l "$dist/pkg"/*.wasm; exit 0; }
-if [ ! -f "$dist/fs/boot.tar.gz" ] || [ "$resources/horizon-resources.json" -nt "$dist/fs/boot.tar.gz" ] \
-    || [ web/bundle.py -nt "$dist/fs/boot.tar.gz" ]; then
+if [ "${BUNDLE:-1}" != 0 ] && { [ ! -f "$dist/fs/boot.tar.gz" ] \
+    || [ "$resources/horizon-resources.json" -nt "$dist/fs/boot.tar.gz" ] \
+    || [ web/bundle.py -nt "$dist/fs/boot.tar.gz" ]; }; then
     python3 web/bundle.py "$resources" "$dist/fs"
 fi
 # The large files' content hashes: the page asks for them with these, so the
-# service worker (sw.js) can keep them until they change.
+# service worker (sw.js) can keep them until they change. Written for a
+# BUNDLE=0 build too, or the page would keep fetching the previous module from
+# the service worker's cache under its old hash.
 python3 - "$dist" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
@@ -83,7 +102,9 @@ def digest(rel):
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()[:16]
-files = {rel: digest(rel) for rel in ("pkg/horizon-client_bg.wasm", "fs/boot.tar.gz")}
+files = {rel: digest(rel) for rel in
+         ("pkg/horizon-client_bg.wasm", "pkg-st/horizon-client_bg.wasm", "fs/boot.tar.gz")
+         if (dist / rel).is_file()}
 (dist / "build.json").write_text(json.dumps(files) + "\n")
 PY
 ls -l "$dist/pkg"/*.wasm

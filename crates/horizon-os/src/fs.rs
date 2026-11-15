@@ -77,6 +77,14 @@ export function horizon_fetch_sync(url) {
     // The offline page (web/package.py) holds its files itself: a file:// page can't fetch.
     const held = globalThis.horizonHeldFile?.(url);
     if (held) return held;
+    // The offline file's store does not hold every path its manifest names:
+    // an unknown held file is missing, not a `held:` URL for XHR to fetch (it
+    // answered with a zero-length file, which a sound decoder reads as empty).
+    if (url.startsWith("held:")) return undefined;
+    // The single-file build (web/package.py single) installs every resource and
+    // sets this: a file that is missing is a bug, not a URL to request. Only
+    // the game's explicit networking may reach the network there.
+    if (globalThis.horizonOfflineFilesOnly) return undefined;
     const xhr = new XMLHttpRequest();
     xhr.open("GET", url, false);
     // Synchronous requests on the main thread can't ask for an ArrayBuffer:

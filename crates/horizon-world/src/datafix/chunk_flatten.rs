@@ -623,15 +623,11 @@ fn fix_block(chunk: &mut UpgradeChunk, c: &Consts, block: usize, pos: i64, alpha
     let down = relative(pos, Direction::Down);
     let is_snow = |n: &str| n == "minecraft:snow" || n == "minecraft:snow_layer";
     match block {
-        2 => {
-            if chunk.name(pos) == "minecraft:grass_block" && is_snow(chunk.name(up)) {
-                chunk.set_block(pos, c.snowy_grass);
-            }
+        2 if chunk.name(pos) == "minecraft:grass_block" && is_snow(chunk.name(up)) => {
+            chunk.set_block(pos, c.snowy_grass);
         }
-        3 => {
-            if chunk.name(pos) == "minecraft:podzol" && is_snow(chunk.name(up)) {
-                chunk.set_block(pos, c.snowy_podzol);
-            }
+        3 if chunk.name(pos) == "minecraft:podzol" && is_snow(chunk.name(up)) => {
+            chunk.set_block(pos, c.snowy_podzol);
         }
         25 => {
             if let Some(entity) = chunk.remove_block_entity(pos) {
@@ -664,54 +660,48 @@ fn fix_block(chunk: &mut UpgradeChunk, c: &Consts, block: usize, pos: i64, alpha
                 }
             }
         }
-        64 | 71 | 193..=197 => {
-            if chunk.name(pos).ends_with("_door") {
-                let lower = chunk.state(pos).clone();
-                if lower.property("half") == "lower" {
-                    let above = up;
-                    let upper = chunk.state(above).clone();
-                    if lower.name == upper.name {
-                        let facing = lower.property("facing");
-                        let open = lower.property("open");
-                        let hinge = if alpha {
-                            "left"
-                        } else {
-                            upper.property("hinge")
-                        };
-                        let powered = if alpha {
-                            "false"
-                        } else {
-                            upper.property("powered")
-                        };
-                        let name = &lower.name;
-                        let lo = c
-                            .door
-                            .get(&format!("{name}{facing}lower{hinge}{open}{powered}"))
-                            .copied();
-                        let hi = c
-                            .door
-                            .get(&format!("{name}{facing}upper{hinge}{open}{powered}"))
-                            .copied();
-                        if let (Some(lo), Some(hi)) = (lo, hi) {
-                            chunk.set_block(pos, lo);
-                            chunk.set_block(above, hi);
-                        }
+        64 | 71 | 193..=197 if chunk.name(pos).ends_with("_door") => {
+            let lower = chunk.state(pos).clone();
+            if lower.property("half") == "lower" {
+                let above = up;
+                let upper = chunk.state(above).clone();
+                if lower.name == upper.name {
+                    let facing = lower.property("facing");
+                    let open = lower.property("open");
+                    let hinge = if alpha {
+                        "left"
+                    } else {
+                        upper.property("hinge")
+                    };
+                    let powered = if alpha {
+                        "false"
+                    } else {
+                        upper.property("powered")
+                    };
+                    let name = &lower.name;
+                    let lo = c
+                        .door
+                        .get(&format!("{name}{facing}lower{hinge}{open}{powered}"))
+                        .copied();
+                    let hi = c
+                        .door
+                        .get(&format!("{name}{facing}upper{hinge}{open}{powered}"))
+                        .copied();
+                    if let (Some(lo), Some(hi)) = (lo, hi) {
+                        chunk.set_block(pos, lo);
+                        chunk.set_block(above, hi);
                     }
                 }
             }
         }
-        86 => {
-            if chunk.name(pos) == "minecraft:carved_pumpkin" {
-                let below = chunk.name(down);
-                if below == "minecraft:grass_block" || below == "minecraft:dirt" {
-                    chunk.set_block(pos, c.pumpkin);
-                }
+        86 if chunk.name(pos) == "minecraft:carved_pumpkin" => {
+            let below = chunk.name(down);
+            if below == "minecraft:grass_block" || below == "minecraft:dirt" {
+                chunk.set_block(pos, c.pumpkin);
             }
         }
-        110 => {
-            if chunk.name(pos) == "minecraft:mycelium" && is_snow(chunk.name(up)) {
-                chunk.set_block(pos, c.snowy_mycelium);
-            }
+        110 if chunk.name(pos) == "minecraft:mycelium" && is_snow(chunk.name(up)) => {
+            chunk.set_block(pos, c.snowy_mycelium);
         }
         140 => {
             if let Some(entity) = chunk.remove_block_entity(pos) {
@@ -745,12 +735,10 @@ fn fix_block(chunk: &mut UpgradeChunk, c: &Consts, block: usize, pos: i64, alpha
                 chunk.set_block(pos, state);
             }
         }
-        175 => {
-            if chunk.state(pos).property("half") == "upper" {
-                let variant = chunk.name(down).to_owned();
-                if let Some(s) = c.upper.get(variant.as_str()).copied() {
-                    chunk.set_block(pos, s);
-                }
+        175 if chunk.state(pos).property("half") == "upper" => {
+            let variant = chunk.name(down).to_owned();
+            if let Some(s) = c.upper.get(variant.as_str()).copied() {
+                chunk.set_block(pos, s);
             }
         }
         176 | 177 => {

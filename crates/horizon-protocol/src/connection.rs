@@ -57,7 +57,8 @@ impl Pipe {
         };
         (end(a.clone(), b.clone()), end(b, a))
     }
-    fn try_clone(&self) -> Self {
+    /// Another handle on this end, for a reader and a writer on different threads.
+    pub fn try_clone(&self) -> Self {
         Self {
             end: self.end.clone(),
             timeout: Mutex::new(*horizon_os::sync::lock(&self.timeout).unwrap()),
@@ -98,12 +99,22 @@ impl Read for Pipe {
         Ok(n)
     }
 }
+/// How much a peer that stopped reading may leave queued before its
+/// connection fails: a legitimate join burst is far below this, while an
+/// unbounded queue would let one fast sender grow the host's heap forever.
+const MAX_PIPE_BACKLOG: usize = 64 << 20;
 impl Write for Pipe {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         // The page writes here while the other end's worker reads.
         let mut state = horizon_os::sync::lock(&self.end.outgoing.state).unwrap();
         if state.1 {
             return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        if state.0.len().saturating_add(data.len()) > MAX_PIPE_BACKLOG {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "the peer is not keeping up",
+            ));
         }
         state.0.extend(data);
         self.end.outgoing.ready.notify_all();

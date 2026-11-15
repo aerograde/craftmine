@@ -23,6 +23,11 @@ pub enum FogType {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FogData {
     pub color: [f32; 4],
+    /// `CapturedRenderingState.fogDensity` as Iris captures it: the exponential
+    /// density a pack reads as `gl_Fog.density`, or -1 on linear fog. Iris
+    /// re-derives water fog for packs that still use `gl_Fog`; without it a
+    /// pack's underwater fog is `1 - exp(-distance)` and the screen goes flat.
+    pub density: f32,
     pub environmental_start: f32,
     pub environmental_end: f32,
     pub render_distance_start: f32,
@@ -290,6 +295,7 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
     }
     let mut fog = FogData {
         color: [color[0], color[1], color[2], 1.0],
+        density: -1.0,
         environmental_start: 0.0,
         environmental_end: 1024.0,
         render_distance_start: 0.0,
@@ -349,6 +355,12 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
                 .copied()
                 .unwrap_or(1.0);
             fog.environmental_end = 96.0 * factor * water_vision.max(0.25);
+            // `Iris MixinFogRenderer.iris$setupLegacyWaterFog`: packs still reading
+            // `gl_Fog.density` get vanilla's legacy water density, not the linear
+            // fog range. Swamp and mangrove swamp, the biomes in
+            // `HAS_CLOSER_WATER_FOG`, are the ones with a smaller fog end.
+            fog.density =
+                0.05 - water_vision * water_vision * 0.03 + if factor < 1.0 { 0.005 } else { 0.0 };
             fog.sky_end = fog.environmental_end;
             fog.cloud_end = fog.environmental_end;
         }
@@ -366,7 +378,21 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
             }
         }
     }
-    let span = (rd / 10.0).clamp(4.0, 64.0);
+    // Far terrain reaches past a vanilla render distance: fade it in over the
+    // last 45% of its range, so the horizon dissolves into the sky colour
+    // instead of ending at a visible rim. Vanilla-sized ranges keep the short
+    // edge span.
+    let distant_haze = input.distant_terrain
+        && input.skybox
+        && input.fog_type == FogType::Atmospheric
+        && input.blindness.is_none()
+        && input.darkness.is_none()
+        && !input.boss_world_fog;
+    let span = if distant_haze {
+        rd * 0.45
+    } else {
+        (rd / 10.0).clamp(4.0, 64.0)
+    };
     fog.render_distance_start = rd - span;
     fog.render_distance_end = rd;
     if input.distant_terrain
@@ -594,6 +620,9 @@ mod tests {
         input.distant_terrain = true;
         let fog = setup_fog(&tables, &FogState::default(), &input);
         assert_eq!(fog.environmental_end, 16384.);
+        // The horizon fades over the last 45% of far terrain's range.
+        assert!((fog.render_distance_start - 16384. * 0.55).abs() < 1e-2);
+        assert_eq!(fog.render_distance_end, 16384.);
         input.fog_type = FogType::Water;
         assert_eq!(
             setup_fog(&tables, &FogState::default(), &input).environmental_end,
@@ -664,5 +693,29 @@ mod tests {
         let fog = setup_fog(&tables, &state, &inputs(&sky));
         assert_eq!(fog.environmental_start, -160.0);
         assert_eq!(fog.environmental_end, 768.0);
+    }
+    /// `Iris MixinFogRenderer.iris$setupLegacyWaterFog`: the density a pack reads
+    /// as `gl_Fog.density` is -1 on linear fog and vanilla's legacy water
+    /// density under water, and it drops as water vision builds.
+    #[test]
+    fn pack_fog_density_is_iris_legacy_water_density() {
+        let sky = Sky::default();
+        let open = FogTables {
+            water_fog_end: vec![1.0],
+        };
+        let swamp = FogTables {
+            water_fog_end: vec![0.85],
+        };
+        let mut input = inputs(&sky);
+        assert_eq!(setup_fog(&open, &FogState::default(), &input).density, -1.0);
+        input.fog_type = FogType::Water;
+        let fresh = FogState::default();
+        assert!((setup_fog(&open, &fresh, &input).density - 0.05).abs() < 1e-6);
+        assert!((setup_fog(&swamp, &fresh, &input).density - 0.055).abs() < 1e-6);
+        let seen = FogState {
+            water_vision_time: 600,
+            ..FogState::default()
+        };
+        assert!((setup_fog(&open, &seen, &input).density - 0.02).abs() < 1e-6);
     }
 }

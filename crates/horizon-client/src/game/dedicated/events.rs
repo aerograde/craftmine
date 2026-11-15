@@ -26,8 +26,8 @@ pub(in crate::game) fn record(kind: &str, name: &str, uuid: u128, mut fields: Va
     fields["type"] = kind.into();
     fields["name"] = name.into();
     fields["uuid"] = horizon_protocol::crypto::uuid_string(uuid).into();
-    fields["time"] = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    fields["time"] = horizon_os::time::SystemTime::now()
+        .duration_since(horizon_os::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
         .into();
     events.next += 1;

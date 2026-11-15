@@ -555,7 +555,20 @@ impl Occlusion {
             dirty: true,
             graph: None,
             spare: Graph::default(),
-            worker: Worker::spawn(min_y, sections),
+            worker: {
+                // The page has no thread to give the occlusion search; do not
+                // try (and log) a spawn that cannot happen. The inline search
+                // below is used there.
+                #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+                {
+                    let _ = (min_y, sections);
+                    None
+                }
+                #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+                {
+                    Worker::spawn(min_y, sections)
+                }
+            },
             running: None,
             discard: false,
             searched: None,

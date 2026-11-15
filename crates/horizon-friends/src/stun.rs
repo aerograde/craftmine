@@ -95,13 +95,14 @@ pub fn parse_response(m: &[u8], id: &[u8; 12]) -> Option<SocketAddr> {
     plain
 }
 
-/// Ask one server (resolved to IPv4), retrying twice.
-pub fn query(server: &str, timeout: Duration) -> io::Result<SocketAddr> {
+/// Ask one server (resolved to IPv4), retrying twice, over `socket` itself:
+/// a WebRTC peer must learn the mapped address of the socket it sends on,
+/// not of a fresh one.
+pub fn query_socket(socket: &UdpSocket, server: &str, timeout: Duration) -> io::Result<SocketAddr> {
     let target = server
         .to_socket_addrs()?
         .find(SocketAddr::is_ipv4)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no IPv4 address"))?;
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_read_timeout(Some(timeout / 3))?;
     let mut id = [0u8; 12];
     crate::fill_random(&mut id)?;
@@ -121,6 +122,12 @@ pub fn query(server: &str, timeout: Duration) -> io::Result<SocketAddr> {
         }
     }
     Err(io::Error::new(io::ErrorKind::TimedOut, "no STUN answer"))
+}
+
+/// Ask one server (resolved to IPv4), retrying twice.
+pub fn query(server: &str, timeout: Duration) -> io::Result<SocketAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    query_socket(&socket, server, timeout)
 }
 
 /// The public IPv4 address from the first server that answers.

@@ -2978,6 +2978,10 @@ where
         let rule = material
             .add_rule(self.rule.clone())
             .map_err(stage("far material"))?;
+        // Far snowy biomes get their white top from the snow feature, not the
+        // surface rule, which this sampler cannot run; paint the surface the
+        // feature would leave so seed terrain is not green until the chunk is.
+        let snow = self.data.registry.default_state("minecraft:snow");
         let mut result = Vec::with_capacity(side * side);
         for (index, (top, water, below, mut spans, biome)) in geometry.into_iter().enumerate() {
             let (wx, wz) = (
@@ -3021,6 +3025,15 @@ where
                     replacement.push((min, y, old));
                 }
                 spans.splice(index..=index, replacement);
+            }
+            if water.is_none()
+                && let Some(snow) = snow
+                && let Some(settings) = self.data.temperatures.get(biome.0 as usize)
+                && settings.has_precipitation
+                && settings.height_adjusted(BlockPos::new(wx, height, wz), self.settings.sea_level)
+                    < 0.15
+            {
+                state = snow;
             }
             result.push((
                 Some(SurfaceSample {

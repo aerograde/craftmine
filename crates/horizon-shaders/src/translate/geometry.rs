@@ -39,6 +39,8 @@ pub fn translate_geometry(
 ) -> Result<(Program, u32), Vec<Error>> {
     let (combined, triangles) = combine(vertex, geometry, inputs)?;
     let mut gbuffers = inputs.inputs.clone();
+    // A cheap far path for gbuffers terrain never applies to a geometry stage's own fragment.
+    gbuffers.fragment_before.clear();
     gbuffers.declarations = gbuffers
         .declarations
         .lines()

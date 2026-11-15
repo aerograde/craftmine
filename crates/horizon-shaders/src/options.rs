@@ -331,6 +331,50 @@ pub fn chosen_text(chosen: &BTreeMap<String, String>) -> String {
     chosen.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
 }
 
+/// The values of `profile.<name>` in `shaders.properties`: the pack's own quality presets
+/// (`profile.potato`, `profile.dgpu`...). `!NAME` turns a switch off, `NAME:VALUE` sets a
+/// value, a bare `NAME` turns a switch on, and `profile.OTHER` inherits another profile's
+/// values first (Miniature's `HIGH` is `profile.NORMAL` plus a few overrides — without the
+/// inheritance it would lose shadows and reflections entirely).
+pub fn profile(pack: &Pack, name: &str) -> BTreeMap<String, String> {
+    let Some(text) = pack.read_text("shaders.properties") else {
+        return BTreeMap::new();
+    };
+    let lines: BTreeMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| {
+            let (lhs, rhs) = line.split_once('=')?;
+            lhs.trim().strip_prefix("profile.").map(|n| (n, rhs))
+        })
+        .collect();
+    let mut out = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![name];
+    while let Some(profile) = pending.pop() {
+        if !seen.insert(profile) {
+            continue;
+        }
+        for word in lines.get(profile).copied().unwrap_or("").split_whitespace() {
+            if let Some(other) = word.strip_prefix("profile.") {
+                pending.push(other);
+                continue;
+            }
+            // Both spellings appear in real packs: Miniature writes `shadowMapResolution=4096`
+            // and `SHADOW_ENTITY:-1` in the same line.
+            let (option, value) = match word.split_once(['=', ':']) {
+                Some((n, v)) => (n, v.to_owned()),
+                None => match word.strip_prefix('!') {
+                    Some(n) => (n, "false".to_owned()),
+                    None => (word, "true".to_owned()),
+                },
+            };
+            // The profile being resolved wins over whatever it inherits.
+            out.entry(option.to_owned()).or_insert(value);
+        }
+    }
+    out
+}
+
 /// The texts of the pack's sources and of the files they include.
 fn option_texts(pack: &Pack) -> Vec<String> {
     let files = pack.all_files();
@@ -474,5 +518,58 @@ mod tests {
             "#define LEVEL 2 //[1 2 3]\n"
         );
         assert_eq!(parse_chosen(&chosen_text(&chosen)), chosen);
+    }
+
+    #[test]
+    fn profiles_are_option_sets() {
+        let pack = Pack::from_zip_bytes(
+            "P.zip",
+            zip(&[(
+                "shaders/shaders.properties",
+                "profile.potato = !SHADOWS REFLECTION_MODE:1 !CLOUDS BLOOM_QUALITY:0.25 GODRAYS:0\n\
+                 profile.high = SHADOWS REFLECTION_MODE:2 CLOUDS\n",
+            )]),
+        )
+        .unwrap();
+        let potato = profile(&pack, "potato");
+        assert_eq!(potato["SHADOWS"], "false");
+        assert_eq!(potato["REFLECTION_MODE"], "1");
+        assert_eq!(potato["CLOUDS"], "false");
+        assert_eq!(potato["BLOOM_QUALITY"], "0.25");
+        assert_eq!(potato["GODRAYS"], "0");
+        let high = profile(&pack, "high");
+        assert_eq!(high["SHADOWS"], "true");
+        assert_eq!(high["REFLECTION_MODE"], "2");
+        assert!(profile(&pack, "missing").is_empty());
+    }
+
+    /// Packs build their presets by inheritance, and Horizon used to read only the named
+    /// line: Miniature's `HIGH` is `profile.NORMAL` plus a few overrides, so the pack ran
+    /// with none of the values its own ladder sets — no shadows, no reflections — and looked
+    /// like vanilla. Every level of the chain must arrive, the derived profile winning.
+    #[test]
+    fn a_profile_inherits_the_one_it_names() {
+        let pack = Pack::from_zip_bytes(
+            "P.zip",
+            zip(&[(
+                "shaders/shaders.properties",
+                "profile.LOWEST=!ENABLE_SHADOWS REFLECTIONS:0 SSR_STEPS:10\n\
+                 profile.LOW=profile.LOWEST ENABLE_SHADOWS SSR_STEPS:12\n\
+                 profile.HIGH=profile.LOW REFLECTIONS:5 SSR_STEPS:16\n",
+            )]),
+        )
+        .unwrap();
+        let low = profile(&pack, "LOW");
+        assert_eq!(low["ENABLE_SHADOWS"], "true", "LOW turns shadows on");
+        assert_eq!(low["REFLECTIONS"], "0", "inherited from LOWEST");
+        assert_eq!(low["SSR_STEPS"], "12", "LOW overrides LOWEST");
+        let high = profile(&pack, "HIGH");
+        assert_eq!(high["SSR_STEPS"], "16", "HIGH overrides LOW");
+        assert_eq!(
+            high["REFLECTIONS"], "5",
+            "HIGH overrides LOWEST, through LOW"
+        );
+        assert_eq!(high["ENABLE_SHADOWS"], "true", "kept from LOW");
+        assert!(profile(&pack, "missing").is_empty());
     }
 }

@@ -86,8 +86,16 @@ pub const TILED_POSITION_SCALE: f32 = 16.0;
 /// World-sized LOD faces (millions of blocks) need a wider range; 1/128-block
 /// steps keep `pos` finite in the 16-bit channel.
 pub const TILED_LARGE_POSITION_SCALE: f32 = 1.0 / 128.0;
+/// The largest local tile coordinate each grid holds (its x/z). The 1/4-block
+/// grid covers a 16,319-block tile: every infinite-terrain tile fits, so only
+/// a world-wide finite fallback root pays the 128-block grid.
+const TILED_POSITION_MAX: f32 = TILED_POSITION_MIN + (u16::MAX as f32) / TILED_POSITION_SCALE;
+const TILED_MEDIUM_POSITION_SCALE: f32 = 4.0;
+const TILED_MEDIUM_POSITION_MAX: f32 =
+    TILED_POSITION_MIN + (u16::MAX as f32) / TILED_MEDIUM_POSITION_SCALE;
 const TILED_POSITION_TAG: u16 = 1;
 const TILED_LARGE_POSITION_TAG: u16 = 2;
+const TILED_MEDIUM_POSITION_TAG: u16 = 3;
 impl TerrainVertex {
     fn packed_position(pos: [f32; 3], min: f32, scale: f32, tag: u16) -> [u16; 4] {
         let q = |v: f32| ((v - min) * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16;
@@ -105,25 +113,26 @@ impl TerrainVertex {
     /// A vertex of a merged distant-terrain face, its UV in blocks from the
     /// face's corner. Drawn with an instance UV scale of `1 / TILED_UV_STEPS`.
     pub fn tiled(pos: [f32; 3], uv: [f32; 2], layer: u16, color: u32, light: u16) -> Self {
-        let scale = if pos
-            .iter()
-            .any(|&v| (v - TILED_POSITION_MIN) * TILED_POSITION_SCALE > f32::from(u16::MAX))
-        {
-            TILED_LARGE_POSITION_SCALE
+        // Only x and z need the wide grid for world-sized tiles. y stays on
+        // the 1/16-block grid it has everywhere: quantising it too collapsed
+        // every surface between y 64 and 191 onto y = 64 and terraced far
+        // mountains into 128-block steps.
+        let extent = pos[0].max(pos[2]);
+        let (scale, tag) = if extent > TILED_MEDIUM_POSITION_MAX {
+            (TILED_LARGE_POSITION_SCALE, TILED_LARGE_POSITION_TAG)
+        } else if extent > TILED_POSITION_MAX {
+            (TILED_MEDIUM_POSITION_SCALE, TILED_MEDIUM_POSITION_TAG)
         } else {
-            TILED_POSITION_SCALE
+            (TILED_POSITION_SCALE, TILED_POSITION_TAG)
         };
+        let q = |v: f32, scale: f32| {
+            ((v - TILED_POSITION_MIN) * scale)
+                .round()
+                .clamp(0.0, f32::from(u16::MAX)) as u16
+        };
+        let (x, z) = (q(pos[0], scale), q(pos[2], scale));
         Self {
-            pos: Self::packed_position(
-                pos,
-                TILED_POSITION_MIN,
-                scale,
-                if scale == TILED_LARGE_POSITION_SCALE {
-                    TILED_LARGE_POSITION_TAG
-                } else {
-                    TILED_POSITION_TAG
-                },
-            ),
+            pos: [x, q(pos[1], TILED_POSITION_SCALE), z, tag],
             uv: uv.map(|v| (v * TILED_UV_STEPS).round().clamp(0.0, f32::from(u16::MAX)) as u16),
             layer,
             light,
@@ -132,16 +141,24 @@ impl TerrainVertex {
     }
     /// The decoded position, for CPU bounds and tests.
     pub fn position(&self) -> [f32; 3] {
+        let p = self.pos.map(f32::from);
+        let wide = match self.pos[3] {
+            TILED_LARGE_POSITION_TAG => Some(TILED_LARGE_POSITION_SCALE),
+            TILED_MEDIUM_POSITION_TAG => Some(TILED_MEDIUM_POSITION_SCALE),
+            _ => None,
+        };
+        if let Some(scale) = wide {
+            return [
+                p[0] / scale + TILED_POSITION_MIN,
+                p[1] / TILED_POSITION_SCALE + TILED_POSITION_MIN,
+                p[2] / scale + TILED_POSITION_MIN,
+            ];
+        }
         let (min, scale) = match self.pos[3] {
             TILED_POSITION_TAG => (TILED_POSITION_MIN, TILED_POSITION_SCALE),
-            TILED_LARGE_POSITION_TAG => (TILED_POSITION_MIN, TILED_LARGE_POSITION_SCALE),
             _ => (POSITION_MIN, POSITION_SCALE),
         };
-        [
-            f32::from(self.pos[0]) / scale + min,
-            f32::from(self.pos[1]) / scale + min,
-            f32::from(self.pos[2]) / scale + min,
-        ]
+        [p[0] / scale + min, p[1] / scale + min, p[2] / scale + min]
     }
     /// The UV the GPU samples.
     pub fn uv(&self) -> [f32; 2] {
@@ -172,9 +189,19 @@ mod vertex_tests {
         }
         let p = [4_194_304.0, 64.0, 2_097_152.0];
         let q = TerrainVertex::tiled(p, [0.0; 2], 0, 0, 0).position();
-        for i in 0..3 {
-            assert!((q[i] - p[i]).abs() <= 128.0, "{p:?} -> {q:?}");
-        }
+        // The wide grid trades x/z precision for reach; y keeps its blocks.
+        assert!((q[0] - p[0]).abs() <= 128.0, "{p:?} -> {q:?}");
+        assert!((q[2] - p[2]).abs() <= 128.0, "{p:?} -> {q:?}");
+        assert!(
+            (q[1] - p[1]).abs() <= 1.0 / super::TILED_POSITION_SCALE,
+            "{p:?} -> {q:?}"
+        );
+        // An infinite-terrain tile (up to 8,192 blocks) keeps a 1/4-block grid.
+        let p = [8000.0, 70.0, 4096.0];
+        let q = TerrainVertex::tiled(p, [0.0; 2], 0, 0, 0).position();
+        assert!((q[0] - p[0]).abs() <= 1.0 / super::TILED_MEDIUM_POSITION_SCALE);
+        assert!((q[2] - p[2]).abs() <= 1.0 / super::TILED_MEDIUM_POSITION_SCALE);
+        assert!((q[1] - p[1]).abs() <= 1.0 / super::TILED_POSITION_SCALE);
     }
     #[test]
     fn other_uvs_round_within_a_step() {

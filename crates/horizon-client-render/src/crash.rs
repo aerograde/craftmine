@@ -542,6 +542,11 @@ pub fn install(home: PathBuf, side: &'static str) {
             return;
         }
         default(info);
+        #[cfg(target_arch = "wasm32")]
+        log::error!(
+            "Horizon panic stack (browser):\n{}",
+            horizon_os::web::horizon_js_stack()
+        );
         let main = horizon_os::thread::current().name() == Some("main");
         if main {
             deliver(&home, panic_report(info, side));

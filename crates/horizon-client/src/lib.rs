@@ -86,6 +86,7 @@ pub mod motion;
 pub mod multiplayer;
 pub mod music;
 pub mod native_data;
+pub mod nearby_screen;
 pub mod net;
 pub mod nether_portal;
 pub mod no_resources;

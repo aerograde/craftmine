@@ -1078,6 +1078,10 @@ impl Game<'_> {
     /// parse; here the server answers it.)
     pub(super) fn click_command(&mut self, command: &str) {
         let command = command.strip_prefix('/').unwrap_or(command);
+        if command.trim() == "nearby" {
+            self.nearby_command(command);
+            return;
+        }
         if self.client_mod_command(command) {
             return;
         }

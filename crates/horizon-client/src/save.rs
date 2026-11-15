@@ -2150,7 +2150,7 @@ fn share_out<R: Send>(
         work()
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+    let mut done: Vec<(usize, R)> = horizon_os::thread::scope(|scope| {
         let threads: Vec<_> = (1..helpers)
             .filter(|_| start())
             .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
@@ -3045,10 +3045,10 @@ pub fn random_uuid() -> [i32; 4] {
     };
     static NEXT: OnceLock<AtomicU64> = OnceLock::new();
     let next = NEXT.get_or_init(|| {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let t = horizon_os::time::SystemTime::now()
+            .duration_since(horizon_os::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
-        AtomicU64::new(t ^ (std::process::id() as u64).rotate_left(32))
+        AtomicU64::new(t ^ (horizon_os::process::id() as u64).rotate_left(32))
     });
     // SplitMix64: distinct steps give distinct outputs.
     let split = || {

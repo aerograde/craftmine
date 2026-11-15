@@ -49,6 +49,14 @@ use std::{
     },
 };
 
+/// A lock that keeps the data a panicking holder left behind: one failed
+/// connection must not turn every later login or status ping into a panic.
+fn poison_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// IntegratedServer.MAX_PLAYERS.
 pub const MAX_PLAYERS: usize = 8;
 
@@ -455,13 +463,13 @@ impl Shared {
         {
             return Some(reason);
         }
-        if self.reserved.lock().unwrap().contains(&uuid) {
+        if poison_lock(&self.reserved).contains(&uuid) {
             return Some(translatable("multiplayer.disconnect.duplicate_login", &[]));
         }
         {
-            let online = self.online.lock().unwrap();
+            let online = poison_lock(&self.online);
             let bypass = self.config.bypasses_limit.as_ref().is_some_and(|b| b(uuid));
-            let taken = online.len() + self.reserved.lock().unwrap().len();
+            let taken = online.len() + poison_lock(&self.reserved).len();
             if taken >= self.max_players() && !bypass {
                 return Some(translatable("multiplayer.disconnect.server_full", &[]));
             }
@@ -476,23 +484,36 @@ impl Shared {
                 horizon_os::thread::sleep(Duration::from_millis(10));
             }
         }
-        self.online.lock().unwrap().push((uuid, name.to_owned()));
+        self.online
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((uuid, name.to_owned()));
         None
     }
     fn is_online(&self, uuid: u128) -> bool {
-        self.online.lock().unwrap().iter().any(|(u, _)| *u == uuid)
+        self.online
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|(u, _)| *u == uuid)
     }
     pub fn motd(&self) -> String {
-        self.motd.lock().unwrap().clone()
+        self.motd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub fn max_players(&self) -> usize {
         self.max_players.load(Ordering::Relaxed)
     }
     pub fn release(&self, uuid: u128) {
-        self.online.lock().unwrap().retain(|(u, _)| *u != uuid);
+        self.online
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(u, _)| *u != uuid);
     }
     pub fn online(&self) -> usize {
-        self.online.lock().unwrap().len() + self.reserved.lock().unwrap().len()
+        poison_lock(&self.online).len() + poison_lock(&self.reserved).len()
     }
     fn next_random(&self, bound: usize) -> usize {
         let mut r = self.random.lock().unwrap();

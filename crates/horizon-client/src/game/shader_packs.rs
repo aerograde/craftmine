@@ -8,6 +8,7 @@ use horizon_client::camera::CameraFluid;
 use horizon_client::gfx::pack_uniforms::PackInputs;
 use horizon_client::shader_options::ShaderOptions;
 use horizon_client::text::Text;
+use horizon_os::fs::PathExt;
 use horizon_shaders::{BlockIds, Macros, Pack, Properties, dimension_folder, load_post};
 
 use super::{Dim, Game};
@@ -15,12 +16,30 @@ use horizon_client::gfx::pack_draw::EntitySpan;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
-/// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`).
+/// The pack shipped with Horizon: the MIT-licensed Miniature Shader. It is the
+/// default look and a 1:1 reference; the built-in profile stays as the fallback
+/// when the folder is absent.
+const BUNDLED_PACK: &str = "Miniature";
+
+fn bundled_pack_exists() -> bool {
+    Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists()
+}
+
+/// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`); with no
+/// file, none, so the pack keeps its own defaults. Any saved value overrides the profile.
+///
+/// A pack applies no preset unless the player picks one: an empty map leaves the pack's own
+/// `#define` and `const` defaults, which is the look the reference renders and the one its
+/// author tuned. Horizon used to substitute its own `dgpu`/`igpu`/`potato` tiers here, but
+/// those names belong to Horizon, not to packs, and Miniature's `HIGH` preset raises the
+/// shadow map to 4096² and the shadow distance to 384 blocks for a look no faster than the
+/// defaults.
 fn chosen_shader_options(name: &str) -> BTreeMap<String, String> {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(name));
-    std::fs::read_to_string(file)
-        .map(|text| horizon_shaders::parse_chosen(&text))
-        .unwrap_or_default()
+    match horizon_os::fs::read_to_string(file) {
+        Ok(text) => horizon_shaders::parse_chosen(&text),
+        Err(_) => BTreeMap::new(),
+    }
 }
 
 /// Pack `name`'s options, screens and names in `language`, with the values the player chose.
@@ -56,12 +75,12 @@ pub(super) fn read_shader_options(
 pub(super) fn write_shader_options(options: &ShaderOptions) {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(&options.pack));
     let saved = if options.chosen.is_empty() {
-        std::fs::remove_file(&file).or_else(|e| match e.kind() {
+        horizon_os::fs::remove_file(&file).or_else(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
             _ => Err(e),
         })
     } else {
-        std::fs::write(&file, horizon_shaders::chosen_text(&options.chosen))
+        horizon_os::fs::write(&file, horizon_shaders::chosen_text(&options.chosen))
     };
     if let Err(e) = saved {
         log::warn!("shader pack {}: {}: {e}", options.pack, file.display());
@@ -117,6 +136,12 @@ impl Game<'_> {
     /// Loads the pack for the current dimension when it changed, and returns this frame's
     /// inputs to the pack's uniforms.
     pub(super) fn shader_pack_inputs(&mut self, camera: glam::DVec3, partial: f32) -> PackInputs {
+        // A pack's first load translates every program synchronously. Do that
+        // only in a world: during title startup the browser's event loop still
+        // has a winit borrow active, and a long nested pass re-enters it.
+        if !matches!(self.screen, super::Screen::Playing) {
+            return PackInputs::default();
+        }
         // A `shaders/` pack lights the faces itself unless `oldLighting=true`: sections mesh
         // without the game's face shading (the pack loaded or dropped below shows next frame).
         let pack_lighting = self.pack_ids.as_ref().is_some_and(|ids| !ids.old_lighting);
@@ -126,13 +151,14 @@ impl Game<'_> {
         }
         static DEV_PACK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
         let dev = DEV_PACK.get_or_init(|| std::env::var("HORIZON_SHADER_PACK").ok());
-        let picked = active_pack(
-            dev.as_deref().unwrap_or(&self.settings.horizon.shader_pack),
-            &self.settings.mods,
-        );
+        let configured = dev.as_deref().unwrap_or(&self.settings.horizon.shader_pack);
+        let mut picked = active_pack(configured, &self.settings.mods).to_owned();
+        if dev.is_none() && picked.is_empty() && bundled_pack_exists() {
+            picked = BUNDLED_PACK.to_owned();
+        }
         if self.native_shaders.picked != picked {
             // Another pack, or none: drop what ran.
-            self.native_shaders = super::native_shaders::NativeShaders::picking(picked);
+            self.native_shaders = super::native_shaders::NativeShaders::picking(&picked);
             self.pack_ids = None;
             if let Some(renderer) = &mut self.renderer {
                 renderer.drop_shader_packs();
@@ -141,7 +167,7 @@ impl Game<'_> {
         if picked.is_empty() {
             return PackInputs::default();
         }
-        let name = picked.to_owned();
+        let name = picked;
         let dimension = match self.dim {
             Dim::Overworld => 0,
             Dim::Nether => -1,
@@ -159,7 +185,10 @@ impl Game<'_> {
             // A pack is not the game's own code: one that makes the shader compiler (or our
             // translation of it) panic is turned off instead of crashing every world load (#3525).
             let loaded = horizon_client::crash::contain(|| {
-                match Pack::open(&path).map(|p| p.with_chosen(chosen_shader_options(name))) {
+                match Pack::open(&path).map(|p| {
+                    let chosen = chosen_shader_options(name);
+                    p.with_chosen(chosen)
+                }) {
                     Ok(pack) => {
                         let mut macros = Macros::standard();
                         renderer.define_pack_macros(&mut macros);
@@ -182,6 +211,16 @@ impl Game<'_> {
                         let folder = dimension_folder(&pack, dimension);
                         let inputs = renderer.pack_inputs();
                         let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
+                        // The pack's `SHADOWS` switch (the potato profile has it off) also
+                        // controls whether its shadow programs run.
+                        if !horizon_shaders::switches_on(&pack).contains("SHADOWS") {
+                            post.shadow_pass = false;
+                            post.shadow = None;
+                            post.shadow_water = None;
+                            post.shadow_entities = None;
+                            post.shadow_block = None;
+                            post.shadow_comp.clear();
+                        }
                         let biomes = world_biomes!(self);
                         let names: Vec<&str> =
                             biomes.list.iter().map(|b| b.name.as_str()).collect();
@@ -226,8 +265,11 @@ impl Game<'_> {
                             table.len() / 2,
                             started_ids.elapsed().as_millis()
                         );
+                        let far_lod = pack
+                            .read_text("program/gbuffers_main.glsl")
+                            .is_some_and(|t| t.contains("encodeNormal") && t.contains("outData1"));
                         if let Some((programs, notes)) =
-                            renderer.set_shader_pack(dimension, Some(post), &table)
+                            renderer.set_shader_pack(dimension, Some(post), &table, far_lod)
                         {
                             for note in notes {
                                 log::warn!("shader pack {name}: {note}");
@@ -243,7 +285,7 @@ impl Game<'_> {
                     Err(e) => {
                         self.pack_ids = None;
                         log::warn!("shader pack {name}: {e}");
-                        renderer.set_shader_pack(dimension, None, &[]);
+                        renderer.set_shader_pack(dimension, None, &[], false);
                     }
                 }
             });
@@ -318,7 +360,7 @@ impl Game<'_> {
         self.pack_ids = None;
         if let Some(renderer) = &mut self.renderer {
             // Marks this dimension as loaded, without a pack, so it is not tried again.
-            renderer.set_shader_pack(dimension, None, &[]);
+            renderer.set_shader_pack(dimension, None, &[], false);
         }
         if self.settings.horizon.shader_pack == name {
             self.settings.horizon.shader_pack.clear();

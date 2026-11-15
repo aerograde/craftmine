@@ -9,6 +9,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// One message may not exceed this: a client's 64-bit length field otherwise
+/// turns one header into a multi-gigabyte allocation. Minecraft frames are at
+/// most 2 MiB and a shared-world packet is far below this bound.
+pub const MAX_MESSAGE: u64 = 32 << 20;
+
 /// Whether a connection's first bytes are an HTTP request rather than a
 /// Minecraft frame (whose second byte, the packet id, is 0 in a handshake).
 pub fn is_http(first: &[u8]) -> bool {
@@ -114,10 +119,12 @@ impl ServerSocket {
         Ok(Self {
             stream: self.stream.try_clone()?,
             writing: self.writing.clone(),
-            left: 0,
-            mask: [0; 4],
-            offset: 0,
-            text: false,
+            // A clone shares the stream's position: starting it at a frame
+            // boundary would lose a message the original had begun.
+            left: self.left,
+            mask: self.mask,
+            offset: self.offset,
+            text: self.text,
         })
     }
 
@@ -131,6 +138,9 @@ impl ServerSocket {
 
     pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
         self.stream.set_read_timeout(timeout)
+    }
+    pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.stream.set_write_timeout(timeout)
     }
 
     /// The next whole data message (`None`: the client closed).
@@ -196,6 +206,14 @@ impl ServerSocket {
                 let mut n = [0; 8];
                 self.stream.read_exact(&mut n)?;
                 len = u64::from_be_bytes(n);
+            }
+            // The length is the client's to choose. Without a bound a 64-bit
+            // header aborts the whole server on the allocation below.
+            if len > MAX_MESSAGE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "WebSocket message too large",
+                ));
             }
             let mut mask = [0; 4];
             if head[1] & 0x80 != 0 {

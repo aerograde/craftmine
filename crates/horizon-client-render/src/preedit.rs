@@ -13,7 +13,8 @@ use crate::{
     text::{Style, Text},
     ui::nine_slice,
 };
-use std::{sync::Mutex, time::Instant};
+use horizon_os::time::Instant;
+use std::sync::Mutex;
 
 /// `PreeditEvent`: the composition, its caret and the blocks of text the
 /// input method set apart (the one being converted is `focused_block`).

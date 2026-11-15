@@ -271,9 +271,13 @@ const ZEROS: u64 = 4 << 20;
 
 /// The pack's storage buffers, bound in set 4.
 pub(super) struct Buffers {
+    /// Compute stages: read and write.
     pub(super) layout: wgpu::BindGroupLayout,
-    objects: BTreeMap<u32, BufferObject>,
     pub(super) group: Option<wgpu::BindGroup>,
+    /// Fragment and vertex stages: read-only, which WebGPU allows there.
+    pub(super) read_layout: wgpu::BindGroupLayout,
+    pub(super) read_group: Option<wgpu::BindGroup>,
+    objects: BTreeMap<u32, BufferObject>,
     buffers: Vec<wgpu::Buffer>,
     made_for: [u32; 2],
 }
@@ -285,27 +289,37 @@ impl Buffers {
         objects: BTreeMap<u32, BufferObject>,
         stages: wgpu::ShaderStages,
     ) -> Self {
-        let entries: Vec<_> = objects
-            .keys()
-            .map(|&binding| wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: stages,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            })
-            .collect();
+        let entries = |read_only, visibility| -> Vec<_> {
+            objects
+                .keys()
+                .map(|&binding| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                })
+                .collect()
+        };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shader pack buffers"),
-            entries: &entries,
+            entries: &entries(false, stages),
+        });
+        // The pack's vertex stage reads buffer objects too (its chunk offset and entity ids);
+        // read-only storage is what WebGPU allows there, and the read layout is the graphics one.
+        let read_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shader pack buffers (read-only)"),
+            entries: &entries(true, stages | wgpu::ShaderStages::VERTEX),
         });
         Self {
             layout,
-            objects,
             group: None,
+            read_layout,
+            read_group: None,
+            objects,
             buffers: Vec::new(),
             made_for: [0; 2],
         }
@@ -330,7 +344,7 @@ impl Buffers {
             .objects
             .iter()
             .map(|(binding, o)| {
-                let wanted = o.size(size).next_multiple_of(4);
+                let wanted = o.size(size).next_multiple_of(16);
                 if wanted > largest {
                     log::warn!(
                         "shader pack: bufferObject.{binding} wants {wanted} bytes, this device \
@@ -357,6 +371,11 @@ impl Buffers {
         self.group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shader pack buffers"),
             layout: &self.layout,
+            entries: &entries,
+        }));
+        self.read_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shader pack buffers (read-only)"),
+            layout: &self.read_layout,
             entries: &entries,
         }));
         self.made_for = size;

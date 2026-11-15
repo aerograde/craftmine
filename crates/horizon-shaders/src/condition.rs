@@ -9,7 +9,8 @@ use crate::macros::{is_ident, is_ident_start};
 
 /// The value of a condition; `Err` says what is wrong with it.
 pub fn eval_condition(expr: &str, macros: &Macros) -> Result<i64, String> {
-    let tokens = tokens(&resolve_defined(expr, macros)?, macros)?;
+    let expr = pack_equality(expr);
+    let tokens = tokens(&resolve_defined(&expr, macros)?, macros)?;
     let real = tokens
         .iter()
         .any(|t| matches!(t, Token::Num(n) if n.fract() != 0.0))
@@ -26,6 +27,43 @@ pub fn eval_condition(expr: &str, macros: &Macros) -> Result<i64, String> {
         None => Ok(value as i64),
         Some(t) => Err(format!("unexpected `{}`", t.text())),
     }
+}
+
+/// Shader packs spell equality as `NAME value` or `NAME = value` in `shaders.properties`.
+/// Neither is C, so only those two shapes are rewritten.
+fn pack_equality(expr: &str) -> String {
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    if parts.len() == 2
+        && parts[0] != "defined"
+        && parts[0].starts_with(is_ident_start)
+        && parts[0].chars().all(is_ident)
+        && (parts[1].starts_with(is_ident_start)
+            || parts[1]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || c == '.'))
+    {
+        return format!("{} == {}", parts[0], parts[1]);
+    }
+    let mut out = String::with_capacity(expr.len() + 1);
+    let mut chars = expr.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '=' {
+            let next = chars.peek().copied();
+            let prev = out.chars().next_back();
+            if next != Some('=')
+                && prev != Some('=')
+                && prev != Some('!')
+                && prev != Some('<')
+                && prev != Some('>')
+            {
+                out.push_str("==");
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The text after a line's `#`, split into the directive word and the rest without its `//`
@@ -354,6 +392,18 @@ mod tests {
         m.define("WAVES", "");
         m.define("QUALITY", "SHADOW_RES / 1024");
         eval_condition(expr, &m)
+    }
+
+    #[test]
+    fn pack_equality_spellings_work() {
+        let mut m = Macros::standard();
+        m.define("SHADOW_RES", "2048");
+        m.define("BLOOM_QUALITY", "0.75");
+        assert_eq!(eval_condition("BLOOM_QUALITY 0.75", &m), Ok(1));
+        assert_eq!(eval_condition("BLOOM_QUALITY = 0.75", &m), Ok(1));
+        assert_eq!(eval_condition("BLOOM_QUALITY = 0.5", &m), Ok(0));
+        assert_eq!(eval_condition("defined SHADOW_RES", &m), Ok(1));
+        assert_eq!(eval_condition("MC_VERSION >= 11300", &m), Ok(1));
     }
 
     #[test]

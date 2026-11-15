@@ -31,8 +31,8 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
 const sockets = new Map();
-let onEvent = null, take = null, onListen = null;
-function open(id, url, host, port, code, relays) {
+let onEvent = null, take = null, onListen = null, onChannel = null;
+function open(id, url, host, port, code, relays, protocol) {
     if (code) return joinShared(id, code, relays);
     if (!url) {
         const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -41,7 +41,7 @@ function open(id, url, host, port, code, relays) {
     }
     let ws;
     try {
-        ws = new WebSocket(url);
+        ws = protocol ? new WebSocket(url, protocol) : new WebSocket(url);
     } catch (e) {
         onEvent(id, 2, null, String(e.message ?? e));
         return;
@@ -75,6 +75,97 @@ function close(id) {
     const socket = sockets.get(id);
     sockets.delete(id);
     socket?.close();
+}
+
+// Generic WebRTC peers for Play Nearby: a description in each direction,
+// then one data channel read like the shared-world channel.
+const peers = new Map();
+function peerCreate(id, iceServers) {
+    let pc;
+    try {
+        pc = new RTCPeerConnection({ iceServers });
+    } catch (e) {
+        onEvent(id, 13, null, String(e.message ?? e));
+        return null;
+    }
+    peers.set(id, { pc, channel: null, open: false });
+    pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed") onEvent(id, 13, null, "No network path to the other player");
+        else if (pc.connectionState === "closed") onEvent(id, 13, null, "The nearby peer closed");
+    };
+    return peers.get(id);
+}
+function peerOpened(id) {
+    const p = peers.get(id);
+    if (!p || p.open) return;
+    p.open = true;
+    const socket = onChannel(id, "");
+    channelSocket(socket, p.channel, p.pc);
+    onEvent(socket, 0, null, "");
+    onEvent(id, 12, socket, "");
+}
+function peerOffer(id, iceServers, label) {
+    const p = peerCreate(id, iceServers);
+    if (!p) return;
+    p.channel = p.pc.createDataChannel(label, { ordered: true });
+    p.channel.onopen = () => peerOpened(id);
+    p.channel.onclose = () => onEvent(id, 13, null, "The nearby channel closed");
+    p.pc.createOffer()
+        .then((offer) => described(p.pc, offer))
+        .then((sdp) => onEvent(id, 10, sdp, ""))
+        .catch((e) => onEvent(id, 13, null, String(e.message ?? e)));
+}
+function peerAnswer(id, iceServers, offerJson, label) {
+    const p = peerCreate(id, iceServers);
+    if (!p) return;
+    p.pc.ondatachannel = ({ channel }) => {
+        p.channel = channel;
+        channel.onopen = () => peerOpened(id);
+        channel.onclose = () => onEvent(id, 13, null, "The nearby channel closed");
+    };
+    p.pc.setRemoteDescription(JSON.parse(offerJson))
+        .then(() => p.pc.createAnswer())
+        .then((answer) => described(p.pc, answer))
+        .then((sdp) => onEvent(id, 11, sdp, ""))
+        .catch((e) => onEvent(id, 13, null, String(e.message ?? e)));
+}
+function peerAccept(id, answerJson) {
+    const p = peers.get(id);
+    if (!p) return;
+    p.pc.setRemoteDescription(JSON.parse(answerJson))
+        .catch((e) => onEvent(id, 13, null, String(e.message ?? e)));
+}
+function peerClose(id) {
+    const p = peers.get(id);
+    peers.delete(id);
+    p?.pc.close();
+}
+// The address STUN sees for us, for the automatic room (no HTTP service).
+function publicAddress(id, iceServers) {
+    let pc;
+    try {
+        pc = new RTCPeerConnection({ iceServers });
+    } catch (e) {
+        onEvent(id, 13, null, String(e.message ?? e));
+        return;
+    }
+    pc.createDataChannel("probe", { ordered: true });
+    described(pc, pc.createOffer()).then((json) => {
+        const sdp = JSON.parse(json).sdp || "";
+        let host = null;
+        for (const line of sdp.split(/\r?\n/)) {
+            const m = /a=candidate:\S+ \d+ \S+ \d+ (\S+) \d+ typ (srflx|host)/.exec(line);
+            if (!m) continue;
+            if (m[2] === "srflx") {
+                onEvent(id, 14, m[1], "");
+                pc.close();
+                return;
+            }
+            if (!host) host = m[1];
+        }
+        onEvent(id, 14, host || "", "");
+        pc.close();
+    }).catch((e) => onEvent(id, 13, null, String(e.message ?? e)));
 }
 
 // EaglerSPRelay's packets: an id, then the fields; strings are ASCII after
@@ -145,7 +236,7 @@ function channelSocket(id, channel, pc) {
     channel.onclose = () => {
         sockets.delete(id);
         pc.close();
-        onEvent(id, 2, null, "The shared world closed the connection");
+        onEvent(id, 2, null, "The data channel closed");
     };
     sockets.set(id, {
         ready: () => channel.readyState === "open",
@@ -319,18 +410,24 @@ function listen(lid, name, relays) {
     attempt();
 }
 function onPage(data) {
-    if (data.socket === "open") open(data.id, data.url, data.host, data.port, data.code, data.relays);
+    if (data.socket === "open") open(data.id, data.url, data.host, data.port, data.code, data.relays, data.protocol);
     else if (data.socket === "flush") flush(data.id);
     else if (data.socket === "listen") listen(data.id, data.name, data.relays);
     else if (data.socket === "unlisten") {
         listeners.get(data.id)?.close();
         listeners.delete(data.id);
-    } else close(data.id);
+    } else if (data.socket === "peer_offer") peerOffer(data.id, data.ice, data.label);
+    else if (data.socket === "peer_answer") peerAnswer(data.id, data.ice, data.offer, data.label);
+    else if (data.socket === "peer_accept") peerAccept(data.id, data.answer);
+    else if (data.socket === "peer_close") peerClose(data.id);
+    else if (data.socket === "public_address") publicAddress(data.id, data.ice);
+    else close(data.id);
 }
-export function horizon_socket_install(events, taker, listening) {
+export function horizon_socket_install(events, taker, listening, channels) {
     onEvent = events;
     take = taker;
     onListen = listening;
+    onChannel = channels;
     // What workers ask of the page arrives at the worker objects the page
     // made (workers.rs), which hand it here.
     globalThis.horizonSocket = onPage;
@@ -355,7 +452,12 @@ export function horizon_socket_ask(data) {
 }
 "#)]
 extern "C" {
-    fn horizon_socket_install(events: &JsValue, take: &JsValue, listening: &JsValue);
+    fn horizon_socket_install(
+        events: &JsValue,
+        take: &JsValue,
+        listening: &JsValue,
+        channels: &JsValue,
+    );
     fn horizon_socket_ask(data: &JsValue);
     fn horizon_http_get(url: &str) -> JsValue;
 }
@@ -401,7 +503,7 @@ fn find(id: u32) -> Option<Arc<Shared>> {
 /// code and the relays to look for it on.
 #[derive(Clone, Copy)]
 enum Target<'a> {
-    Url(&'a str),
+    Url(&'a str, Option<&'a str>),
     Host(&'a str, u16),
     Shared(&'a str, &'a [String]),
 }
@@ -414,7 +516,12 @@ fn ask(what: &str, id: u32, target: Option<Target<'_>>) {
     set("socket", JsValue::from_str(what));
     set("id", JsValue::from(id));
     match target {
-        Some(Target::Url(url)) => set("url", JsValue::from_str(url)),
+        Some(Target::Url(url, protocol)) => {
+            set("url", JsValue::from_str(url));
+            if let Some(protocol) = protocol {
+                set("protocol", JsValue::from_str(protocol));
+            }
+        }
         Some(Target::Host(host, port)) => {
             set("host", JsValue::from_str(host));
             set("port", JsValue::from(port));
@@ -432,11 +539,271 @@ fn relays_array(relays: &[String]) -> js_sys::Array {
     relays.iter().map(|r| JsValue::from_str(r)).collect()
 }
 
+/// The page's side of one generic WebRTC peer (`horizon-nearby`).
+#[derive(Default)]
+struct PeerState {
+    offer: Option<String>,
+    answer: Option<String>,
+    channel: Option<u32>,
+    public: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct PeerShared {
+    state: Mutex<PeerState>,
+    ready: Condvar,
+}
+
+fn peer_map() -> &'static Mutex<HashMap<u32, Arc<PeerShared>>> {
+    static PEERS: OnceLock<Mutex<HashMap<u32, Arc<PeerShared>>>> = OnceLock::new();
+    PEERS.get_or_init(Mutex::default)
+}
+
+fn find_peer(id: u32) -> Option<Arc<PeerShared>> {
+    crate::sync::lock(peer_map())
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .cloned()
+}
+
+fn peer_event(id: u32, kind: u32, data: JsValue, reason: String) {
+    let Some(peer) = find_peer(id) else {
+        return;
+    };
+    let mut state = crate::sync::lock(&peer.state).unwrap_or_else(|e| e.into_inner());
+    match kind {
+        10 => state.offer = data.as_string(),
+        11 => state.answer = data.as_string(),
+        12 => state.channel = data.as_f64().map(|socket| socket as u32),
+        14 => state.public = data.as_string(),
+        _ => {
+            state.error = Some(if reason.is_empty() {
+                "the nearby peer closed".into()
+            } else {
+                reason
+            })
+        }
+    }
+    drop(state);
+    peer.ready.notify_all();
+}
+
+fn ice_array(ice: &[String]) -> js_sys::Array {
+    ice.iter()
+        .map(|url| {
+            let server = js_sys::Object::new();
+            let _ =
+                js_sys::Reflect::set(&server, &JsValue::from_str("urls"), &JsValue::from_str(url));
+            JsValue::from(server)
+        })
+        .collect()
+}
+
+/// One generic peer: a description each way and then a data channel. Only a
+/// worker may wait for its description.
+pub struct Peer {
+    id: u32,
+    shared: Arc<PeerShared>,
+    timeout: Duration,
+}
+
+impl Peer {
+    pub fn offer(ice: &[String], label: &str, timeout: Duration) -> io::Result<Self> {
+        Self::start("peer_offer", ice, label, None, timeout)
+    }
+    pub fn answer(ice: &[String], offer: &str, label: &str, timeout: Duration) -> io::Result<Self> {
+        Self::start("peer_answer", ice, label, Some(offer), timeout)
+    }
+    fn start(
+        what: &str,
+        ice: &[String],
+        label: &str,
+        offer: Option<&str>,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        if !crate::workers::in_worker() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the page's thread can't wait for a peer",
+            ));
+        }
+        let id = next_id();
+        let shared = Arc::new(PeerShared::default());
+        crate::sync::lock(peer_map())
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, shared.clone());
+        let data = js_sys::Object::new();
+        let set = |key: &str, value: JsValue| {
+            let _ = js_sys::Reflect::set(&data, &JsValue::from_str(key), &value);
+        };
+        set("socket", JsValue::from_str(what));
+        set("id", JsValue::from(id));
+        set("ice", ice_array(ice).into());
+        set("label", JsValue::from_str(label));
+        if let Some(offer) = offer {
+            set("offer", JsValue::from_str(offer));
+        }
+        horizon_socket_ask(&data);
+        Ok(Self {
+            id,
+            shared,
+            timeout,
+        })
+    }
+    pub fn accept_answer(&self, answer: &str) {
+        let data = js_sys::Object::new();
+        let set = |key: &str, value: JsValue| {
+            let _ = js_sys::Reflect::set(&data, &JsValue::from_str(key), &value);
+        };
+        set("socket", JsValue::from_str("peer_accept"));
+        set("id", JsValue::from(self.id));
+        set("answer", JsValue::from_str(answer));
+        horizon_socket_ask(&data);
+    }
+    pub fn wait_offer(&self) -> io::Result<String> {
+        self.wait(
+            "the local offer",
+            |state| state.offer.is_some(),
+            |state| state.offer.take(),
+        )
+    }
+    pub fn wait_answer(&self) -> io::Result<String> {
+        self.wait(
+            "the local answer",
+            |state| state.answer.is_some(),
+            |state| state.answer.take(),
+        )
+    }
+    /// Non-blocking: the local offer, once the page has it.
+    pub fn take_offer(&self) -> Option<String> {
+        crate::sync::lock(&self.shared.state)
+            .unwrap_or_else(|e| e.into_inner())
+            .offer
+            .take()
+    }
+    /// Non-blocking: the local answer, once the page has it.
+    pub fn take_answer(&self) -> Option<String> {
+        crate::sync::lock(&self.shared.state)
+            .unwrap_or_else(|e| e.into_inner())
+            .answer
+            .take()
+    }
+    /// Non-blocking: the data channel, once it opens.
+    pub fn take_channel(&self) -> io::Result<Option<WebSocket>> {
+        let id = crate::sync::lock(&self.shared.state)
+            .unwrap_or_else(|e| e.into_inner())
+            .channel
+            .take();
+        id.map(WebSocket::from_id).transpose()
+    }
+    /// Non-blocking: why the peer closed.
+    pub fn take_error(&self) -> Option<String> {
+        crate::sync::lock(&self.shared.state)
+            .unwrap_or_else(|e| e.into_inner())
+            .error
+            .take()
+    }
+    pub fn wait_channel(&self) -> io::Result<WebSocket> {
+        let id = self.wait(
+            "the data channel",
+            |state| state.channel.is_some(),
+            |state| state.channel.take(),
+        )?;
+        WebSocket::from_id(id)
+    }
+    fn wait<T>(
+        &self,
+        what: &str,
+        present: impl Fn(&PeerState) -> bool,
+        take: impl FnOnce(&mut PeerState) -> Option<T>,
+    ) -> io::Result<T> {
+        let mut state = crate::sync::lock(&self.shared.state).unwrap_or_else(|e| e.into_inner());
+        let deadline = crate::time::Instant::now() + self.timeout;
+        while !present(&state) {
+            if let Some(error) = &state.error {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    error.clone(),
+                ));
+            }
+            let left = deadline.saturating_duration_since(crate::time::Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("no {what}"),
+                ));
+            }
+            let (next, _) = crate::sync::wait_timeout_while(
+                &self.shared.state,
+                &self.shared.ready,
+                state,
+                left,
+                |state| state.error.is_none() && !present(state),
+            );
+            state = next;
+        }
+        if let Some(error) = state.error.take() {
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, error));
+        }
+        take(&mut state)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("no {what}")))
+    }
+    pub fn close(&self) {
+        crate::sync::lock(peer_map())
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+        ask("peer_close", self.id, None);
+    }
+}
+
+impl Drop for Peer {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// The address STUN sees for this page, for the automatic room.
+pub fn public_address(ice: &[String], timeout: Duration) -> io::Result<std::net::IpAddr> {
+    let peer = Peer::start("public_address", ice, "", None, timeout)?;
+    let mut state = crate::sync::lock(&peer.shared.state).unwrap_or_else(|e| e.into_inner());
+    let deadline = crate::time::Instant::now() + timeout;
+    while state.public.is_none() {
+        if let Some(error) = &state.error {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                error.clone(),
+            ));
+        }
+        let left = deadline.saturating_duration_since(crate::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let (next, _) = crate::sync::wait_timeout_while(
+            &peer.shared.state,
+            &peer.shared.ready,
+            state,
+            left,
+            |state| state.error.is_none() && state.public.is_none(),
+        );
+        state = next;
+    }
+    state
+        .public
+        .take()
+        .and_then(|ip| ip.parse().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no public address"))
+}
+
 /// Hands the page's socket code the game's side of it. Called on the page
 /// before the game starts.
 pub(crate) fn install() {
     let events = Closure::<dyn FnMut(u32, u32, JsValue, String)>::new(
         |id: u32, kind: u32, data: JsValue, reason: String| {
+            if kind >= 10 {
+                peer_event(id, kind, data, reason);
+                return;
+            }
             let Some(shared) = find(id) else { return };
             let mut state = crate::sync::lock(&shared.state).unwrap_or_else(|e| e.into_inner());
             match kind {
@@ -508,10 +875,28 @@ pub(crate) fn install() {
             0
         },
     );
-    horizon_socket_install(events.as_ref(), take.as_ref(), listening.as_ref());
+    let channels =
+        Closure::<dyn FnMut(u32, String) -> u32>::new(|_peer: u32, _label: String| -> u32 {
+            let id = next_id();
+            let shared = Arc::new(Shared::default());
+            crate::sync::lock(&shared.state)
+                .unwrap_or_else(|e| e.into_inner())
+                .open = true;
+            crate::sync::lock(sockets())
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, shared);
+            id
+        });
+    horizon_socket_install(
+        events.as_ref(),
+        take.as_ref(),
+        listening.as_ref(),
+        channels.as_ref(),
+    );
     events.forget();
     take.forget();
     listening.forget();
+    channels.forget();
 }
 
 fn next_id() -> u32 {
@@ -559,7 +944,23 @@ impl WebSocket {
 
     /// Opens a socket to a `ws:` or `wss:` URL, to read a message at a time.
     pub fn connect_url(url: &str, timeout: Duration) -> io::Result<Self> {
-        Self::open(Target::Url(url), timeout)
+        Self::open(Target::Url(url, None), timeout)
+    }
+
+    /// The same with a WebSocket subprotocol: MQTT brokers want `mqtt`.
+    pub fn connect_url_with(url: &str, protocol: &str, timeout: Duration) -> io::Result<Self> {
+        Self::open(Target::Url(url, Some(protocol)), timeout)
+    }
+
+    /// A socket the page already opened (a nearby peer's data channel).
+    pub fn from_id(id: u32) -> io::Result<Self> {
+        let shared = find(id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "the data channel is not open")
+        })?;
+        Ok(Self {
+            handle: Arc::new(Handle { id, shared }),
+            timeout: Mutex::new(None),
+        })
     }
 
     /// Joins the shared world with this code, looking for it on each relay

@@ -44,7 +44,7 @@ struct Channel {
     /// Its world (`Mixer::world_id`; 0 none).
     world: u32,
     /// The sound file it started and when, to tell another player's copy of it.
-    started: Option<(String, std::time::Instant)>,
+    started: Option<(String, horizon_os::time::Instant)>,
 }
 #[derive(Default)]
 struct Mixer {
@@ -339,7 +339,7 @@ impl MixerBackend {
             if twin {
                 c.state = State::Stopped;
             } else {
-                c.started = Some((key.to_owned(), std::time::Instant::now()));
+                c.started = Some((key.to_owned(), horizon_os::time::Instant::now()));
             }
         }
         twin

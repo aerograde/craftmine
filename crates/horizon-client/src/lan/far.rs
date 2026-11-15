@@ -6,11 +6,11 @@
 
 use super::chunks::ChunkEncoder;
 use crate::{biome::Biomes, fast_hash::FxHashMap, save::SaveDir};
+use horizon_os::time::{Duration, Instant};
 use horizon_world::registry::BlockRegistry;
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, mpsc},
-    time::{Duration, Instant},
 };
 
 /// Saved chunks being read at once, all players together.
@@ -99,7 +99,7 @@ impl Far {
         let asked = Arc::new(Mutex::new(asked));
         for n in 0..READERS {
             let (asked, read, read_one) = (asked.clone(), read.clone(), read_one.clone());
-            let _ = std::thread::Builder::new()
+            let _ = horizon_os::thread::Builder::new()
                 .name(format!("Far chunk reader #{n}"))
                 .spawn(move || {
                     loop {

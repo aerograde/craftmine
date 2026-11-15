@@ -241,11 +241,9 @@ impl Walker<'_> {
                 self.field(Ty::ItemStack, v, "buyB");
                 self.field(Ty::ItemStack, v, "sell");
             }
-            Ty::Particle => {
-                if k >= key(3818, 4) {
-                    self.field(Ty::ItemStack, v, "item");
-                    self.field(Ty::BlockState, v, "block_state");
-                }
+            Ty::Particle if k >= key(3818, 4) => {
+                self.field(Ty::ItemStack, v, "item");
+                self.field(Ty::BlockState, v, "block_state");
             }
             Ty::Hotbar => {
                 if let Tag::Compound(c) = v {
@@ -429,10 +427,8 @@ impl Walker<'_> {
                     self.field(Ty::ItemStack, v, "ArmorItem");
                 }
             }
-            "minecraft:skeleton_horse" | "minecraft:zombie_horse" => {
-                if k < key(4300, 0) {
-                    self.field(Ty::ItemStack, v, "SaddleItem");
-                }
+            "minecraft:skeleton_horse" | "minecraft:zombie_horse" if k < key(4300, 0) => {
+                self.field(Ty::ItemStack, v, "SaddleItem");
             }
             "minecraft:enderman" => self.field(Ty::BlockState, v, "carriedBlockState"),
             "minecraft:falling_block" => {
