@@ -610,10 +610,23 @@ fn mesh_heightfield(
                 grid[index(x + 1, z + 1)],
                 grid[index(x, z + 1)],
             ) {
-                let water = [a, b, c, d]
-                    .into_iter()
-                    .find_map(|column| column.surface?.water);
-                if let Some((height, state)) = water {
+                // A cell that touches water on one corner would otherwise paint a
+                // flat water plate across land at this resolution: only a cell
+                // whose four corners are all under water is water.
+                let mut water = None;
+                let mut all_water = true;
+                for column in [a, b, c, d] {
+                    match column.surface.and_then(|surface| surface.water) {
+                        Some((height, state)) => {
+                            water = Some(match water {
+                                Some((highest, shown)) if highest >= height => (highest, shown),
+                                _ => (height, state),
+                            });
+                        }
+                        None => all_water = false,
+                    }
+                }
+                if all_water && let Some((height, state)) = water {
                     let span = Span {
                         min: (height - 1) as i16,
                         max: height as i16,

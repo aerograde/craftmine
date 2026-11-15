@@ -492,8 +492,6 @@ struct ShadowCacheKey {
     snapped_camera: Option<DVec3>,
     shadow_settings_hash: u64,
     shadow_scene_revision: (u64, u64),
-    ticks: u64,
-    day_time: i64,
     shadow_uniforms_hash: u64,
 }
 
@@ -3677,8 +3675,6 @@ impl PackPost {
             snapped_camera,
             shadow_settings_hash,
             shadow_scene_revision: frame.shadow_scene_revision,
-            ticks: frame.ticks,
-            day_time: frame.pack.day_time,
             shadow_uniforms_hash,
         }
     }
@@ -4054,8 +4050,6 @@ mod tests {
             snapped_camera: Some(DVec3::ZERO),
             shadow_settings_hash: 1,
             shadow_scene_revision: (2, 3),
-            ticks: 4,
-            day_time: 5,
             shadow_uniforms_hash: 6,
         };
 
@@ -4066,7 +4060,20 @@ mod tests {
                 ..key
             }
         );
-        assert_ne!(key, ShadowCacheKey { day_time: 9, ..key });
+        assert_ne!(
+            key,
+            ShadowCacheKey {
+                sun_angle: 1.0,
+                ..key
+            }
+        );
+        assert_ne!(
+            key,
+            ShadowCacheKey {
+                snapped_camera: Some(DVec3::new(16.0, 0.0, 0.0)),
+                ..key
+            }
+        );
         assert_ne!(
             key,
             ShadowCacheKey {
