@@ -348,16 +348,21 @@ impl FrameUniforms {
         // Vanilla fades by the stronger of two linear fogs; a pack gets one: the pair (start
         // and end together) of the one that is complete nearer (OQ-36). Mixing the nearer start
         // of one with the nearer end of the other made fog begin at the camera on clear days.
-        let (fog_color, fog_start, fog_end) = match &frame.fog {
+        let (fog_color, fog_start, fog_end, fog_density) = match &frame.fog {
             Some(f) => {
                 let (start, end) = if f.environmental_end < f.render_distance_end {
                     (f.environmental_start, f.environmental_end)
                 } else {
                     (f.render_distance_start, f.render_distance_end)
                 };
-                ([f.color[0], f.color[1], f.color[2]], start, end)
+                ([f.color[0], f.color[1], f.color[2]], start, end, f.density)
             }
-            None => (frame.sky.fog_color, frame.distance * 0.9, frame.distance),
+            None => (
+                frame.sky.fog_color,
+                frame.distance * 0.9,
+                frame.distance,
+                -1.0,
+            ),
         };
         let light = shadow_light(frame, &self.shadow);
         let (shadow_view, shadow_projection) = shadow_camera(light, frame.camera, &self.shadow);
@@ -409,11 +414,12 @@ impl FrameUniforms {
                 "thunderStrength" => Value::f(&[inputs.thunder]),
                 "fogColor" => Value::f(&fog_color),
                 "skyColor" => Value::f(&frame.sky.sky_color),
-                // GL_LINEAR: vanilla's fog is linear.
-                "fogMode" => Value::i(&[9729]),
+                // GL_LINEAR: vanilla's fog is linear. GL_EXP2 underwater, as Iris
+                // selects for a pack reading `gl_Fog` (its legacy water fog).
+                "fogMode" => Value::i(&[if fog_density < 0.0 { 9729 } else { 20480 }]),
                 "fogStart" => Value::f(&[fog_start]),
                 "fogEnd" => Value::f(&[fog_end]),
-                "fogDensity" => Value::f(&[1.0]),
+                "fogDensity" => Value::f(&[fog_density.max(0.0)]),
                 "fogShape" => Value::i(&[0]),
                 "isEyeInWater" => Value::i(&[inputs.eye_in]),
                 "blindness" => Value::f(&[inputs.blindness]),

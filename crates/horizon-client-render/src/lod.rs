@@ -104,6 +104,12 @@ fn split_width(level: u8) -> i32 {
         3 => 6,
         4 => 4,
         5 => 3,
+        // The far rings are one quad a cell, so reaching farther with the same
+        // cell size is nearly free: 64-block cells to 4 km and 128 to 8 km
+        // (256 to 12 km), instead of each doubling at 1, 2 and 4 km. This is
+        // the difference between a faceted horizon and a silhouette that holds.
+        6..=7 => 4,
+        8..=9 => 3,
         _ => 2,
     }
 }
@@ -667,7 +673,11 @@ impl Plan {
         // and the shaders sample each cell's sprite at the mip its footprint
         // asks for, so the steps blend.
         let split = if infinite {
-            split_width(key.level)
+            // A tile that is already split keeps its children one width
+            // further out. Without the extra width a camera hovering over a
+            // boundary merges and splits the same tiles every replan, and the
+            // trees and cliffs inside them visibly change resolution.
+            split_width(key.level) + i32::from(previous.split.contains(&key))
         } else if previous.split.contains(&key) {
             10
         } else {
@@ -975,6 +985,8 @@ pub struct Lod {
     /// A finished mesh job may have changed the selection of its ancestors.
     reselect: bool,
     area: Option<([i32; 2], i32, u32, i32, bool, bool)>,
+    /// The camera the last update saw, for teleport detection.
+    camera_at: Option<[i32; 2]>,
     plan: Plan,
     /// Reduced far detail (`set_reduced_detail`).
     reduced_detail: bool,
@@ -1379,6 +1391,7 @@ impl Lod {
             context: lod_context,
             reselect: true,
             area: None,
+            camera_at: None,
             reduced_detail: false,
             infinite,
             min_y,
@@ -1976,6 +1989,22 @@ impl Lod {
             (((camera[1] - f64::from(MIN_Y + crate::chunk::HEIGHT)).clamp(0., 16384.)) as i32 / 32)
                 * 32;
         let camera = [camera[0].floor() as i32, camera[2].floor() as i32];
+        // A teleport leaves the sample queue full of the place that was left
+        // behind: with five sampler slots the new view could wait seconds
+        // behind tiles nobody can see. Drop the queued samples (jobs already
+        // running finish and their tiles fall out of the plan) and let the
+        // rebuilt queue issue the new view's nearest tiles at once.
+        let jumped = self.camera_at.is_some_and(|at| {
+            let dx = i64::from(camera[0]) - i64::from(at[0]);
+            let dz = i64::from(camera[1]) - i64::from(at[1]);
+            dx * dx + dz * dz > 512 * 512
+        });
+        self.camera_at = Some(camera);
+        if jumped {
+            lock(&self.shared.jobs).retain(|job| !matches!(job, Job::Sample(_)));
+            self.pending.clear();
+            self.wanted_stale = true;
+        }
         // Replan at chunk boundaries, not on every camera movement.
         let area = (
             [camera[0].div_euclid(64), camera[1].div_euclid(64)],
@@ -2981,14 +3010,15 @@ mod tests {
                     false,
                     true,
                 );
-                // Near tiles now reach the resident chunks' own grid (level 0
-                // within 128 blocks); the far horizon stays 64-block cells.
-                // The near rings are deliberately finer than a halving, which
-                // costs nodes but keeps trees readable; the guard still catches
-                // an unbounded plan. `Reduced` far detail trims these again on
-                // the low-memory web profile.
+                // Near tiles reach the resident chunks' own grid (level 0
+                // within 128 blocks); the far rings hold 64-block cells to
+                // 4 km and 128 to 8 km before doubling. The near rings are
+                // deliberately finer than a halving, which costs nodes but
+                // keeps trees readable; the guard still catches an unbounded
+                // plan. `Reduced` far detail trims these again on the
+                // low-memory web profile.
                 assert!(
-                    plan.nodes.len() < 5200,
+                    plan.nodes.len() < 6200,
                     "{camera:?} detail {detail}: {} nodes",
                     plan.nodes.len()
                 );
@@ -4491,5 +4521,36 @@ mod tests {
         lod.update(camera, 0, 32, Some(FxHashSet::default()));
         check(&lod);
         let _ = lod.removed();
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_infinite_plan() {
+        for detail in [12] {
+            let plan = Plan::with_previous_ext(
+                [0, 0],
+                detail,
+                INFINITE_CHUNKS,
+                &Plan::default(),
+                0,
+                false,
+                true,
+            );
+            let mut counts = [0usize; 24];
+            for key in &plan.nodes {
+                counts[key.level as usize] += 1;
+            }
+            let leaves: usize = plan
+                .nodes
+                .iter()
+                .filter(|k| !plan.split.contains(k))
+                .count();
+            eprintln!(
+                "detail {detail}: {} nodes, {leaves} leaves, per level {:?}, cells {}",
+                plan.nodes.len(),
+                &counts[..=INFINITE_LEVEL as usize],
+                leaves * CELLS * CELLS
+            );
+        }
     }
 }

@@ -402,21 +402,17 @@ fn heightmap(
         }
         _ => out.push(stretch(&surface)),
     }
-    // What stands above the surface: a canopy whose trunk fell outside this
-    // cell floats over an air gap. Sinking it onto the ground keeps the tree
-    // (a bare trunk reads worse than a canopy) and stops the cell becoming a
-    // plate in mid-air. Spans too far above are something else entirely — an
-    // island — and are dropped rather than dragged down.
+    // What stands above the surface: a canopy over an air gap, which is kept
+    // where it is. A canopy overhangs air in the real world, and stretching
+    // it down to the ground turned every tree into a leaf pillar from
+    // bedrock. Spans far above the surface are something else — an island —
+    // and are dropped rather than left as a plate in the sky.
     let mut reach = out.last().map_or(surface.max, |span| span.max);
     for span in &spans[top + 1..] {
-        let mut span = *span;
-        if span.min > reach && !fluid(&span) {
-            if span.min - reach > TREE_REACH {
-                break;
-            }
-            span.min = reach;
+        if span.min - reach > TREE_REACH {
+            break;
         }
-        out.push(span);
+        out.push(*span);
         reach = span.max;
     }
     Column {
@@ -428,6 +424,11 @@ fn heightmap(
 struct HeightVertex {
     height: i32,
     paint: Paint,
+    /// The material under the surface, for the cliff faces between cells. A
+    /// wall painted with the grass top turned every far cliff into a green
+    /// slab the height of the hill; the block below it is what a real chunk
+    /// shows along a cliff.
+    wall: Paint,
 }
 
 fn mesh_heightfield(
@@ -506,9 +507,34 @@ fn mesh_heightfield(
             .into_iter()
             .flatten()
             .next();
+        // The block just under the surface, seen from the side, for the walls
+        // between cells. A surface-only column (a sampled stand-in) falls back
+        // to its own material.
+        let below = column
+            .spans
+            .iter()
+            .rev()
+            .find(|below| {
+                i32::from(below.min) <= surface.height - 2
+                    && i32::from(below.max) >= surface.height - 1
+            })
+            .or_else(|| column.spans.last());
+        let wall = below.and_then(|below| {
+            let span = Span {
+                min: (surface.height - 2) as i16,
+                max: (surface.height - 1) as i16,
+                ..*below
+            };
+            material(&span, Direction::North, [wx, wz])
+                .faces
+                .into_iter()
+                .flatten()
+                .next()
+        });
         vertices.push(paint.map(|paint| HeightVertex {
             height: surface.height,
             paint,
+            wall: wall.unwrap_or(paint),
         }));
     }
 
@@ -640,7 +666,11 @@ fn mesh_heightfield(
                         .flatten()
                         .next()
                     {
-                        let vertex = HeightVertex { height, paint };
+                        let vertex = HeightVertex {
+                            height,
+                            paint,
+                            wall: paint,
+                        };
                         let y = height as f32 - 1.0 / 9.0;
                         let points = [
                             ([x0, y, z1], uv(x0, z1)),
@@ -678,6 +708,12 @@ fn mesh_heightfield(
                 return;
             }
             let (high, low) = if ya > yb { (ya, yb) } else { (yb, ya) };
+            // A cliff face shows what lies under the surface, not the grass
+            // cap: use the higher cell's under-surface material.
+            let side = HeightVertex {
+                paint: if ya >= yb { a.1.wall } else { b.1.wall },
+                ..a.1
+            };
             // The wall spans x when its two ends share a z, and z otherwise.
             let span_x = a.0[1] == b.0[1];
             let horizontal = |point: &[f32; 2]| along(if span_x { point[0] } else { point[1] });
@@ -689,7 +725,7 @@ fn mesh_heightfield(
                 ([a.0[0], low, a.0[1]], uv(&a.0, low)),
             ];
             for point in points {
-                push(mesh, a.1, point.0, point.1, false);
+                push(mesh, side, point.0, point.1, false);
             }
         };
     for z in 0..CELLS {
@@ -716,6 +752,12 @@ fn mesh_heightfield(
                       start: ([f32; 2], i32),
                       end: ([f32; 2], i32),
                       vertex: HeightVertex| {
+        // A skirt is the tile edge's exposed side: the under-surface material,
+        // like the walls.
+        let vertex = HeightVertex {
+            paint: vertex.wall,
+            ..vertex
+        };
         let (a, b) = (start.0, end.0);
         let (ya, yb) = (start.1 as f32, end.1 as f32);
         // A skirt is a wall too: u along the tile edge, v down from its top.
@@ -1782,20 +1824,19 @@ mod tests {
         };
         let flat = heightmap(&sea, fluid, true, crate::chunk::MIN_Y);
         assert_eq!(flat.spans, [span(-64, 50, 1), span(50, 62, 2)]);
-        // A tree: the canopy is sunk onto the ground rather than left as a
-        // plate in mid-air. At these cell widths the trunk is usually not the
-        // sampled column, so dropping the canopy would leave a bare trunk.
+        // A tree: a canopy over an air gap is kept where it is. Sinking it to
+        // the ground turned each canopy into a leaf pillar from bedrock.
         let tree = Column {
             surface: None,
             spans: vec![span(0, 60, 1), span(60, 64, 4), span(70, 76, 5)].into(),
         };
         assert_eq!(
             heightmap(&tree, fluid, true, crate::chunk::MIN_Y).spans,
-            [span(-64, 60, 1), span(60, 64, 4), span(64, 76, 5)]
+            [span(-64, 60, 1), span(60, 64, 4), span(70, 76, 5)]
         );
         assert_eq!(
             heightmap(&tree, fluid, false, crate::chunk::MIN_Y).spans,
-            [span(-64, 64, 4), span(64, 76, 5)]
+            [span(-64, 64, 4), span(70, 76, 5)]
         );
         // Something far above is an island, not a canopy: dropped, not dragged
         // down into a pillar.
@@ -2484,6 +2525,44 @@ mod tests {
         assert!(
             walls > 0,
             "a slope across the tile must keep its side walls, not a flat lid"
+        );
+    }
+
+    #[test]
+    fn a_cliff_face_takes_the_block_under_the_surface() {
+        // A grass cap (7) over the sub-surface block (9), with a one-block
+        // step across the tile. The top is the cap; the step's face must be
+        // the block under it — painting it with the cap turned every far
+        // cliff into a green slab the height of the hill.
+        let mut columns = columns();
+        for (i, column) in columns.iter_mut().enumerate() {
+            let height = if i / CELLS == 0 { 64 } else { 65 };
+            column.surface = Some(Surface {
+                height,
+                state: BlockStateId(7),
+                water: None,
+                biome: 0,
+            });
+            column.spans = vec![span(0, 60, 7), span(60, height as i16, 9)].into();
+        }
+        let key = TileKey {
+            x: 0,
+            z: 0,
+            level: 5,
+        };
+        let mesh = mesh_columns(key, &columns, &FxHashSet::default(), None, material);
+        let walls: Vec<u16> = mesh
+            .solid
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|q| normal(q).y.abs() < 0.01)
+            .map(|q| q[0].layer & 0x3fff)
+            .collect();
+        assert!(!walls.is_empty(), "the step must keep its wall");
+        assert!(
+            walls.iter().all(|&layer| layer == 9),
+            "a cliff face must show the sub-surface block, not the surface cap: {walls:?}"
         );
     }
 
