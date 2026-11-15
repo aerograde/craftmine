@@ -16151,6 +16151,11 @@ impl Game<'_> {
                     if let Some(r) = &mut self.renderer {
                         r.resize(size.width, size.height);
                     }
+                    // Draw at the new size at once: the surface is only reconfigured
+                    // when the frame starts, so a frame must follow every resize.
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
                 WindowEvent::RedrawRequested => {
                     if let Err(error) = self.render_closing_save() {
@@ -16292,6 +16297,9 @@ impl Game<'_> {
                         r.resize(size.width, size.height);
                     }
                     self.observe_fullscreen();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
                 WindowEvent::Focused(focused) => {
                     self.focused = focused;
