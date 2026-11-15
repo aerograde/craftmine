@@ -12,6 +12,10 @@ use std::collections::BTreeMap;
 
 const CELLS: usize = 16;
 
+/// How far above the ground a canopy may start before the height-map mesher
+/// treats it as an island rather than a tree.
+const TREE_REACH: i16 = 8;
+
 pub(super) struct EdgeColumn<'a> {
     pub start: i32,
     pub end: i32,
@@ -323,13 +327,19 @@ fn mesh_columns_with_neighbors(
         material,
     )
 }
-/// From this tile level up a cell is 8 blocks wide or more: the strata inside
+/// From this tile level up a cell is 2 blocks wide or more: the strata inside
 /// the ground cannot be told apart, so a column is its surface. The merged
-/// walls are what keep the far rings to a handful of quads per cell. Level 2
-/// (4-block cells) keeps its voxel columns: it is the ring that meets the
-/// resident chunks at a usual render distance, and its cliffs must show the
-/// same layers the real terrain does.
-const HEIGHTMAP_LEVEL: u8 = 3;
+/// walls are what keep the far rings to a handful of quads per cell. Level 0
+/// (1-block cells) keeps its voxel columns: it is the fallback band that meets
+/// the resident chunks, and its cliffs must show the same layers the real
+/// terrain does.
+///
+/// This used to start at level 3. Levels 1–2 were then meshed as voxel columns,
+/// one face per block, and the 2-block band alone produced millions of quads
+/// for a silhouette no sharper than a merged heightmap at that distance. The
+/// lip keeps the surface layer over the material beneath it, so the rings still
+/// show their strata; only the per-block side faces go away.
+const HEIGHTMAP_LEVEL: u8 = 1;
 /// `column` as a heightmap: its ground reaching down to the bottom of the
 /// world (so the walls toward lower neighbours are one face, merged along the
 /// cliff), and whatever sits above it kept as it is: the sea, and a canopy
@@ -392,15 +402,21 @@ fn heightmap(
         }
         _ => out.push(stretch(&surface)),
     }
-    // What stands above the surface only stays if it reaches down to it. A
-    // canopy whose trunk fell outside this cell is a plate in mid-air once the
-    // cell is wide, so the run stops at the first gap.
+    // What stands above the surface: a canopy whose trunk fell outside this
+    // cell floats over an air gap. Sinking it onto the ground keeps the tree
+    // (a bare trunk reads worse than a canopy) and stops the cell becoming a
+    // plate in mid-air. Spans too far above are something else entirely — an
+    // island — and are dropped rather than dragged down.
     let mut reach = out.last().map_or(surface.max, |span| span.max);
     for span in &spans[top + 1..] {
-        if span.min != reach && !fluid(span) {
-            break;
+        let mut span = *span;
+        if span.min > reach && !fluid(&span) {
+            if span.min - reach > TREE_REACH {
+                break;
+            }
+            span.min = reach;
         }
-        out.push(*span);
+        out.push(span);
         reach = span.max;
     }
     Column {
@@ -1753,20 +1769,30 @@ mod tests {
         };
         let flat = heightmap(&sea, fluid, true, crate::chunk::MIN_Y);
         assert_eq!(flat.spans, [span(-64, 50, 1), span(50, 62, 2)]);
-        // A tree: the canopy is dropped rather than kept as a plate in mid-air.
-        // At these cell widths the trunk is usually not the sampled column, so
-        // what remains is a floating slab with nothing under it.
+        // A tree: the canopy is sunk onto the ground rather than left as a
+        // plate in mid-air. At these cell widths the trunk is usually not the
+        // sampled column, so dropping the canopy would leave a bare trunk.
         let tree = Column {
             surface: None,
             spans: vec![span(0, 60, 1), span(60, 64, 4), span(70, 76, 5)].into(),
         };
         assert_eq!(
             heightmap(&tree, fluid, true, crate::chunk::MIN_Y).spans,
-            [span(-64, 60, 1), span(60, 64, 4)]
+            [span(-64, 60, 1), span(60, 64, 4), span(64, 76, 5)]
         );
         assert_eq!(
             heightmap(&tree, fluid, false, crate::chunk::MIN_Y).spans,
-            [span(-64, 64, 4)]
+            [span(-64, 64, 4), span(64, 76, 5)]
+        );
+        // Something far above is an island, not a canopy: dropped, not dragged
+        // down into a pillar.
+        let island = Column {
+            surface: None,
+            spans: vec![span(0, 60, 1), span(100, 108, 5)].into(),
+        };
+        assert_eq!(
+            heightmap(&island, fluid, true, crate::chunk::MIN_Y).spans,
+            [span(-64, 60, 1)]
         );
         // A canopy that does reach the surface stays, so a tree sampled with
         // its own trunk still reads as a tree (see the trunk case below).
@@ -1822,10 +1848,12 @@ mod tests {
             let mesh = mesh_columns(key, &rolling, &FxHashSet::default(), None, material);
             mesh.solid.len() / 4
         };
+        // `deep` is a ring whose walls are past the lip (`level <= 4`) and merge
+        // whole, so the comparison is against the ring that still shows strata.
         let (voxel, height, deep) = (
             quads(HEIGHTMAP_LEVEL - 1),
             quads(HEIGHTMAP_LEVEL),
-            quads(HEIGHTMAP_LEVEL + 2),
+            quads(HEIGHTMAP_LEVEL + 5),
         );
         // The lip buys a two-material cliff (a face along each step) in the rings
         // that show one; it must still not cost more than the voxel mesh it
@@ -2447,17 +2475,15 @@ mod tests {
     }
 
     #[test]
-    fn negative_parent_clips_chunks_without_internal_piece_walls() {
-        let mut columns = columns();
-        for column in &mut columns {
-            column.spans = vec![span(10, 12, 1)].into()
-        }
-        // Below the heightmap level: a heightmap deliberately reaches down to
-        // the world floor, which these cut faces must not need.
+    fn a_resident_tile_meshes_nothing() {
+        let columns = columns();
+        // Level 0 is one chunk, so a tile whose chunk is resident has no
+        // uncovered part left: every face would be hidden under the real
+        // terrain, and meshing it is pure waste.
         let key = TileKey {
             x: -1,
             z: -1,
-            level: 1,
+            level: 0,
         };
         let [ox, _, oz] = key.origin();
         let mut covered = FxHashSet::default();
@@ -2469,32 +2495,7 @@ mod tests {
             Some([ox, oz, ox + 16, oz + 16]),
             material,
         );
-        assert!(mesh.solid.as_chunks::<4>().0.iter().all(|q| {
-            if normal(q).y == 0.0 {
-                return true;
-            }
-            let center = q
-                .iter()
-                .map(|v| glam::Vec3::from(v.position()))
-                .sum::<glam::Vec3>()
-                / 4.0;
-            !(center.x < 16.0 && center.z < 16.0)
-        }));
-        let cuts: Vec<_> = mesh
-            .solid
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|q| {
-                (q.iter().all(|v| v.position()[0] == 16.0) && normal(q).x < 0.0)
-                    || (q.iter().all(|v| v.position()[2] == 16.0) && normal(q).z < 0.0)
-            })
-            .collect();
-        assert_eq!(cuts.len(), 2);
-        assert!(
-            cuts.iter()
-                .all(|q| q.iter().all(|v| (10.0..=12.0).contains(&v.position()[1]))),
-            "cut faces keep finite voxel bounds"
-        );
+        assert!(mesh.solid.is_empty());
+        assert!(mesh.translucent.is_empty());
     }
 }
