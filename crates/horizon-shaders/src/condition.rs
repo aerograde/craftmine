@@ -29,8 +29,8 @@ pub fn eval_condition(expr: &str, macros: &Macros) -> Result<i64, String> {
     }
 }
 
-/// Shader packs spell equality as `NAME value` or `NAME = value` in `shaders.properties`
-/// (Visual Vibrance uses both). Neither is C, so only those two shapes are rewritten.
+/// Shader packs spell equality as `NAME value` or `NAME = value` in `shaders.properties`.
+/// Neither is C, so only those two shapes are rewritten.
 fn pack_equality(expr: &str) -> String {
     let parts: Vec<&str> = expr.split_whitespace().collect();
     if parts.len() == 2

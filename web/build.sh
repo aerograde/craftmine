@@ -65,10 +65,23 @@ if [ "$profile" = release ] && [ "${WASM_OPT:-1}" != 0 ]; then
     fi
 fi
 cp web/index.html web/main.js web/audio.js web/worker.js web/sw.js "$dist/"
-if compgen -G "web/packs/*.zip" > /dev/null; then
-    mkdir -p "$dist/packs"
-    cp web/packs/*.zip "$dist/packs/"
-fi
+# The packs as a tar the served page installs into `/shaderpacks`: the single
+# file embeds the same archive. It reads `shaderpacks/` (the folder the game
+# reads natively), so the desktop and browser builds share one copy; folders
+# (the bundled MIT Miniature pack) are walked too, not only `.zip` packs.
+python3 - "$dist" <<'PY'
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("horizon_package", "web/package.py")
+package = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(package)
+out = Path(sys.argv[1]) / "packs.tar.gz"
+packs = package.pack_files()
+if packs:
+    package.packs_archive(out, packs)
+elif out.exists():
+    out.unlink()
+PY
 
 if [ "${BUNDLE:-1}" != 0 ] && { [ ! -f "$dist/fs/boot.tar.gz" ] \
     || [ "$resources/horizon-resources.json" -nt "$dist/fs/boot.tar.gz" ] \

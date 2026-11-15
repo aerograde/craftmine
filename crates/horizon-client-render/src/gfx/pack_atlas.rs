@@ -187,15 +187,24 @@ impl PackAtlas {
         // declarations above must be its formats (`Uint16x4`, ..., `Unorm8x4`).
         let body = format!(
             "    vec4 hz_origin = {origin};\n    \
-             float hz_pos_scale = hz_v_pos.w == 2u ? (1.0 / 128.0) : (hz_v_pos.w == 1u ? 16.0 : 2048.0);\n    \
-             float hz_pos_min = (hz_v_pos.w == 1u || hz_v_pos.w == 2u) ? -64.0 : -8.0;\n    \
-             vec3 hz_pos = vec3(hz_v_pos.xyz) / hz_pos_scale + hz_pos_min;\n    \
-             float hz_uv_scale = hz_v_pos.w == 0u ? 32768.0 : 32.0;\n    \
-             uint hz_layer = hz_v_layer & 32767u;\n    \
+             vec3 hz_pos;\n    \
+             if (hz_v_pos.w == 2u) {{\n        \
+                 hz_pos = vec3(float(hz_v_pos.x) * 128.0 - 64.0, float(hz_v_pos.y) / 16.0 - 64.0, float(hz_v_pos.z) * 128.0 - 64.0);\n    \
+             }} else if (hz_v_pos.w == 3u) {{\n        \
+                 hz_pos = vec3(float(hz_v_pos.x) / 4.0 - 64.0, float(hz_v_pos.y) / 16.0 - 64.0, float(hz_v_pos.z) / 4.0 - 64.0);\n    \
+             }} else if (hz_v_pos.w == 1u) {{\n        \
+                 hz_pos = vec3(hz_v_pos.xyz) / 16.0 - 64.0;\n    \
+             }} else {{\n        \
+                 hz_pos = vec3(hz_v_pos.xyz) / 2048.0 - 8.0;\n    \
+             }}\n    \
+             uint hz_layer = hz_v_layer & 16383u;\n    \
              hz_cell = vec2(float(hz_layer % {columns}u), float(hz_layer / {columns}u));\n    \
              hz_scale = vec2({:?}, {:?});\n    \
              hz_Vertex = vec4(hz_pos + hz_origin.xyz, 1.0);\n    \
-             hz_MultiTexCoord0 = vec4((hz_cell + clamp((vec2(hz_v_uv) / hz_uv_scale) * (hz_origin.w > 0.0 ? uintBitsToFloat(floatBitsToUint(hz_origin.w) & 0xff800000u) : fract(abs(hz_origin.w))), 0.0, 1.0)) * hz_scale, 0.0, 1.0);\n    \
+             float hz_uv_step = hz_origin.w > 0.0 ? uintBitsToFloat(floatBitsToUint(hz_origin.w) & 0xff800000u) : fract(abs(hz_origin.w));\n    \
+             vec2 hz_uv = vec2(hz_v_uv) * hz_uv_step;\n    \
+             hz_uv = hz_v_pos.w == 0u ? clamp(hz_uv, 0.0, 1.0) : fract(hz_uv);\n    \
+             hz_MultiTexCoord0 = vec4((hz_cell + hz_uv) * hz_scale, 0.0, 1.0);\n    \
              hz_MultiTexCoord1 = vec4(float(hz_v_light.y), float(hz_v_light.x), 0.0, 1.0);\n    \
              hz_MultiTexCoord2 = hz_MultiTexCoord1;\n    \
              hz_Color = vec4(hz_v_color.rgb, 1.0);\n    \
@@ -339,5 +348,87 @@ mod tests {
         // Layer 4 (second array, its second layer) is in row 1, column 1.
         assert_eq!([red(0, 0), red(2, 0), red(4, 0)], [0, 40, 80]);
         assert_eq!([red(1, 3), red(3, 2), red(5, 2)], [120, 160, 0]);
+    }
+
+    /// A sprite lives between a section's two UV corners, not in one texel of it. The
+    /// vertex stores `uv * 32768` and the instance carries `step = 1/32768`; dividing by
+    /// the same 32768 a second time collapsed every fragment onto the sprite's corner,
+    /// which is what made the whole world flat-coloured under a pack.
+    #[test]
+    fn a_sprite_uv_spans_the_sprite() {
+        let inputs = test_atlas_inputs();
+        if inputs.is_empty() {
+            return;
+        }
+        assert!(
+            inputs.contains("vec2 hz_uv = vec2(hz_v_uv) * hz_uv_step;"),
+            "a sprite UV is its stored fixed-point value times the instance's step"
+        );
+        // The bug took two spellings: dividing by the atlas's own scale, and dividing by
+        // the step's denominator by hand. Either one leaves the sprite a single texel.
+        assert!(
+            !inputs.contains("/ hz_uv_scale") && !inputs.contains("/ 32768.0"),
+            "the stored UV is already fixed point at the step's denominator: dividing \
+             again collapses the sprite to one texel"
+        );
+        // A tiled vertex's UV runs in blocks across a whole face. It must wrap once per
+        // block, or the face samples the atlas cells beside its sprite (rainbow stripes).
+        assert!(
+            inputs.contains("hz_v_pos.w == 0u ? clamp(hz_uv, 0.0, 1.0) : fract(hz_uv)"),
+            "tiled UVs wrap per block; section UVs stay inside their sprite"
+        );
+    }
+
+    /// `PackAtlas::terrain_inputs`'s vertex body, over a 1x1 atlas.
+    fn test_atlas_inputs() -> String {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return String::new();
+        };
+        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&Default::default()))
+        else {
+            return String::new();
+        };
+        let arrays = sprite_arrays(&device, &queue, 1, 1, 2);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let atlas = PackAtlas::new(&device, &mut encoder, &arrays, 1, 1, 2).unwrap();
+        atlas.terrain_inputs(false, false).body
+    }
+
+    fn sprite_arrays(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        split: u32,
+        layers: u32,
+        sprite: u32,
+    ) -> Vec<wgpu::Texture> {
+        (0..1)
+            .map(|_| {
+                let count = layers.min(split);
+                let pixels: Vec<u8> = (0..count)
+                    .flat_map(|l| [l as u8 * 40, 0, 0, 255].repeat(4))
+                    .collect();
+                wgpu::util::DeviceExt::create_texture_with_data(
+                    device,
+                    queue,
+                    &wgpu::TextureDescriptor {
+                        label: None,
+                        size: wgpu::Extent3d {
+                            width: sprite,
+                            height: sprite,
+                            depth_or_array_layers: count,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &pixels,
+                )
+            })
+            .collect()
     }
 }

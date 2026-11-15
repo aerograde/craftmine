@@ -28,6 +28,13 @@ mod vegetation;
 use islands::EndIslands;
 use vegetation::Vegetation;
 const CACHE: usize = 1024;
+/// From this cell width up the LOD mesher draws a continuous heightfield,
+/// which reads only the surface and its top material. Keeping every block span
+/// for a far tile would make the sample payload, not the mesh, the horizon's
+/// memory cost. Must match `HEIGHTFIELD_CELL`: a compacted column handed to
+/// the voxel mesher is a single surface span, which it stretches down to the
+/// world floor — a giant grass wall where a hill should be.
+const COARSE_WIDTH: i32 = 16;
 /// Chunks waiting for decoration: enough batches to keep every thread busy.
 const REQUESTS: usize = 1024;
 /// Chunks a side a decoration batch emits. Each needs a two-chunk border of
@@ -423,7 +430,7 @@ pub(super) struct VanillaLodSampler {
     cache: FxHashMap<(i32, i32), Arc<[Column; 256]>>,
     order: VecDeque<(i32, i32)>,
     details: Vec<LodDetail>,
-    /// Reduced far detail: `lod_grid` approximates wide cells.
+    /// Reduced far detail: finite `lod_grid` approximates wide cells.
     approximate: bool,
     /// Infinite terrain: seed samples only. No chunk protos, features or
     /// decoration, and no detail cache growth.
@@ -543,13 +550,18 @@ impl LodSampler for VanillaLodSampler {
         if let Some(columns) = cached_grid(&self.cache, x, z, width, side) {
             return columns;
         }
+        // Exact by default everywhere; Reduced far detail is the only
+        // approximation, and only for finite LODs. Infinite terrain reads the
+        // same world points at every level: `x`/`z` are tile corners (multiples
+        // of 16) and the sampler's lattice is 4 blocks, so a cell's corners are
+        // sampled, not interpolated across a wider cell. Sampling the whole
+        // grid in one volume is also what keeps the far rings affordable: one
+        // pass per tile, not one per vertex.
         let samples = match self.worker.lod_grid(
-            x + width / 2,
-            z + width / 2,
+            x,
+            z,
             width,
             side,
-            // Exact by default everywhere. Reduced far detail is the only
-            // approximation, and only for wide cells.
             if self.infinite {
                 false
             } else {
@@ -580,7 +592,7 @@ impl LodSampler for VanillaLodSampler {
                         width as usize,
                     );
                 }
-                self.preview_column(wx + width / 2, wz + width / 2, width, surface, spans)
+                self.preview_column(wx, wz, width, surface, &spans)
             })
             .collect()
     }
@@ -592,37 +604,52 @@ impl VanillaLodSampler {
         z: i32,
         width: i32,
         surface: Option<SurfaceSample>,
-        spans: Vec<(i32, i32, BlockStateId)>,
+        spans: &[(i32, i32, BlockStateId)],
     ) -> Column {
         let surface = surface.map(|sample| self.generator.client_surface(sample));
-        let biome = surface.map_or(0, |surface| surface.biome);
-        let registry = self.generator.generator.data().registry();
+        let nether = self.generator.dimension == "minecraft:the_nether";
+        let light = if nether { 0 } else { 240 };
         let mut column = Column {
             surface,
             spans: crate::lod::Spans::new(),
         };
-        for (min, max, state) in spans.into_iter().rev() {
+        // From `COARSE_WIDTH` up the mesher draws a heightfield, which reads
+        // only the surface and its top material. Building the full span list
+        // for those rings was most of the far sampler's cost, and every span
+        // past the top was dropped right after.
+        if width >= COARSE_WIDTH {
+            if let Some(surface) = surface {
+                column.push(Span {
+                    min: (surface.height - 1) as i16,
+                    max: surface.height as i16,
+                    state: surface.state,
+                    biome: surface.biome,
+                    light,
+                });
+            }
+            self.vegetation.apply(&mut column, x, z, width, light);
+            self.islands.apply(&mut column, x, z, width, light);
+            return column;
+        }
+        let biome = surface.map_or(0, |surface| surface.biome);
+        let registry = self.generator.generator.data().registry();
+        for &(min, max, state) in spans.iter().rev() {
             column.push(Span {
                 min: min as i16,
                 max: max as i16,
                 state,
                 biome,
-                light: if self.generator.dimension == "minecraft:the_nether" {
-                    0
-                } else {
-                    240
-                } | if registry
-                    .state(state)
-                    .is_some_and(|s| s.name == "minecraft:lava")
-                {
-                    15 << 12
-                } else {
-                    0
-                },
+                light: light
+                    | if registry
+                        .state(state)
+                        .is_some_and(|s| s.name == "minecraft:lava")
+                    {
+                        15 << 12
+                    } else {
+                        0
+                    },
             });
         }
-        let nether = self.generator.dimension == "minecraft:the_nether";
-        let light = if nether { 0 } else { 240 };
         // Seed-stable vegetation in both modes: without it the horizon beyond
         // the resident chunks is bare terrain and every tree pops in only when
         // its real chunk arrives. The vegetation is deterministic from the
@@ -673,6 +700,34 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
+    fn infinite_lattice_point_keeps_its_surface_at_every_width() -> crate::Result<()> {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES").expect("resources"),
+        );
+        let assets = crate::assets::Assets::load(&root)?;
+        let biomes = crate::biome::Biomes::load(&root)?;
+        let terrain = Arc::new(VanillaTerrain::new(
+            &root.join("worldgen"),
+            assets.registry,
+            &biomes,
+            1234,
+        )?);
+        let mut sampler = VanillaLodSampler::new(terrain);
+        sampler.set_infinite(true);
+        let expected = sampler.grid(0, 0, 1, 1)[0].surface;
+        assert!(expected.is_some(), "the test point must be inside terrain");
+        for width in [2, 4, 8, 16, 32, 64, 128, 256, 512] {
+            let surface = sampler.grid(0, 0, width, 1)[0].surface;
+            assert_eq!(
+                surface, expected,
+                "a coarse cell moved the shared lattice point at width {width}"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
     fn decorated_lod_refines_real_seed_canopies_and_all_dimensions() -> crate::Result<()> {
@@ -733,10 +788,43 @@ mod tests {
             forest_count > 1000 && forest_count > plains_count * 4,
             "feature-derived vegetation density: forest={forest_count}, plains={plains_count}"
         );
-        for width in [16, 32, 128, 512, 1024] {
+        for width in [8, 16, 32, 128, 512, 1024] {
             assert!(
-                leaves(&planted(grass, forest, width, 0, 0)),
-                "forest canopy missing at scale {width}"
+                !leaves(&planted(grass, forest, width, 0, 0)),
+                "a cell {width} blocks wide would turn one tree into a slab"
+            );
+        }
+        let a = planted(grass, forest, 2, 5, 7);
+        let b = planted(grass, forest, 2, 5, 7);
+        assert_eq!(a, b, "tree placement must not depend on request order");
+        // A four-block cell covers four possible tree origins, so testing the
+        // exact corner only drew a trunk for one tree in four: the rest were
+        // canopies in mid-air. Every cell that owns a tree's origin draws its
+        // trunk, and its canopy sits on top of it.
+        let logs = |column: &Column| {
+            column.spans.iter().any(|span| {
+                assets
+                    .registry
+                    .state(span.state)
+                    .unwrap()
+                    .name
+                    .ends_with("_log")
+            })
+        };
+        let mut origins = Vec::new();
+        for z in 0..32 {
+            for x in 0..32 {
+                if logs(&planted(grass, forest, 1, x, z)) {
+                    origins.push((x, z));
+                }
+            }
+        }
+        assert!(origins.len() >= 4, "the forest must plant some trees");
+        for (tx, tz) in origins {
+            let column = planted(grass, forest, 4, tx.div_euclid(4) * 4, tz.div_euclid(4) * 4);
+            assert!(
+                logs(&column),
+                "a four-block cell holding the tree at ({tx}, {tz}) drew no trunk"
             );
         }
         // The End's chorus plants come from the biome's own feature data: only
@@ -793,7 +881,9 @@ mod tests {
             assets.registry.state(top.state).unwrap().name,
             "minecraft:chorus_flower"
         );
-        assert_eq!(stem.surface.unwrap().height, i32::from(top.max));
+        // The end stone stays the ground: recording the plant as the surface
+        // made the heightmap rings stretch the stem down to bedrock.
+        assert_eq!(stem.surface.unwrap().height, 80);
         let mut wide = 0;
         for width in [2, 4] {
             for z in (0..64).step_by(2) {

@@ -1,8 +1,8 @@
 //! Exposed voxel-column faces, merged without changing their block-scale UVs.
-use super::{Column, Span, Spans, TileKey};
+use super::{Column, HEIGHTFIELD_CELL, Span, Spans, TileKey};
 use crate::{
     fast_hash::{FxHashMap, FxHashSet},
-    mesher::{OPAQUE_LAYER, SectionMesh, TerrainVertex, fluid_face},
+    mesher::{OPAQUE_LAYER, SectionMesh, TILED_UV_STEPS, TerrainVertex, fluid_face},
     streaming::WorkerContext,
 };
 use horizon_assets::model::Direction;
@@ -392,14 +392,357 @@ fn heightmap(
         }
         _ => out.push(stretch(&surface)),
     }
+    // What stands above the surface only stays if it reaches down to it. A
+    // canopy whose trunk fell outside this cell is a plate in mid-air once the
+    // cell is wide, so the run stops at the first gap.
+    let mut reach = out.last().map_or(surface.max, |span| span.max);
     for span in &spans[top + 1..] {
+        if span.min != reach && !fluid(span) {
+            break;
+        }
         out.push(*span);
+        reach = span.max;
     }
     Column {
         surface: column.surface,
         spans: out,
     }
 }
+#[derive(Clone, Copy)]
+struct HeightVertex {
+    height: i32,
+    paint: Paint,
+}
+
+fn mesh_heightfield(
+    key: TileKey,
+    columns: &[&Column],
+    covered: &FxHashSet<(i32, i32)>,
+    covered_bounds: Option<[i32; 4]>,
+    neighbors: &[Vec<EdgeColumn<'_>>; 4],
+    finer: &[TileKey],
+    material: &mut impl FnMut(&Span, Direction, [i32; 2]) -> Material,
+) -> SectionMesh {
+    let stride = key.size() / CELLS as i32;
+    let [ox, _, oz] = key.origin();
+    let mut grid: Vec<Option<&Column>> = vec![None; (CELLS + 1) * (CELLS + 1)];
+    for z in 0..CELLS {
+        for x in 0..CELLS {
+            grid[z * (CELLS + 1) + x] = Some(columns[z * CELLS + x]);
+        }
+    }
+    let edge_column = |side: usize, offset: i32| {
+        neighbors[side]
+            .iter()
+            .find_map(|edge| (edge.start <= offset && offset < edge.end).then_some(edge.column))
+    };
+    for z in 0..CELLS {
+        let offset = z as i32 * stride;
+        grid[z * (CELLS + 1) + CELLS] =
+            edge_column(1, offset).or_else(|| grid[z * (CELLS + 1) + CELLS - 1]);
+    }
+    for x in 0..CELLS {
+        let offset = x as i32 * stride;
+        grid[CELLS * (CELLS + 1) + x] =
+            edge_column(3, offset).or_else(|| grid[(CELLS - 1) * (CELLS + 1) + x]);
+    }
+    grid[CELLS * (CELLS + 1) + CELLS] =
+        grid[CELLS * (CELLS + 1) + CELLS - 1].or(grid[(CELLS - 1) * (CELLS + 1) + CELLS]);
+
+    let top_span = |column: &Column| -> Option<Span> {
+        let surface = column.surface?;
+        column
+            .spans
+            .iter()
+            .rev()
+            .find(|span| {
+                i32::from(span.min) < surface.height && i32::from(span.max) >= surface.height
+            })
+            .or_else(|| column.spans.last())
+            .map(|span| Span {
+                min: (surface.height - 1) as i16,
+                max: surface.height as i16,
+                state: surface.state,
+                biome: surface.biome,
+                light: span.light,
+            })
+    };
+    let mut vertices: Vec<Option<HeightVertex>> = Vec::with_capacity(grid.len());
+    for (index, column) in grid.iter().enumerate() {
+        let Some(column) = column else {
+            vertices.push(None);
+            continue;
+        };
+        let Some(surface) = column.surface else {
+            vertices.push(None);
+            continue;
+        };
+        let Some(span) = top_span(column) else {
+            vertices.push(None);
+            continue;
+        };
+        let (wx, wz) = (
+            ox + (index % (CELLS + 1)) as i32 * stride,
+            oz + (index / (CELLS + 1)) as i32 * stride,
+        );
+        let paint = material(&span, Direction::Up, [wx, wz])
+            .faces
+            .into_iter()
+            .flatten()
+            .next();
+        vertices.push(paint.map(|paint| HeightVertex {
+            height: surface.height,
+            paint,
+        }));
+    }
+
+    // A cell is skipped only when it is entirely under resident terrain: the
+    // test used to look at the cell's origin chunk alone, so a 32-block cell
+    // whose first chunk was resident stopped drawing while its other three
+    // chunks were not, and one whose origin chunk was *not* resident drew over
+    // the resident chunks: terrain z-fighting and stray far blocks.
+    let hidden = |x: i32, z: i32, size: i32| {
+        // Only cells that reach the resident rectangle can touch a resident
+        // chunk: the scan below is per chunk, and a 512-block cell would ask
+        // it 1,024 times. Off the rectangle the answer is always "not hidden".
+        let reaches_covered = covered_bounds
+            .is_none_or(|[x0, z0, x1, z1]| x < x1 && x + size > x0 && z < z1 && z + size > z0);
+        let chunks = |a: i32, size: i32| a.div_euclid(16)..=(a + size - 1).div_euclid(16);
+        // A cell that touches a resident chunk is dropped whole: drawing it
+        // over the real terrain z-fights, and the finer tiles cover that area.
+        (reaches_covered
+            && chunks(x, size).any(|cx| {
+                chunks(z, size)
+                    .clone()
+                    .any(|cz| covered.contains(&(cx, cz)))
+            }))
+            || finer.iter().any(|fine| {
+                let [fx, _, fz] = fine.origin();
+                let fs = fine.size();
+                fx < x + size && fx + fs > x && fz < z + size && fz + fs > z
+            })
+    };
+
+    // `TerrainVertex::tiled` packs UVs at `TILED_UV_STEPS` per block into 16
+    // bits, so a tile-local UV saturates 2048 blocks into the tile. The far
+    // rings are 4096 to 8192 blocks wide: past that limit every vertex would
+    // take the same capped UV, and its zero derivative picked mip 0, stretching
+    // one texel over the whole ring. Those tiles count UVs from their own cell
+    // instead: one cell is a few pixels there, so the phase reset is invisible,
+    // while the derivative (and so the mip) stays right.
+    let relative = key.size() as f32 > (u16::MAX as f32) / TILED_UV_STEPS;
+    let mut mesh = SectionMesh::default();
+    let index = |x: usize, z: usize| z * (CELLS + 1) + x;
+    let push = |mesh: &mut SectionMesh,
+                vertex: HeightVertex,
+                pos: [f32; 3],
+                uv: [f32; 2],
+                translucent: bool| {
+        mesh.note_sprite_layer(vertex.paint.layer);
+        let out = if translucent {
+            &mut mesh.translucent
+        } else {
+            &mut mesh.solid
+        };
+        out.push(TerrainVertex::tiled(
+            pos,
+            uv,
+            vertex.paint.layer,
+            vertex.paint.color,
+            vertex.paint.light,
+        ));
+    };
+    for z in 0..CELLS {
+        for x in 0..CELLS {
+            let wx = ox + x as i32 * stride;
+            let wz = oz + z as i32 * stride;
+            if hidden(wx, wz, stride) {
+                continue;
+            }
+            let (Some(a), Some(b), Some(c), Some(d)) = (
+                vertices[index(x, z)],
+                vertices[index(x + 1, z)],
+                vertices[index(x + 1, z + 1)],
+                vertices[index(x, z + 1)],
+            ) else {
+                continue;
+            };
+            let (x0, z0) = ((x as i32 * stride) as f32, (z as i32 * stride) as f32);
+            let (x1, z1) = (x0 + stride as f32, z0 + stride as f32);
+            // Non-negative on both axes: `TerrainVertex::tiled` clamps to `u16`,
+            // so a negated v pinned every top face to one texel row.
+            let uv = |px: f32, pz: f32| {
+                if relative {
+                    [px - x0, z1 - pz]
+                } else {
+                    [px, key.size() as f32 - pz]
+                }
+            };
+            let points = [
+                ([x0, d.height as f32, z1], uv(x0, z1)),
+                ([x1, c.height as f32, z1], uv(x1, z1)),
+                ([x1, b.height as f32, z0], uv(x1, z0)),
+                ([x0, a.height as f32, z0], uv(x0, z0)),
+            ];
+            let values = [d, c, b, a];
+            for i in 0..4 {
+                push(&mut mesh, values[i], points[i].0, points[i].1, false);
+            }
+            if let (Some(a), Some(b), Some(c), Some(d)) = (
+                grid[index(x, z)],
+                grid[index(x + 1, z)],
+                grid[index(x + 1, z + 1)],
+                grid[index(x, z + 1)],
+            ) {
+                let water = [a, b, c, d]
+                    .into_iter()
+                    .find_map(|column| column.surface?.water);
+                if let Some((height, state)) = water {
+                    let span = Span {
+                        min: (height - 1) as i16,
+                        max: height as i16,
+                        state,
+                        biome: a.surface.map_or(0, |surface| surface.biome),
+                        light: 240,
+                    };
+                    if let Some(paint) = material(&span, Direction::Up, [wx, wz])
+                        .faces
+                        .into_iter()
+                        .flatten()
+                        .next()
+                    {
+                        let vertex = HeightVertex { height, paint };
+                        let y = height as f32 - 1.0 / 9.0;
+                        let points = [
+                            ([x0, y, z1], uv(x0, z1)),
+                            ([x1, y, z1], uv(x1, z1)),
+                            ([x1, y, z0], uv(x1, z0)),
+                            ([x0, y, z0], uv(x0, z0)),
+                        ];
+                        for i in 0..4 {
+                            push(&mut mesh, vertex, points[i].0, points[i].1, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The ground between two samples: a heightfield's top alone drew a smooth
+    // lid over every cliff, which is what read as a blob. Each cell edge whose
+    // neighbours differ drops a wall from the higher top to the lower one, so a
+    // far cliff keeps its silhouette (and its material) instead of a bevel.
+    // A vertical face's UV runs along the wall in u (so it follows whichever
+    // horizontal axis the wall spans) and up the wall in v. The top faces'
+    // top-down v put the whole cliff on one texel row.
+    let along = |p: f32| {
+        if relative {
+            let cell = stride as f32;
+            p - (p / cell).floor() * cell
+        } else {
+            p
+        }
+    };
+    let wall =
+        |mesh: &mut SectionMesh, a: ([f32; 2], HeightVertex), b: ([f32; 2], HeightVertex)| {
+            let (ya, yb) = (a.1.height as f32, b.1.height as f32);
+            if (ya - yb).abs() < 1.0 {
+                return;
+            }
+            let (high, low) = if ya > yb { (ya, yb) } else { (yb, ya) };
+            // The wall spans x when its two ends share a z, and z otherwise.
+            let span_x = a.0[1] == b.0[1];
+            let horizontal = |point: &[f32; 2]| along(if span_x { point[0] } else { point[1] });
+            let uv = |point: &[f32; 2], y: f32| [horizontal(point), high - y];
+            let points = [
+                ([a.0[0], high, a.0[1]], uv(&a.0, high)),
+                ([b.0[0], high, b.0[1]], uv(&b.0, high)),
+                ([b.0[0], low, b.0[1]], uv(&b.0, low)),
+                ([a.0[0], low, a.0[1]], uv(&a.0, low)),
+            ];
+            for point in points {
+                push(mesh, a.1, point.0, point.1, false);
+            }
+        };
+    for z in 0..CELLS {
+        for x in 0..CELLS {
+            let at = |x: usize, z: usize| {
+                let (wx, wz) = (x as i32 * stride, z as i32 * stride);
+                vertices[index(x, z)].map(|vertex| ([wx as f32, wz as f32], vertex))
+            };
+            if let (Some(a), Some(b)) = (at(x, z), at(x + 1, z)) {
+                wall(&mut mesh, a, b);
+            }
+            if let (Some(a), Some(b)) = (at(x, z), at(x, z + 1)) {
+                wall(&mut mesh, a, b);
+            }
+        }
+    }
+
+    // Cracks at a tile edge are sub-block: neighbouring tiles sample the same
+    // lattice, so only the interpolated interior of a quad can differ. One
+    // block closes them. Dropping a whole cell of wall instead turned every
+    // far tile border into a visible ring, most obviously over water.
+    let skirt = 1.0;
+    let skirt_quad = |mesh: &mut SectionMesh,
+                      start: ([f32; 2], i32),
+                      end: ([f32; 2], i32),
+                      vertex: HeightVertex| {
+        let (a, b) = (start.0, end.0);
+        let (ya, yb) = (start.1 as f32, end.1 as f32);
+        // A skirt is a wall too: u along the tile edge, v down from its top.
+        let span_x = a[1] == b[1];
+        let horizontal = |point: &[f32; 2]| along(if span_x { point[0] } else { point[1] });
+        let top = [
+            ([a[0], ya, a[1]], [horizontal(&a), 0.0]),
+            ([b[0], yb, b[1]], [horizontal(&b), 0.0]),
+        ];
+        let bottom = [
+            ([b[0], yb - skirt, b[1]], [horizontal(&b), skirt]),
+            ([a[0], ya - skirt, a[1]], [horizontal(&a), skirt]),
+        ];
+        for point in [top[0], top[1], bottom[0], bottom[1]] {
+            push(mesh, vertex, point.0, point.1, false);
+        }
+        for point in [bottom[1], bottom[0], top[1], top[0]] {
+            push(mesh, vertex, point.0, point.1, false);
+        }
+    };
+    for z in 0..CELLS {
+        for (x, west) in [(0usize, true), (CELLS, false)] {
+            let (Some(a), Some(b)) = (vertices[index(x, z)], vertices[index(x, z + 1)]) else {
+                continue;
+            };
+            let px = if west { 0.0 } else { key.size() as f32 };
+            skirt_quad(
+                &mut mesh,
+                ([px, (z as i32 * stride) as f32], a.height),
+                ([px, ((z as i32 + 1) * stride) as f32], b.height),
+                a,
+            );
+        }
+    }
+    for x in 0..CELLS {
+        for (z, north) in [(0usize, true), (CELLS, false)] {
+            let (Some(a), Some(b)) = (vertices[index(x, z)], vertices[index(x + 1, z)]) else {
+                continue;
+            };
+            let pz = if north { 0.0 } else { key.size() as f32 };
+            skirt_quad(
+                &mut mesh,
+                ([(x as i32 * stride) as f32, pz], a.height),
+                ([((x as i32 + 1) * stride) as f32, pz], b.height),
+                a,
+            );
+        }
+    }
+
+    for v in mesh.solid.iter_mut().chain(mesh.translucent.iter_mut()) {
+        v.layer |= 0x4000;
+    }
+    mesh.finish_sprite_layers();
+    mesh
+}
+
 fn mesh_columns_with_edges(
     key: TileKey,
     columns: &[&Column],
@@ -411,6 +754,17 @@ fn mesh_columns_with_edges(
     mut material: impl FnMut(&Span, Direction, [i32; 2]) -> Material,
 ) -> SectionMesh {
     assert_eq!(columns.len(), CELLS * CELLS);
+    if key.size() / CELLS as i32 >= HEIGHTFIELD_CELL {
+        return mesh_heightfield(
+            key,
+            columns,
+            covered,
+            covered_bounds,
+            neighbors,
+            finer,
+            &mut material,
+        );
+    }
     // The heightmap columns are built here and borrowed like the tile's own.
     let heightmap_columns: Vec<Column>;
     let heightmap_refs: Vec<&Column>;
@@ -754,18 +1108,19 @@ fn mesh_columns_with_edges(
 
 #[cfg(test)]
 mod refinement_tests {
+    use super::super::Surface;
     use super::*;
     #[test]
     fn fallback_mesh_leaves_exactly_the_fine_tiles_footprints_empty() {
         let parent = TileKey {
             x: -1,
             z: -1,
-            level: 5,
+            level: 2,
         };
         // Smaller than one coarse cell, away from the parent's outer edges.
         let fine = TileKey {
-            x: -17,
-            z: -17,
+            x: -3,
+            z: -3,
             level: 0,
         };
         let columns = vec![
@@ -845,6 +1200,93 @@ mod refinement_tests {
             );
         }
         assert_eq!(area, (parent.size() * parent.size() - 256) as f32);
+    }
+
+    #[test]
+    fn heightfield_cuts_out_a_finer_tile_footprint() {
+        let parent = TileKey {
+            x: 0,
+            z: 0,
+            level: 5,
+        };
+        let fine = TileKey {
+            x: 4,
+            z: 4,
+            level: 0,
+        };
+        let columns: Vec<Column> = (0..CELLS * CELLS)
+            .map(|_| Column {
+                surface: Some(Surface {
+                    height: 8,
+                    state: BlockStateId(1),
+                    water: None,
+                    biome: 0,
+                }),
+                spans: vec![Span {
+                    min: 0,
+                    max: 8,
+                    state: BlockStateId(1),
+                    biome: 0,
+                    light: 240,
+                }]
+                .into(),
+            })
+            .collect();
+        let refs: Vec<&Column> = columns.iter().collect();
+        let mesh = mesh_columns_with_edges(
+            parent,
+            &refs,
+            &FxHashSet::default(),
+            None,
+            &[Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            &[fine],
+            crate::chunk::MIN_Y,
+            |_, _, _| Material {
+                faces: [
+                    Some(Paint {
+                        layer: 1,
+                        light: 240,
+                        color: u32::MAX,
+                        translucent: false,
+                    }),
+                    None,
+                ],
+                fluid: 0,
+                opaque: true,
+            },
+        );
+        let stride = parent.size() / CELLS as i32;
+        let mut area = 0.0;
+        for quad in mesh.solid.as_chunks::<4>().0 {
+            if !quad.iter().all(|v| v.position()[1] == 8.0) {
+                continue;
+            }
+            let a = glam::Vec3::from(quad[0].position());
+            let b = glam::Vec3::from(quad[1].position());
+            let c = glam::Vec3::from(quad[2].position());
+            area += (b - a).cross(c - a).y;
+            let [fx, _, fz] = fine.origin();
+            let (x0, x1) = quad
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(v.position()[0]), hi.max(v.position()[0]))
+                });
+            let (z0, z1) = quad
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(v.position()[2]), hi.max(v.position()[2]))
+                });
+            assert!(
+                (x1.min((fx + 16) as f32) - x0.max(fx as f32)).max(0.0)
+                    * (z1.min((fz + 16) as f32) - z0.max(fz as f32)).max(0.0)
+                    == 0.0,
+                "heightfield top overlaps the finer tile"
+            );
+        }
+        assert_eq!(
+            area,
+            (parent.size() * parent.size() - stride * stride) as f32
+        );
     }
 }
 
@@ -1197,6 +1639,7 @@ fn emit_quad(mesh: &mut SectionMesh, key: FaceKey, rect: Rect, uv_scale: f32) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Surface;
     use super::*;
     fn span(min: i16, max: i16, state: u32) -> Span {
         Span {
@@ -1310,20 +1753,23 @@ mod tests {
         };
         let flat = heightmap(&sea, fluid, true, crate::chunk::MIN_Y);
         assert_eq!(flat.spans, [span(-64, 50, 1), span(50, 62, 2)]);
-        // A tree: the canopy stays a canopy over the air gap under it, never a
-        // leaf column from the world floor that vanished when the chunk loaded.
+        // A tree: the canopy is dropped rather than kept as a plate in mid-air.
+        // At these cell widths the trunk is usually not the sampled column, so
+        // what remains is a floating slab with nothing under it.
         let tree = Column {
             surface: None,
             spans: vec![span(0, 60, 1), span(60, 64, 4), span(70, 76, 5)].into(),
         };
         assert_eq!(
             heightmap(&tree, fluid, true, crate::chunk::MIN_Y).spans,
-            [span(-64, 60, 1), span(60, 64, 4), span(70, 76, 5)]
+            [span(-64, 60, 1), span(60, 64, 4)]
         );
         assert_eq!(
             heightmap(&tree, fluid, false, crate::chunk::MIN_Y).spans,
-            [span(-64, 64, 4), span(70, 76, 5)]
+            [span(-64, 64, 4)]
         );
+        // A canopy that does reach the surface stays, so a tree sampled with
+        // its own trunk still reads as a tree (see the trunk case below).
         // With the surface recorded (every seed column records it), the trunk
         // is not mistaken for the ground either: the ground ends at the
         // surface, and the trunk and canopy stay above it.
@@ -1899,6 +2345,12 @@ mod tests {
         let build = |level| {
             let mut columns = columns();
             for column in &mut columns {
+                column.surface = Some(Surface {
+                    height: 3,
+                    state: BlockStateId(1),
+                    water: None,
+                    biome: 0,
+                });
                 column.spans = vec![span(0, 3, 1)].into();
             }
             mesh_columns(
@@ -1912,14 +2364,85 @@ mod tests {
         let far = build(HEIGHTMAP_LEVEL);
         let near = build(HEIGHTMAP_LEVEL - 1);
         assert!(!far.solid.is_empty(), "the far tile meshes");
+        assert_eq!(
+            far.solid.len() % 4,
+            0,
+            "heightfield emits quads, not triangles"
+        );
         assert!(
             far.solid.iter().all(|v| v.layer & 0x4000 != 0),
-            "far heightmap vertices request the blurred seed colour"
+            "far heightfield vertices request the blurred seed colour"
         );
         assert!(!near.solid.is_empty(), "the near tile meshes");
         assert!(
             near.solid.iter().all(|v| v.layer & 0x4000 == 0),
             "near LOD keeps its block textures"
+        );
+    }
+
+    #[test]
+    fn heightfield_keeps_its_cliffs_and_packs_its_uvs() {
+        let mut columns = columns();
+        for (i, column) in columns.iter_mut().enumerate() {
+            // A slope across the tile: the heightfield must drop a wall where
+            // two samples differ, or the ring reads as one smooth blob.
+            column.surface = Some(Surface {
+                height: 64 + (i / CELLS) as i32,
+                state: BlockStateId(1),
+                water: None,
+                biome: 0,
+            });
+            column.spans = vec![span(0, 3, 1)].into();
+        }
+        // One of the coarsest rings, whose top spans more than a `u16` of
+        // 1/32-block UV steps: its UVs must stay in range, or the sampler
+        // caps them and stretches one texel over the whole tile.
+        let key = TileKey {
+            x: 0,
+            z: 0,
+            level: 9,
+        };
+        let mesh = mesh_columns(key, &columns, &FxHashSet::default(), None, material);
+        let limit = u16::MAX as f32 / TILED_UV_STEPS;
+        // `tiled` clamps to `u16`, so a negative UV does not just overflow: it
+        // pins to zero and the whole face samples one texel. Both axes must be
+        // non-negative as well as in range.
+        assert!(
+            mesh.solid.iter().all(|v| {
+                let uv = tiled_uv(v);
+                uv[0] >= 0.0 && uv[1] >= 0.0 && uv[0] <= limit && uv[1] <= limit
+            }),
+            "a far tile's UV left its fixed-point range"
+        );
+        // A ring below the saturating width keeps absolute UVs; those were
+        // negated on the v axis, which pinned every top face to one texel row.
+        let near = TileKey {
+            x: 0,
+            z: 0,
+            level: 5,
+        };
+        assert!(
+            near.size() as f32 <= limit,
+            "this ring is meant to keep absolute UVs"
+        );
+        let mesh = mesh_columns(near, &columns, &FxHashSet::default(), None, material);
+        assert!(
+            mesh.solid.iter().all(|v| {
+                let uv = tiled_uv(v);
+                uv[0] >= 0.0 && uv[1] >= 0.0
+            }),
+            "an absolute-UV ring negated its v, sampling a single texel row"
+        );
+        let walls = mesh
+            .solid
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|q| normal(q).y.abs() < 0.01)
+            .count();
+        assert!(
+            walls > 0,
+            "a slope across the tile must keep its side walls, not a flat lid"
         );
     }
 

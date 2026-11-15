@@ -8,6 +8,7 @@ use horizon_client::camera::CameraFluid;
 use horizon_client::gfx::pack_uniforms::PackInputs;
 use horizon_client::shader_options::ShaderOptions;
 use horizon_client::text::Text;
+use horizon_os::fs::PathExt;
 use horizon_shaders::{BlockIds, Macros, Pack, Properties, dimension_folder, load_post};
 
 use super::{Dim, Game};
@@ -15,28 +16,29 @@ use horizon_client::gfx::pack_draw::EntitySpan;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
+/// The pack shipped with Horizon: the MIT-licensed Miniature Shader. It is the
+/// default look and a 1:1 reference; the built-in profile stays as the fallback
+/// when the folder is absent.
+const BUNDLED_PACK: &str = "Miniature";
+
+fn bundled_pack_exists() -> bool {
+    Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists()
+}
+
 /// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`); with no
-/// file yet, the pack's own preset for this device: `dgpu` on a full machine, `igpu` on a
-/// low-memory browser, `potato` on a two-thread one. Any saved value overrides the profile.
-fn chosen_shader_options(name: &str, pack: &Pack) -> BTreeMap<String, String> {
+/// file, none, so the pack keeps its own defaults. Any saved value overrides the profile.
+///
+/// A pack applies no preset unless the player picks one: an empty map leaves the pack's own
+/// `#define` and `const` defaults, which is the look the reference renders and the one its
+/// author tuned. Horizon used to substitute its own `dgpu`/`igpu`/`potato` tiers here, but
+/// those names belong to Horizon, not to packs, and Miniature's `HIGH` preset raises the
+/// shadow map to 4096² and the shadow distance to 384 blocks for a look no faster than the
+/// defaults.
+fn chosen_shader_options(name: &str) -> BTreeMap<String, String> {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(name));
     match horizon_os::fs::read_to_string(file) {
         Ok(text) => horizon_shaders::parse_chosen(&text),
-        Err(_) => {
-            let profile = if !horizon_client::graphics::web_low_memory() {
-                "dgpu"
-            } else if horizon_os::hardware_threads() <= 2 {
-                "potato"
-            } else {
-                "igpu"
-            };
-            let chosen = horizon_shaders::profile(pack, profile);
-            if chosen.is_empty() {
-                horizon_shaders::profile(pack, "potato")
-            } else {
-                chosen
-            }
-        }
+        Err(_) => BTreeMap::new(),
     }
 }
 
@@ -55,7 +57,7 @@ pub(super) fn read_shader_options(
     };
     let options = horizon_shaders::options(&pack);
     let lang = horizon_shaders::Lang::load(&pack, language);
-    let chosen = chosen_shader_options(name, &pack);
+    let chosen = chosen_shader_options(name);
     let pack = pack.with_chosen(chosen.clone());
     let text = pack.read_text("shaders.properties").unwrap_or_default();
     let properties = Properties::parse(&text, &horizon_shaders::with_options(&pack, macros));
@@ -134,6 +136,12 @@ impl Game<'_> {
     /// Loads the pack for the current dimension when it changed, and returns this frame's
     /// inputs to the pack's uniforms.
     pub(super) fn shader_pack_inputs(&mut self, camera: glam::DVec3, partial: f32) -> PackInputs {
+        // A pack's first load translates every program synchronously. Do that
+        // only in a world: during title startup the browser's event loop still
+        // has a winit borrow active, and a long nested pass re-enters it.
+        if !matches!(self.screen, super::Screen::Playing) {
+            return PackInputs::default();
+        }
         // A `shaders/` pack lights the faces itself unless `oldLighting=true`: sections mesh
         // without the game's face shading (the pack loaded or dropped below shows next frame).
         let pack_lighting = self.pack_ids.as_ref().is_some_and(|ids| !ids.old_lighting);
@@ -143,13 +151,14 @@ impl Game<'_> {
         }
         static DEV_PACK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
         let dev = DEV_PACK.get_or_init(|| std::env::var("HORIZON_SHADER_PACK").ok());
-        let picked = active_pack(
-            dev.as_deref().unwrap_or(&self.settings.horizon.shader_pack),
-            &self.settings.mods,
-        );
+        let configured = dev.as_deref().unwrap_or(&self.settings.horizon.shader_pack);
+        let mut picked = active_pack(configured, &self.settings.mods).to_owned();
+        if dev.is_none() && picked.is_empty() && bundled_pack_exists() {
+            picked = BUNDLED_PACK.to_owned();
+        }
         if self.native_shaders.picked != picked {
             // Another pack, or none: drop what ran.
-            self.native_shaders = super::native_shaders::NativeShaders::picking(picked);
+            self.native_shaders = super::native_shaders::NativeShaders::picking(&picked);
             self.pack_ids = None;
             if let Some(renderer) = &mut self.renderer {
                 renderer.drop_shader_packs();
@@ -158,7 +167,7 @@ impl Game<'_> {
         if picked.is_empty() {
             return PackInputs::default();
         }
-        let name = picked.to_owned();
+        let name = picked;
         let dimension = match self.dim {
             Dim::Overworld => 0,
             Dim::Nether => -1,
@@ -177,7 +186,7 @@ impl Game<'_> {
             // translation of it) panic is turned off instead of crashing every world load (#3525).
             let loaded = horizon_client::crash::contain(|| {
                 match Pack::open(&path).map(|p| {
-                    let chosen = chosen_shader_options(name, &p);
+                    let chosen = chosen_shader_options(name);
                     p.with_chosen(chosen)
                 }) {
                     Ok(pack) => {

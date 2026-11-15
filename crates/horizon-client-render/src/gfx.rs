@@ -260,10 +260,10 @@ struct Globals {
     sunrise_fan: [[f32; 4]; 2 * sunrise_fan::TRIANGLES],
     /// x: `Options.textureFiltering` (0 none, 1 RGSS, 2 anisotropic); y: the sprite arrays' width.
     filtering: [f32; 4],
-    /// Visual Vibrance's daylight pass: x on, y direct sun, z specular, w sun-tinted fog.
+    /// Miniature Shader's daylight pass: x on, y direct sun, z specular, w sun-tinted fog.
     /// Zero when the profile is off or a shader pack owns the post stage.
     visual: [f32; 4],
-    /// Visual Vibrance's near sun shadow map: camera-relative light clip space.
+    /// Miniature Shader's near sun shadow map: camera-relative light clip space.
     shadow_view_proj: [[f32; 4]; 4],
     /// x: the map is live, y: texel size, z: sampling bias, w: filter taps.
     shadow_params: [f32; 4],
@@ -360,7 +360,7 @@ pub struct Frame<'a> {
     /// Opt-in reuse of the shader pack's last shadow map when the key still matches
     /// (`horizon-graphics.txt` `shadowCache`; off by default).
     pub shadow_cache: bool,
-    /// Visual Vibrance profile: x enabled, y contrast, z saturation, w warmth,
+    /// Miniature Shader profile: x enabled, y contrast, z saturation, w warmth,
     /// and bloom/threshold/radius/vignette in the second half.
     pub visual: [f32; 8],
     /// The profile's post knobs: x exposure (y/z/w spare).
@@ -642,7 +642,7 @@ pub struct Renderer {
     entity_capacity: u64,
     entity_batch: EntityBatch,
     group: wgpu::BindGroup,
-    /// Visual Vibrance's near sun shadow map, its settings, its terrain pipeline
+    /// Miniature Shader's near sun shadow map, its settings, its terrain pipeline
     /// and the group casters draw with (a blank map: the real one is the
     /// render target and cannot also be bound in the pass).
     visual_shadow: native_shadow::ShadowMap,
@@ -1663,10 +1663,11 @@ impl Renderer {
         // follow the player's quality tier per frame (below). High covers the
         // first few hundred blocks, where the resident chunks end and the far
         // terrain used to be visibly unshadowed.
-        let (shadow_resolution, shadow_distance) = match shadow_quality {
-            crate::graphics::VisualQuality::High => (2048, 320.0),
-            crate::graphics::VisualQuality::Medium => (1024, 192.0),
-            _ => (1024, 128.0),
+        let shadow_plan = crate::visual::Tier::from_quality(shadow_quality).shadow();
+        let (shadow_resolution, shadow_distance) = if shadow_plan.resolution == 0 {
+            (1024, 128.0)
+        } else {
+            (shadow_plan.resolution, shadow_plan.distance)
         };
         let size = window.inner_size();
         let max_side = device.limits().max_texture_dimension_2d;
@@ -1966,11 +1967,11 @@ impl Renderer {
             true,
             Some(alpha_blend),
         );
-        // Visual Vibrance's near sun shadow: the same section draws through the
+        // Miniature Shader's near sun shadow: the same section draws through the
         // light's orthographic camera, cut out by the sprite's alpha.
         let visual_shadow_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Visual Vibrance terrain shadow"),
+                label: Some("Miniature Shader terrain shadow"),
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
@@ -2232,7 +2233,7 @@ impl Renderer {
         });
         let emission_stats =
             hdr_stats::EmissionStats::new(&device, split, sprite_textures.len() as u32);
-        // Visual Vibrance's near sun shadow map. The same draw lists the packs'
+        // Miniature Shader's near sun shadow map. The same draw lists the packs'
         // shadow stage uses; the adapter class picks the reach and resolution.
         let shadow_manifest = horizon_shader_api::manifest::Shadow {
             resolution: shadow_resolution.min(device.limits().max_texture_dimension_2d),
@@ -2242,7 +2243,7 @@ impl Renderer {
         let visual_shadow = native_shadow::ShadowMap::new(&device, Some(&shadow_manifest));
         let visual_shadow_settings = native_shadow::camera(&shadow_manifest);
         let blank_shadow = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Visual Vibrance blank shadow"),
+            label: Some("Miniature Shader blank shadow"),
             size: wgpu::Extent3d {
                 width: 1,
                 height: 1,
@@ -2257,7 +2258,7 @@ impl Renderer {
         });
         let blank_shadow_view = blank_shadow.create_view(&Default::default());
         let blank_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Visual Vibrance blank shadow comparison"),
+            label: Some("Miniature Shader blank shadow comparison"),
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
@@ -2276,7 +2277,7 @@ impl Renderer {
         );
         let visual_shadow_cast_group = terrain_group(
             &device,
-            "Visual Vibrance shadow casters",
+            "Miniature Shader shadow casters",
             &bindings,
             &globals,
             &sprite_views,
@@ -3291,12 +3292,12 @@ impl Renderer {
                 attributes: &TERRAIN_ATTRIBUTES,
             })];
             let flat_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Visual Vibrance flat shadow layout"),
+                label: Some("Miniature Shader flat shadow layout"),
                 bind_group_layouts: &[Some(&bindings), Some(&flat.draw_layout)],
                 ..Default::default()
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Visual Vibrance flat terrain shadow"),
+                label: Some("Miniature Shader flat terrain shadow"),
                 layout: Some(&flat_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
@@ -4732,7 +4733,7 @@ impl Renderer {
             .create_sampler(&sprite_sampler_descriptor(anisotropy));
         self.rebuild_terrain_group();
     }
-    /// Solid terrain sections drawn into Visual Vibrance's sun shadow map last frame.
+    /// Solid terrain sections drawn into Miniature Shader's sun shadow map last frame.
     pub fn visual_shadow_draws(&self) -> u32 {
         self.visual_shadow_draws
     }
@@ -5111,25 +5112,20 @@ impl Renderer {
         // filter: pinning High on an integrated GPU used to keep the near,
         // single-tap map, and pinning Medium on a discrete one kept High's.
         let mut shadow_settings = self.visual_shadow_settings.clone();
-        let visual_taps = match visual_tier {
-            crate::graphics::VisualQuality::High => {
-                shadow_settings.distance = 320.0;
-                1.0
-            }
-            crate::graphics::VisualQuality::Medium => {
-                shadow_settings.distance = 192.0;
-                0.0
-            }
-            _ => {
-                shadow_settings.distance = 128.0;
-                0.0
-            }
+        let shadow_plan = crate::visual::Tier::from_quality(visual_tier).shadow();
+        let visual_taps = shadow_plan.taps;
+        shadow_settings.distance = if shadow_plan.resolution == 0 {
+            128.0
+        } else {
+            shadow_plan.distance
         };
         shadow_settings.far = pack_uniforms::SHADOW_EYE + 2.0 * shadow_settings.distance + 384.0;
-        let visual_shadow = (builtin_visuals
-            && !frame.title
-            && other_shadow_view.is_none()
-            && visual_tier != crate::graphics::VisualQuality::Low)
+        let visual_passes = crate::visual::passes(
+            crate::visual::Tier::from_quality(frame.visual_tier),
+            builtin_visuals,
+            false,
+        );
+        let visual_shadow = (visual_passes.shadow && !frame.title && other_shadow_view.is_none())
             .then(|| {
                 pack_post::ShadowView {
                     cull: pack_uniforms::shadow_culling(frame, &shadow_settings),
@@ -5143,8 +5139,8 @@ impl Renderer {
             });
         let visual_shadow_on = visual_shadow.is_some();
         let visual_shadow_matrix = visual_shadow.as_ref().map_or(Mat4::ZERO, |v| v.cull);
-        // The grade's mood: the reference's clean vivid daylight, easing into a
-        // warm golden hour as the sun drops. `sunrise_color.a` peaks with the
+        // The grade's mood: clean vivid daylight, easing into a warm golden
+        // hour as the sun drops. `sunrise_color.a` peaks with the
         // sunrise fan; `sky_light_factor` is the day's light.
         let day = frame.sky.sky_light_factor.clamp(0.0, 1.0);
         let dusk = frame.sky.sunrise_color[3].clamp(0.0, 1.0);
@@ -6518,7 +6514,7 @@ impl Renderer {
                 pass.draw_indexed(0..shadow_only_quads * 6, first as i32, 0..1);
             }
         }
-        // Visual Vibrance's near sun shadow: the same solid sections the light sees,
+        // Miniature Shader's near sun shadow: the same solid sections the light sees,
         // into our own map. The casters' group carries a blank map so the real
         // one is only the render target here.
         self.visual_shadow_draws = if visual_shadow_on {
@@ -6535,7 +6531,7 @@ impl Renderer {
         if visual_shadow_on {
             let mut pass = self
                 .visual_shadow
-                .begin(&mut encoder, "Visual Vibrance terrain shadow");
+                .begin(&mut encoder, "Miniature Shader terrain shadow");
             pass.set_bind_group(0, &self.visual_shadow_cast_group, &[]);
             if flat_frame {
                 if let (Some(flat), Some(pipeline)) = (&self.flat, &self.visual_shadow_flat) {

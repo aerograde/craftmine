@@ -463,7 +463,7 @@ impl VisualQuality {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Graphics {
     pub preset: Preset,
-    /// The built-in Visual Vibrance profile: grade, atmosphere, sun shading,
+    /// The built-in Miniature Shader profile: grade, atmosphere, sun shading,
     /// water glint, glow and the near sun shadow. On by default.
     pub visuals: bool,
     pub visual_quality: VisualQuality,
@@ -576,7 +576,11 @@ impl Default for Graphics {
             battery: false,
             shadow_cache: false,
             api: GraphicsApi::Auto,
-            shader_pack: String::new(),
+            shader_pack: if cfg!(target_arch = "wasm32") {
+                String::new()
+            } else {
+                "Miniature".into()
+            },
         }
     }
 }
@@ -611,12 +615,6 @@ impl Graphics {
             if !g.taa {
                 g.fxaa = true;
             }
-        }
-        // The exact original Visual Vibrance pack runs its own code (with its
-        // own licence and credit). When it is installed, make it the default
-        // look instead of silently substituting the fast approximation.
-        if g.shader_pack.is_empty() && fs::exists("shaderpacks/Visual-Vibrance-v0.3.5a.zip") {
-            g.shader_pack = "Visual-Vibrance-v0.3.5a.zip".into();
         }
         if fs::remove_file(dir.join(HDR_MARKER)).is_ok() && g.hdr {
             g.hdr = false;
@@ -796,47 +794,17 @@ impl Graphics {
             tier => tier,
         }
     }
-    /// The Visual Vibrance post profile: x enabled, y contrast, z saturation,
-    /// w warmth; bloom, threshold, radius and vignette in the second half.
-    /// Auto follows the adapter's tier ([`auto_quality_for`]).
-    pub fn visual_uniform(&self) -> [f32; 8] {
-        let tier = self.effective_visual_quality();
-        // The reference: the deferred Vibrant Visuals look, recreated for
-        // Horizon. Vivid but natural daylight, a clean pastel sky, softly
-        // glowing highlights and blue-grey shade; the mood uniform in
-        // world_post.wgsl eases it toward golden hour with the sun.
-        let (contrast, saturation, warmth, bloom, threshold, radius, vignette) = match tier {
-            VisualQuality::Auto | VisualQuality::High => (1.06, 1.14, 0.22, 0.55, 0.82, 10.0, 0.06),
-            VisualQuality::Medium => (1.05, 1.11, 0.20, 0.32, 0.88, 8.0, 0.05),
-            // The low-end path keeps the grade and the sun, and drops the
-            // extra glow passes (the costliest post work).
-            VisualQuality::Low => (1.04, 1.08, 0.16, 0.0, 0.92, 0.0, 0.03),
-        };
-        [
-            if self.visuals { 1.0 } else { 0.0 },
-            contrast,
-            saturation,
-            warmth,
-            bloom,
-            threshold,
-            radius,
-            vignette,
-        ]
+    /// The Miniature Shader profile's parameters, owned by [`crate::visual`].
+    pub fn visual_params(&self) -> crate::visual::Params {
+        crate::visual::Params::for_quality(self.effective_visual_quality(), self.visuals)
     }
-    /// What the post pass adds to the profile: x exposure (the filmic curve's
-    /// white point), y/z/w spare. The exposure lifts a lit frame into the
-    /// shoulder without clipping noon.
+    /// The post profile uniform: x enabled, grade and glow in the rest.
+    pub fn visual_uniform(&self) -> [f32; 8] {
+        self.visual_params().uniform()
+    }
+    /// What the post pass adds: exposure and the light-shaft enable.
     pub fn post_uniform(&self) -> [f32; 4] {
-        let tier = self.effective_visual_quality();
-        let exposure = match tier {
-            VisualQuality::Auto | VisualQuality::High => 1.02,
-            VisualQuality::Medium => 1.01,
-            VisualQuality::Low => 1.0,
-        };
-        // y: the golden-hour light shafts are High-only (one screen-space
-        // march over the bright pass), so Medium no longer pays for them.
-        let shafts = u8::from(matches!(tier, VisualQuality::Auto | VisualQuality::High)) as f32;
-        [exposure, shafts, 0.0, 0.0]
+        self.visual_params().post_uniform()
     }
     /// Worker threads for chunk generation and meshing.
     pub fn worker_threads(&self) -> usize {
@@ -950,11 +918,12 @@ mod tests {
             tier(VisualQuality::Medium),
             tier(VisualQuality::Low),
         );
-        assert_eq!(low[4], 0.0, "Low draws no bloom taps");
-        assert!(high[4] > medium[4] && medium[4] > low[4]);
-        // The grade itself stays on every tier: on-by-default without the GPU cost.
-        assert!(low[1] >= 1.0 && low[2] > 1.0);
-        assert!(high[2] > low[2], "the vivid daylight look is the full tier");
+        assert_eq!(low[4], 0.0, "the pack draws no bloom taps");
+        assert_eq!(high, medium);
+        assert_eq!(medium, low);
+        // The pack's look is in the terrain/sky passes, not a post grade.
+        assert_eq!(low[1], 1.0);
+        assert_eq!(low[2], 1.0);
         assert_eq!(low[0], 1.0);
     }
 
@@ -1138,10 +1107,13 @@ mod tests {
             g.visual_uniform()
         });
         g.visual_quality = VisualQuality::High;
-        assert_ne!(g.visual_uniform(), {
-            g.visual_quality = VisualQuality::Low;
-            g.visual_uniform()
-        });
+        assert_ne!(
+            crate::visual::Params::for_quality(g.effective_visual_quality(), g.visuals).shadow,
+            {
+                g.visual_quality = VisualQuality::Low;
+                crate::visual::Params::for_quality(g.effective_visual_quality(), g.visuals).shadow
+            }
+        );
         set_auto_visual_quality(VisualQuality::High);
     }
 

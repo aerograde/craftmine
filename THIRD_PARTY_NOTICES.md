@@ -14,6 +14,35 @@ Apache-2.0; both licenses are in that folder (`LICENSE.MIT`, `LICENSE.APACHE`).
 fixes to its GLSL frontend that shader packs need, each applied in the commit that needed it. It is licensed under MIT or Apache-2.0; both licenses
 are in that folder (`LICENSE.MIT`, `LICENSE.APACHE`).
 
+## Minecraft Miniature Shader
+
+The bundled pack in `shaderpacks/Miniature/` (which the web build packages too) is the unmodified upstream
+pack, run through Horizon's shader-pack translator. The lighting and atmosphere model in
+`crates/horizon-client-render/src/visual/miniature.rs` and the Minecraft Miniature Shader section of
+`crates/horizon-client-render/src/terrain.wgsl` is a Rust/WGSL port of
+[Minecraft Miniature Shader](https://github.com/mateuskreuch/minecraft-miniature-shader) by Mateus A.
+Kreuch, at commit [`bdb6e00`](https://github.com/mateuskreuch/minecraft-miniature-shader/tree/bdb6e0020b4318d4e845902cbcc3e3552b0e9274).
+The upstream pack is under the MIT license:
+
+MIT License
+
+Copyright (c) 2022 Mateus A. Kreuch
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 ## Pixelify Sans
 
 `crates/horizon-theme/fonts/PixelifySans-*.ttf` is [Pixelify Sans](https://github.com/eifetx/Pixelify-Sans)
@@ -38,17 +67,6 @@ and `optical_flow.rs` follows the SDK's `sdk/src/components/opticalflow/ffx_opti
 (its passes, their order and their dispatch sizes). Copyright (C) 2024 Advanced Micro Devices,
 Inc., under the MIT license, whose text heads each file. AMD and FidelityFX are AMD's
 trademarks; Horizon is not affiliated with AMD.
-
-## Visual Vibrance shader pack
-
-`Visual-Vibrance-v0.3.5a.zip` (the pack in `web/packs` and in the single-file launcher's
-`/shaderpacks`) is by **Josh Britain (jbritain)**, Copyright © 2025, and is distributed
-**unmodified** for personal, non-commercial use under its own source-available license. It is
-**not OSI open source**: modification is allowed for personal use, and redistribution is allowed
-only without direct or indirect financial benefit and with credit. The pack's `LICENSE` travels in
-the zip and must remain with it. Source and author: <https://jbritain.net>. Horizon's built-in
-fast post profile is a separate clean-room implementation; selecting the pack runs its original
-shader code through Horizon's pack translator.
 
 ## Mod loader logos
 

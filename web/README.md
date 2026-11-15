@@ -58,11 +58,12 @@ on: `brave --enable-unsafe-webgpu --enable-features=Vulkan http://localhost:8080
 
 ### Terrain and visuals
 
-The page uses the same renderer and defaults as native: the built-in fast **Visual
-Vibrance** post profile (grade, atmosphere and quarter-resolution glow; the original
-`Visual-Vibrance` pack is bundled in `/shaderpacks` and runs its own code through the
-pack translator when selected) and **Infinite Terrain** on for local worlds. A browser
-with 8 GB or less, or four threads or less, gets the device profile: Adapter Auto
+The page uses the same renderer and defaults as native: the bundled **Miniature
+Shader** pack (MIT, in `shaderpacks/`) run through the shader-pack translator, and
+**Infinite Terrain** on for local worlds. If the pack folder is missing, the Rust
+profile in `crates/horizon-client-render/src/visual/` renders the same formulas as
+the fallback. A browser with 8 GB or less, or four threads or less, gets the device
+profile: Adapter Auto
 resolves to Medium (Low under 4 GB or two threads), **render distance 8**, **80 %**
 world resolution with FXAA, a 2 MiB/frame upload budget and a 64 MiB texture budget.
 The resolution also drops toward 60 % and recovers toward 80 % if world frames fall
@@ -70,12 +71,13 @@ below 48 or stay above 57 FPS. That profile is what keeps an 8 GB Chromebook out
 the full shadow/bloom path.
 Far terrain starts where the resident chunks end — the seed LOD never draws close to
 the player — with cells of 1 block to 256 blocks out, 2 blocks to 640, 4 to 768, 8 to
-1024 and 16 to 1536, then doubling out to Voxy-style 512-block cells at the
-65,536-block horizon, which aerial perspective fades into the sky. It runs on up to four sampling and two meshing Web Workers beside the near
-chunks; unlike finite LOD it does not hold back while they load, so the horizon keeps
-up with fast flight. The single-threaded build has no Web Workers, so it runs the same
-sample, summary and mesh jobs inline in 4 ms slices after each frame: the horizon
-fills more slowly, but it is there, and the page never waits.
+1024 and 16 to 1536, then doubling to 512-block heightfield cells at the
+65,536-block horizon. Every ring is drawn; a light aerial haze only adds depth. It
+runs on up to four sampling and two meshing Web Workers beside the near chunks;
+unlike finite LOD it does not hold back while they load, so the horizon keeps up with
+fast flight. The single-threaded build has no Web Workers, so it runs the same sample,
+summary and mesh jobs inline in 4 ms slices after each frame: the horizon fills more
+slowly, but it is there, and the page never waits.
 
 `web/build.sh` makes the release build: LTO, then `wasm-opt` when it is installed
 (slow to build; what players should get). `PROFILE=fast web/build.sh` skips both and
@@ -95,24 +97,19 @@ web/package.py single --audio tiny   # the smallest music (mono 24 kHz Vorbis)
 ```
 
 - **`horizon.html`** is the whole game in one file: both WebAssembly builds, every
-  texture, model, language, world generator file and sound, and the shader packs
-  in `web/packs/` (or `web/dist/packs/`), installed at the game root so the
-  shader-pack list finds them. It holds whatever the prepared resources tree
-  holds: `horizon-prepare sounds` and `horizon-prepare languages` add the sounds
-  and languages, and the builder warns loudly when a class is missing. The music is re-encoded to Vorbis
+  texture, model, language, world generator file and sound. Shader packs placed
+  in `shaderpacks/` (the folder the desktop build reads, which ships the MIT
+  Miniature pack) or `web/packs/` are installed at the game root so the
+  shader-pack list finds them. It holds whatever the
+  prepared resources tree holds: `horizon-prepare sounds` and
+  `horizon-prepare languages` add the sounds and languages, and the builder warns
+  loudly when a class is missing. The music is re-encoded to Vorbis
   (`oggenc` from `vorbis-tools` with `ffmpeg` to decode, or an ffmpeg built
   with libvorbis; `--audio off` keeps the originals). Nothing is fetched when it
   runs: single player, the menus, every sound and every language are inside. The
   only network use is the game's own multiplayer sockets. Opened from disk it
   runs the single-threaded build; served cross-origin isolated it runs the
   threaded one.
-  `Visual-Vibrance-v0.3.5a.zip` is by Josh Britain (jbritain), © 2025, and is
-  redistributed unmodified under its custom non-commercial, source-available
-  license (not OSI open source): personal use, modification for personal use,
-  and non-commercial redistribution with credit; the license travels in the zip.
-  Selecting it runs the original shader code through Horizon's pack translator.
-  On a new install its own `dgpu`/`igpu`/`potato` preset is chosen from the
-  device (see `THIRD_PARTY_NOTICES.md`).
 - **`launch.svg`** (with `launch-sw.js`) is an optional launcher, in the same
   shape as the reference single-file launchers: open it on any static host and
   press Download. It stores `horizon.html` in the origin and serves it from a

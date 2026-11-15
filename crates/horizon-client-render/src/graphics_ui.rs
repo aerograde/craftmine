@@ -114,7 +114,7 @@ pub fn rows(level: Level) -> Vec<Row> {
     let visuals = h(
         H::Visuals,
         High,
-        "Visual Vibrance: Horizon's colour, light and atmosphere. Off is vanilla.",
+        "Miniature Shader: the pack's colour, light and atmosphere. Off is vanilla.",
     );
     let visual_quality = h(
         H::VisualQuality,

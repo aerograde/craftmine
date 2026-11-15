@@ -35,9 +35,9 @@ struct Globals {
     // x: Options.textureFiltering (0 none, 1 RGSS, 2 anisotropic), y: the sprite arrays' width
     // in texels (vanilla's TextureSize).
     filtering: vec4<f32>,
-    // Visual Vibrance's daylight pass: x on, y direct sun, z specular, w sun-tinted fog.
+    // Miniature Shader's daylight pass: x on, y direct sun, z specular, w sun-tinted fog.
     visual: vec4<f32>,
-    // Visual Vibrance's near sun shadow map: camera-relative light clip space, and
+    // Miniature Shader's near sun shadow map: camera-relative light clip space, and
     // x enabled, y texel size, z sample depth bias.
     shadow_view_proj: mat4x4<f32>,
     shadow_params: vec4<f32>,
@@ -192,6 +192,10 @@ struct TerrainOut {
     // vertex sky light (0..1): the sun fades out of caves and lit interiors.
     @location(11) pos: vec3<f32>,
     @location(12) skylight: f32,
+    // The block-light level (0..1) and the raw vertex tint, before the
+    // lightmap: Minecraft Miniature Shader's ambient and torch terms need both.
+    @location(13) blocklight: f32,
+    @location(14) tint: vec4<f32>,
 }
 // Whether a fading tile or section leaves this pixel out (gfx/lod.rs's
 // `fade_code`, `fade_out_code`). It fades in, or out, chunk by chunk: each
@@ -358,6 +362,8 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
         }
     }
     let block = max(f32(light.y), dynamic_block_light(pos));
+    out.tint = color;
+    out.blocklight = clamp(block / 240.0, 0.0, 1.0);
     out.color = vec4(color.rgb, 1.0) * sample_lightmap(f32(light.x) / 16.0, block / 16.0);
     if globals.colored_count.x > 0u {
         out.color = vec4(min(out.color.rgb + color.rgb * native_colored_light(pos), vec3(1.0)), out.color.a);
@@ -367,7 +373,7 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     out.spherical = length(pos);
     out.cylindrical = max(length(pos.xz), abs(pos.y));
     out.pos = pos;
-    out.skylight = f32(light.x) / 16.0;
+    out.skylight = f32(light.x) / 240.0;
     out.fade = fade_code(w);
     const CHUNK_FULLY_VISIBLE_RANGE: f32 = 16.0;
     out.visibility = mix(1.0, instance_visibility(w),
@@ -382,35 +388,30 @@ fn linear_fog(d: f32, start: f32, end: f32) -> f32 {
 fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
     return apply_fog_dir(color, spherical, cylindrical, vec3<f32>(0.0));
 }
-// Aerial perspective, as the reference shows it: blue-grey by day (the pale
-// horizon) and warm peach at dawn/dusk, so the world recedes into the sky
-// instead of ending at the resident chunks. It is a shader term, not vanilla
-// fog, so infinite terrain still reads all the way out: density is the only
-// limit and it fades into the sky's own colour. It starts past any usual
-// render distance, where only distant terrain is drawn, so the near view stays
-// crisp and the LOD seam carries exactly the same haze on both sides.
+// Aerial perspective: a light depth cue, not a mask. The whole horizon is
+// real geometry; this only tints it with the sky's own colour. It begins past
+// any usual render distance, so the near view pays nothing, and its cap keeps
+// terrain readable at the far edge instead of dissolving it into fog.
 fn atmosphere(color: vec3<f32>, pos: vec3<f32>) -> vec3<f32> {
     if globals.visual.x < 0.5 { return color; }
     let d = length(pos);
-    // Nothing within a few chunks of the eye: the residents stay crisp, and
-    // the haze builds where the terrain starts to recede. 384 blocks is past
-    // the usual render distance, so the seam between real chunks and far
-    // cells shows no step in the haze, and the near frame pays nothing.
-    if d < 384.0 { return color; }
+    if d < 512.0 { return color; }
     let light = normalize(select(-globals.sun.xyz, globals.sun.xyz, globals.sun.y >= 0.0));
     let dusk = clamp(globals.sunrise.a, 0.0, 1.0);
     let toward = max(dot(normalize(pos), light), 0.0);
-    // Converge on the horizon's own colour (the fog colour the sky uses at
-    // the seam): the old 55% sky-blue mix left a band where terrain met sky.
-    let base = mix(globals.fog_color.rgb, globals.sky_color.rgb, 0.35);
-    let haze_color = mix(base, globals.sunrise.rgb, 0.62 * dusk * (0.5 + 0.5 * toward * toward));
-    let density = mix(1400.0, 520.0, dusk);
-    // 98.5%, not 90%: the last 10% of terrain colour was the faint rim at the
-    // 65,536-block horizon.
-    let haze = (1.0 - exp(-(d - 384.0) / density)) * 0.985;
+    let base = mix(globals.fog_color.rgb, globals.sky_color.rgb, 0.45);
+    let haze_color = mix(base, globals.sunrise.rgb, 0.55 * dusk * (0.5 + 0.5 * toward * toward));
+    let density = mix(9000.0, 4200.0, dusk);
+    let haze = (1.0 - exp(-(d - 512.0) / density)) * 0.72;
     return mix(color, haze_color, haze);
 }
 fn apply_fog_dir(color: vec4<f32>, spherical: f32, cylindrical: f32, view: vec3<f32>) -> vec4<f32> {
+    if globals.visual.x > 0.5 {
+        // Minecraft Miniature Shader's fog: its own span multiplier by time of
+        // day, and a gradient toward the sky colour with height.
+        let haze = miniature_fog_mix(view);
+        return vec4<f32>(mix(color.rgb, miniature_fog_color(haze, view.y), haze), color.a);
+    }
     let f = max(linear_fog(spherical, globals.fog.x, globals.fog.y),
                 linear_fog(cylindrical, globals.fog.z, globals.fog.w));
     let fogged = mix(color.rgb, globals.fog_color.rgb, f * globals.fog_color.a);
@@ -429,15 +430,128 @@ fn sun_normal(pos: vec3<f32>) -> vec3<f32> {
     if dot(n, -eye) < 0.0 { n = -n; }
     return n;
 }
-// Visual Vibrance's direct light: the lightmap gives every face the same sky brightness;
-// this shades it by the face's angle to the sun (the moon at night), warms the lit side
-// near sunrise/sunset and adds a specular term (`water`: the stronger wet highlight).
-// `sky` keeps the sun out of caves and torch-lit interiors; Off returns `color` as is.
+// ---- Minecraft Miniature Shader (MIT) -------------------------------------
+// A 1:1 port of the pack's lighting and atmosphere model. The CPU reference is
+// visual/miniature.rs. Adapted from Minecraft Miniature Shader,
+// Copyright (c) 2022 Mateus A. Kreuch. See THIRD_PARTY_NOTICES.md.
+const MINIATURE_LIGHT_BRIGHTNESS: f32 = 0.9;
+const MINIATURE_SHADOW_COLOR: vec3<f32> = vec3<f32>(1.0, 1.0 + 0.3333 * 0.2, 1.0 + 0.2);
+const MINIATURE_TORCH_INNER: vec3<f32> = vec3<f32>(1.0, 0.85, 0.7);
+const MINIATURE_TORCH_MIDDLE: vec3<f32> = vec3<f32>(1.0, 0.8, 0.6);
+const MINIATURE_TORCH_OUTER: vec3<f32> = vec3<f32>(1.0, 0.55, 0.2);
+const MINIATURE_MOON: vec3<f32> = vec3<f32>(0.1, 0.15, 0.3);
+const MINIATURE_TORCH_UV: vec2<f32> = vec2<f32>(8.0 / 255.0, 231.0 / 255.0);
+const MINIATURE_FOG_MIN: f32 = 0.3;
+const MINIATURE_FOG_MAX: f32 = 1.0;
+const MINIATURE_SUNSET: f32 = 0.5325;
+const MINIATURE_MIDNIGHT: f32 = 0.75;
+const MINIATURE_SUNRISE: f32 = 0.9675;
+
+fn miniature_rescale(x: f32, a: f32, b: f32) -> f32 {
+    return clamp((x - a) / (b - a), 0.0, 1.0);
+}
+fn miniature_smoothe(x: f32) -> f32 {
+    return x * x * (3.0 - 2.0 * x);
+}
+fn miniature_slope_to_1(x: f32, m: f32) -> f32 {
+    return max(0.0, x * m - (m - 1.0));
+}
+fn miniature_luma(color: vec3<f32>) -> f32 {
+    return dot(vec3<f32>(0.299, 0.587, 0.114), color);
+}
+fn miniature_fogify(x: f32, w: f32) -> f32 {
+    return w / (x * x + w);
+}
+// getAmbientColor: the sky texel plus the pack's polynomial lift.
+fn miniature_ambient(sky: f32, sun_height: f32) -> vec3<f32> {
+    let light = sample_lightmap(clamp(sky, 0.0, 1.0) * 16.0, 0.0);
+    let x = light.g;
+    let lift = max((((0.8494 * x + 0.9687) * x - 5.238) * x + 3.711) * x - 0.2864, 0.0);
+    return min(vec3<f32>(1.0), light.rgb + vec3<f32>(lift) * clamp(0.2 * sun_height, 0.0, 1.0));
+}
+// getTorchColor: the pack's warm ramp over the block-light level.
+fn miniature_torch(block_light: f32, ambient: vec3<f32>) -> vec3<f32> {
+    let strength = miniature_rescale(block_light, MINIATURE_TORCH_UV.x, MINIATURE_TORCH_UV.y);
+    let color = mix(mix(MINIATURE_TORCH_OUTER, MINIATURE_TORCH_MIDDLE, strength),
+        MINIATURE_TORCH_INNER, miniature_slope_to_1(strength, 8.0));
+    return max(vec3<f32>(0.0), vec3<f32>(1.0 - miniature_luma(ambient))) * strength * color;
+}
+// getLightColor
+fn miniature_light_color(sun_height: f32, sky: f32) -> vec3<f32> {
+    let sun_redness = 1.0 - clamp(0.2 * sun_height - 3.929, 0.0, 1.0);
+    var color = MINIATURE_MOON;
+    if sun_height > 0.01 {
+        color = normalize(vec3<f32>(1.0 + clamp(sun_redness, 0.12, 1.0), 1.06, 1.0));
+    }
+    return mix(vec3<f32>(miniature_luma(color)), color, clamp(sky, 0.0, 1.0));
+}
+// getDiffuse
+fn miniature_diffuse(sun_height: f32, sky: f32, normal: vec3<f32>, light: vec3<f32>,
+    fog_mix: f32) -> f32 {
+    return (1.0 - fog_mix)
+        * clamp(2.5 * dot(normalize(normal), normalize(light)), -0.3333, 1.0)
+        * clamp(0.1 * abs(sun_height) - 0.4453, 0.0, 1.0)
+        * miniature_rescale(sky, 0.3137, 0.6235);
+}
+// getFogMix: Minecraft's fog span scaled by the pack's time-of-day multiplier.
+fn miniature_fog_mix(pos: vec3<f32>) -> f32 {
+    let start = globals.fog.x;
+    let end = globals.fog.y;
+    let far = globals.fog.w;
+    let time = globals.time.x;
+    let day = select(time - MINIATURE_SUNRISE, MINIATURE_SUNSET - time, time < MINIATURE_MIDNIGHT);
+    let x = clamp(25.0 * day + 0.3, MINIATURE_FOG_MIN, MINIATURE_FOG_MAX);
+    let distance = length(pos);
+    let cylinder = max(length(pos.xz), abs(pos.y));
+    return max(
+        miniature_rescale(distance, x * start, end),
+        miniature_rescale(cylinder, x * (far - clamp(0.1 * far, 4.0, 64.0)), far),
+    );
+}
+// getFogColor
+fn miniature_fog_color(fog_mix: f32, feet_y: f32) -> vec3<f32> {
+    return mix(globals.fog_color.rgb, globals.sky_color.rgb,
+        fog_mix * clamp(0.006 * feet_y, 0.0, 1.0));
+}
+fn miniature_rescale_vec(x: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    return clamp((x - a) / (b - a), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+// translucent.fsh's water albedo.
+fn miniature_water_albedo(albedo: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(0.4) + 0.8 * miniature_rescale_vec(albedo, vec3<f32>(0.6), vec3<f32>(1.0));
+}
+fn miniature_lit(albedo: vec3<f32>, tint: vec4<f32>, pos: vec3<f32>, sky: f32,
+    block: f32, water: bool) -> vec3<f32> {
+    let up = globals.sun.y >= 0.0;
+    let light = normalize(select(-globals.sun.xyz, globals.sun.xyz, up));
+    let normal = sun_normal(pos);
+    let fog_mix = miniature_fog_mix(pos);
+    let diffuse = miniature_diffuse(globals.sun.y, sky, normal, light, fog_mix);
+    let strength = max(diffuse * sun_shadow(pos), 0.0);
+    let brightness = max(0.0, MINIATURE_LIGHT_BRIGHTNESS - 0.5 * pow(miniature_luma(albedo), 3.0));
+    let light_color = miniature_light_color(globals.sun.y, sky);
+    var ambient = miniature_ambient(sky, globals.sun.y);
+    ambient *= mix(MINIATURE_SHADOW_COLOR, vec3<f32>(1.0), strength);
+    ambient *= 0.75 + brightness * strength * light_color;
+    ambient += miniature_torch(block, ambient);
+    var lit = albedo * tint.rgb * ambient;
+    if water {
+        // The pack's water glints are already in the albedo; this only keeps the
+        // surface from going darker than its glint threshold.
+        lit = max(lit, vec3<f32>(0.4) * tint.rgb * ambient);
+    }
+    return lit;
+}
+
 fn sun_shadow(pos: vec3<f32>) -> f32 {
     if globals.shadow_params.x < 0.5 { return 1.0; }
     // QA: HORIZON_VISUAL_DEBUG=shadowblack keeps every surface in shadow.
     if globals.visual.w > 1.5 && globals.visual.w < 2.5 { return 0.0; }
-    let clip = globals.shadow_view_proj * vec4(pos, 1.0);
+    // The pack quantises the receiver to SHADOW_PIXEL (16) world blocks, so its
+    // shadows are deliberately pixelated.
+    let world = pos + globals.camera.xyz;
+    let shadow_pos = floor(world / 16.0 + 0.5) * 16.0 - globals.camera.xyz;
+    let clip = globals.shadow_view_proj * vec4(shadow_pos, 1.0);
     let ndc = clip.xyz / clip.w;
     let uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))
@@ -445,22 +559,9 @@ fn sun_shadow(pos: vec3<f32>) -> f32 {
         return 1.0;
     }
     let bias = ndc.z - globals.shadow_params.z;
-    var lit: f32;
-    if globals.shadow_params.w < 0.5 {
-        // The sampler's bilinear comparison already filters 2x2 texels: one
-        // sample is the cheap path's PCF, four times less work than 2x2 taps.
-        lit = textureSampleCompareLevel(shadow_map, shadow_sampler, uv, bias);
-    } else {
-        // High: four rotated hardware-PCF taps, each 2x2, for a soft edge at the
-        // cost of four samples rather than nine.
-        let texel = globals.shadow_params.y * 0.7;
-        lit = 0.0;
-        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(texel, texel), bias);
-        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-texel, texel), bias);
-        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(texel, -texel), bias);
-        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-texel, -texel), bias);
-        lit *= 0.25;
-    }
+    // One nearest texel: the pack samples shadowtex1 once, with no PCF.
+    let snapped = (floor(uv / globals.shadow_params.y) + 0.5) * globals.shadow_params.y;
+    let lit = textureSampleCompareLevel(shadow_map, shadow_sampler, snapped, bias);
     // Fade the map out at its edge instead of ending it with a hard ring:
     // the far terrain was either fully shadowed or fully lit at the seam.
     let edge = max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0;
@@ -490,91 +591,19 @@ fn cloud_shadow(world: vec3<f32>, time: f32) -> f32 {
     let p = world.xz * 0.014 + vec2<f32>(time * 0.0001, time * 0.00005);
     return smoothstep(0.42, 0.7, cloud_noise(p));
 }
-fn sunlit(color: vec3<f32>, pos: vec3<f32>, sky: f32, water: bool) -> vec3<f32> {
-    if globals.visual.x < 0.5 { return color; }
+fn sunlit(albedo: vec3<f32>, tint: vec4<f32>, pos: vec3<f32>, sky: f32, block: f32,
+    water: bool) -> vec3<f32> {
+    if globals.visual.x < 0.5 { return albedo * tint.rgb; }
     // QA: HORIZON_VISUAL_DEBUG=shadowfactor paints the map's shadow factor.
     if globals.visual.w > 2.5 {
         let s = sun_shadow(pos);
         return vec3<f32>(s, s, s);
     }
-    let up = globals.sun.y >= 0.0;
-    let light = normalize(select(-globals.sun.xyz, globals.sun.xyz, up));
-    let elevation = smoothstep(-0.05, 0.18, light.y);
-    let exposure = clamp(sky, 0.0, 1.0);
-    // `pos` is already camera-relative world space; applying the inverse view
-    // turned the world-anchored cloud deck with the camera.
-    let world = pos + globals.camera.xyz;
-    // Cloud shadows read only nearby: a few hundred blocks out they are far
-    // below a pixel and the haze owns the colour.
-    var clouds = 1.0;
-    if length(pos) < 384.0 {
-        clouds = 1.0 - cloud_shadow(world, globals.misc.y) * 0.35;
-    }
-    let visibility = sun_shadow(pos) * clouds;
-    let direct = globals.visual.y * exposure * exposure * elevation;
-    var normal = sun_normal(pos);
-    if water {
-        // Animated ripples: the galleries' water is never a flat mirror. Two
-        // crossing wave trains tilt the surface, which feeds the sky
-        // reflection and the sun glitter below.
-        let world = pos + globals.camera.xyz;
-        let t = globals.misc.y * 0.004;
-        let ripple = vec2<f32>(
-            sin(world.x * 0.85 + t * 2.0) + 0.6 * sin(world.z * 1.9 - t * 3.1),
-            cos(world.z * 0.75 - t * 1.7) + 0.6 * cos(world.x * 2.2 + t * 2.6),
-        );
-        normal = normalize(normal + vec3<f32>(ripple.x, 0.0, ripple.y) * 0.055);
-    }
-    let ndl = max(dot(normal, light), 0.0);
-    // Lit faces catch the sun; shadowed ones cool toward the sky (blue-grey by
-    // day, warm at dusk), which is the shade both reference galleries show.
-    let sun_up = smoothstep(-0.02, 0.14, light.y);
-    let shade = mix(1.0, mix(0.66, 1.0, visibility), sun_up);
-    // The shaded side takes the sky's colour: blue-grey by day, warm at dusk.
-    let dusk = clamp(globals.sunrise.a, 0.0, 1.0);
-    let sky_shade = mix(vec3<f32>(0.84, 0.91, 1.10), vec3<f32>(1.07, 1.0, 0.93), dusk);
-    let shadowed = sun_up * (1.0 - visibility);
-    var tint = select(vec3<f32>(0.55, 0.65, 1.0), vec3<f32>(1.0), up);
-    let horizon = clamp(1.0 - abs(light.y) * 2.5, 0.0, 1.0);
-    tint = mix(tint, globals.sunrise.rgb,
-        select(0.0, horizon * clamp(globals.sunrise.a, 0.0, 1.0), up));
-    tint = tint * select(0.22, 1.0, up);
-    let sunlight = direct * visibility * (0.35 + 0.65 * ndl);
-    let to_eye = -pos / max(length(pos), 1e-4);
-    let half = normalize(light + to_eye);
-    let specular = pow(max(dot(normal, half), 0.0), select(80.0, 220.0, water))
-        * direct * visibility;
-    let strength = select(0.06, 0.55, water) * globals.visual.z;
-    var lit = color * shade * mix(vec3<f32>(1.0), sky_shade, shadowed)
-        * (0.94 + 0.14 * sunlight)
-        + tint * color * ndl * sunlight * 0.06
-        + tint * specular * strength;
-    if water {
-        // Grazing angles see more sky, as a real water surface does: reflect the
-        // sky gradient (zenith to horizon) instead of one flat colour, so the sea
-        // gains depth out to the horizon without a separate reflection pass.
-        let reflected = reflect(-to_eye, normal);
-        let sky = mix(globals.fog_color.rgb, globals.sky_color.rgb, clamp(reflected.y, 0.0, 1.0));
-        // Keep the stylised reflection the references show even looking down:
-        // the sea is turquoise with a sky-lit sheen, not a dark vanilla sheet.
-        let fresnel = 0.30 + 0.55 * pow(1.0 - max(dot(normal, to_eye), 0.0), 5.0);
-        lit = lit * vec3<f32>(0.78, 1.02, 1.10) + vec3<f32>(0.010, 0.035, 0.045);
-        lit = mix(lit, sky, clamp(fresnel, 0.0, 0.85) * exposure);
-        // Sparkles where the ripples catch the sun; the bloom pass turns them
-        // into the glints of the galleries.
-        let half2 = normalize(light + to_eye);
-        let glint = pow(max(dot(normal, half2), 0.0), 420.0) * direct * visibility;
-        lit = lit + globals.sunrise.rgb * glint * 1.4 * globals.visual.z;
-    }
-    // Luxium's golden hour is a lit sky, not just a setting sun: lift the
-    // shaded side with the warm horizon light so the terrain stays readable.
-    let fill = dusk * smoothstep(-0.22, 0.06, globals.sun.y);
-    lit = lit + color * globals.sunrise.rgb * fill * exposure * 0.42;
-    return lit;
+    return miniature_lit(albedo, tint, pos, sky, block, water);
 }
-// Vintage Lux's near sun shadow map. The light's whole near field is one
-// orthographic map; the vertex pass draws the same section instances as the
-// world, and the fragment keeps the sprite's cutout so leaves still cast.
+// The near sun shadow map. The light's whole near field is one orthographic
+// map; the vertex pass draws the same section instances as the world, and the
+// fragment keeps the sprite's cutout so leaves still cast.
 struct ShadowOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -641,17 +670,28 @@ fn solid_color(in: TerrainOut) -> vec4<f32> {
     // footprint asks for (a distant cell becomes its average colour
     // continuously), lit by the same sun, water and haze as the resident
     // chunks, so the seam between the two is a change of detail, not of look.
-    if (in.layer & 0x4000u) != 0u && globals.visual.x > 0.5 {
+    if (in.layer & 0x4000u) != 0u {
+        // A merged cell always averages, whatever drives the look: its UV runs
+        // in blocks, so a sharp sample turns one far ring into block noise.
         let texel = sprite_blurred(in.uv, in.layer & 0x3fffu);
         var color = texel.rgb * in.color.rgb;
-        color = sunlit(color, in.pos, in.skylight, false);
-        return vec4<f32>(atmosphere(color, in.pos), 1.0);
+        if globals.visual.x > 0.5 {
+            color = sunlit(texel.rgb, in.tint, in.pos, in.skylight, in.blocklight, false);
+            let fogged = apply_fog_dir(vec4(color, 1.0), in.spherical, in.cylindrical, in.pos);
+            let horizon = smoothstep(57344.0, 65536.0, length(in.pos));
+            return vec4<f32>(mix(fogged.rgb, globals.fog_color.rgb, horizon), 1.0);
+        }
+        color = mix(globals.fog_color.rgb, color, in.visibility);
+        let horizon = smoothstep(57344.0, 65536.0, length(in.pos));
+        return vec4<f32>(mix(color, globals.fog_color.rgb, horizon), 1.0);
     }
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
-    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    let texel = sprite(in.uv, in.layer & 0x3fffu);
     var color = texel * in.color;
-    if in.emission == 0u {
-        color = vec4<f32>(sunlit(color.rgb, in.pos, in.skylight, false), color.a);
+    if in.emission == 0u && globals.visual.x > 0.5 {
+        color = vec4<f32>(
+            sunlit(texel.rgb, in.tint, in.pos, in.skylight, in.blocklight, false),
+            texel.a);
     }
     // terrain.fsh: the fade-in mixes toward the fog colour.
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
@@ -664,7 +704,7 @@ fn solid_color(in: TerrainOut) -> vec4<f32> {
     if in.emission > 0u {
         let whole = in.emission > 4u;
         let tier = select(in.emission, in.emission - 4u, whole);
-        let l = in.layer & 0x7fffu;
+        let l = in.layer & 0x3fffu;
         let t = textureLoad(emission_thresholds, vec2(i32(l % SPRITE_SPLIT), i32(l / SPRITE_SPLIT)), 0);
         if brightness(texel.rgb) >= select(t.r, t.g, whole) {
             emissive = 0.7 * f32(4u - min(tier, 4u)) / 4.0;
@@ -680,19 +720,35 @@ fn solid_color(in: TerrainOut) -> vec4<f32> {
 // layer drawn first in front (gfx.rs's water tiers): dithered, the faded-out
 // pixels showed the layer behind through the one in front, twice the water.
 @fragment fn fs_translucent(in: TerrainOut) -> @location(0) vec4<f32> {
-    if (in.layer & 0x4000u) != 0u && globals.visual.x > 0.5 {
+    if (in.layer & 0x4000u) != 0u {
         let texel = sprite_blurred(in.uv, in.layer & 0x3fffu);
-        var color = texel.rgb * in.color.rgb * vec3<f32>(0.80, 1.0, 1.06) + vec3<f32>(0.0, 0.02, 0.03);
-        color = sunlit(color, in.pos, in.skylight, true);
-        color = atmosphere(color, in.pos);
+        var color = texel.rgb * in.color.rgb;
+        if globals.visual.x > 0.5 {
+            color = sunlit(texel.rgb, in.tint, in.pos, in.skylight, in.blocklight, true);
+            let fogged = apply_fog_dir(vec4(color, 1.0), in.spherical, in.cylindrical, in.pos);
+            let horizon = smoothstep(57344.0, 65536.0, length(in.pos));
+            return vec4<f32>(mix(fogged.rgb, globals.fog_color.rgb, horizon), 0.78);
+        }
+        color = mix(globals.fog_color.rgb, color, in.visibility);
+        let horizon = smoothstep(57344.0, 65536.0, length(in.pos));
+        color = mix(color, globals.fog_color.rgb, horizon);
         return vec4<f32>(color, 0.78);
     }
-    var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    var color = sprite(in.uv, in.layer & 0x3fffu) * in.color;
     // The vertex alpha's high nibble marks a fluid face (mesher::fluid_face).
     // Only water gets the water surface; glass and ice stay clear surfaces.
     let flags = u32(round(in.color.a * 255.0)) >> 4u;
     let fluid = flags >= 8u && (flags & 7u) < 6u;
-    color = vec4<f32>(sunlit(color.rgb, in.pos, in.skylight, fluid), color.a);
+    if globals.visual.x > 0.5 {
+        var albedo = sprite(in.uv, in.layer & 0x3fffu).rgb;
+        var alpha = color.a;
+        if fluid {
+            albedo = miniature_water_albedo(albedo);
+            alpha = min(alpha, min(max(albedo.r, albedo.g) * 1.3, 0.7));
+        }
+        color = vec4<f32>(
+            sunlit(albedo, in.tint, in.pos, in.skylight, in.blocklight, fluid), alpha);
+    }
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     if color.a < 0.01 { discard; }
     var out = apply_fog_dir(color, in.spherical, in.cylindrical, in.pos);
@@ -822,29 +878,10 @@ fn sky_along_ray(d: vec3<f32>) -> vec3<f32> {
     if w > 0.0 {
         color = mix(color, globals.sunrise.rgb, w * globals.sunrise.a);
     }
-    // Visual Vibrance's sky: Visual Vibrance's clean pastel day, with the sun's
-    // white halo, and at golden hour Luxium's wide warm glow and the
-    // horizontal streak that runs through the sun.
     if globals.visual.x > 0.5 {
-        let light = normalize(select(-globals.sun.xyz, globals.sun.xyz, globals.sun.y >= 0.0));
-        let dusk = clamp(globals.sunrise.a, 0.0, 1.0);
-        let up = smoothstep(-0.05, 0.15, light.y);
-        let facing = max(dot(d, light), 0.0);
-        let white = mix(vec3<f32>(1.0), globals.sunrise.rgb, 0.8 * dusk);
-        color = color + white * (pow(facing, 128.0) * 0.45 + pow(facing, 10.0) * 0.045) * up;
-        let flat_d = d.xz;
-        let flat_light = light.xz;
-        let dl = max(length(flat_d), 1e-4);
-        let ll = max(length(flat_light), 1e-4);
-        let around = pow(max(dot(flat_d / dl, flat_light / ll), 0.0), 8.0);
-        let side = max(1.0 - abs(d.y - light.y) * 10.0, 0.0);
-        color = color + globals.sunrise.rgb * side * around * dusk * 0.24;
-        // The pastel sky the Vibrant Visuals look is known for, and Luxium's
-        // pink-cream sky at golden hour.
-        let day = smoothstep(0.0, 0.35, globals.sun.y);
-        let grey = vec3<f32>(dot(color, vec3<f32>(0.2126, 0.7152, 0.0722)));
-        color = mix(color, grey, 0.18 * day) * (1.0 + 0.06 * day);
-        color = mix(color, globals.sunrise.rgb, 0.28 * dusk);
+        // skybasic.fsh: the pack fogs the horizon toward the fog colour with a
+        // 1/(up² + 0.05) falloff.
+        color = mix(color, globals.fog_color.rgb, 0.05 / (max(d.y, 0.0) * max(d.y, 0.0) + 0.05));
     }
     return color;
 }

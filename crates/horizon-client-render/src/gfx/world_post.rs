@@ -3,7 +3,7 @@
 //! anti-aliases it onto the screen, under the hand and HUD. With none on,
 //! the world renders straight to the screen.
 //!
-//! The Visual Vibrance profile's glow runs here too, at a quarter of the
+//! The Miniature Shader profile's glow runs here too, at a quarter of the
 //! world's pixels: a bright pass (threshold and light shafts), a separable
 //! Gaussian, and one composite that applies it with the grade. The glow was a
 //! ring of full-resolution taps; a quarter-size chain spreads wider for a
@@ -383,6 +383,7 @@ impl Post {
             t.size != size
                 || t.taa.as_ref().map(|h| h.size) != history_size
                 || (bloom && t.bloom.is_none())
+                || (!bloom && t.bloom.is_some())
         }) {
             let make_tex = |label, size: [u32; 2], format, usage| {
                 device.create_texture(&wgpu::TextureDescriptor {

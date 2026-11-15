@@ -15,6 +15,10 @@ client_secret_*.json
 /run/
 /logs/
 /dist/
+# Reference shader packs are black-box inputs, never repository content.
+/web/packs/*.zip
+/web/dist/packs/*.zip
+Visual-Vibrance-v0.3.5a.zip
 /mods/horizon/build/
 /saves/
 /backups/

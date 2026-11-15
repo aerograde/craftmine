@@ -8,6 +8,7 @@ use crate::{
     streaming::{LodSampler, LodSource, WorkerContext},
 };
 pub mod cache;
+pub mod lattice;
 mod mesh;
 use horizon_os::thread;
 use horizon_world::registry::BlockStateId;
@@ -108,12 +109,16 @@ fn split_width(level: u8) -> i32 {
 }
 /// The coarsest infinite LOD tile level: 512-block cells at the far horizon.
 /// From level 2 (4-block cells) the cells double each ring to 512-block cells
-/// at the far roots. The giant far cells are what let the horizon reach
-/// 65,536 blocks with a bounded quad count; the haze hides their size.
+/// at the far roots. Those rings are continuous heightfields, so the horizon
+/// reaches 65,536 blocks with a bounded vertex count and no giant cubes.
 const INFINITE_LEVEL: u8 = 9;
-/// Past this cell width the seed mesh is a silhouette, not terrain: the far
-/// horizon is left to fog instead of drawing obvious coarse blocks.
-const MAX_VISIBLE_CELL: i32 = 8;
+/// From this cell width up, far terrain is a continuous heightfield rather
+/// than voxel columns. The whole planned horizon is drawn: fog never stands
+/// in for a missing ring. 16 blocks, not 8: an 8-block cell is still a
+/// handful of pixels beside the resident chunks, and flattening one there
+/// reads as a smooth blob where a hill should be — the rings that small keep
+/// their voxel columns and their block detail.
+const HEIGHTFIELD_CELL: i32 = 16;
 /// Main-thread result budget per update. Workers can finish hundreds of tiles
 /// in a burst; taking them all in one frame is a hitch. Accepting a mesh is
 /// cheap (it is only moved into the upload queue), so take enough that the
@@ -2603,9 +2608,6 @@ impl Lod {
     fn rebuild_wanted(&mut self, camera: [i32; 2]) {
         self.wanted.clear();
         for &key in &self.plan.nodes {
-            if key.size() / 16 > MAX_VISIBLE_CELL {
-                continue;
-            }
             if self.ready.contains_key(&key) || self.fully_covered(key) {
                 continue;
             }
@@ -3073,8 +3075,6 @@ mod tests {
             true,
         );
         lod.rebuild_wanted([0, 0]);
-        // Coarse roots are deliberately outside the draw cap: the far
-        // horizon is fog, not a 512-block-cell silhouette.
         let containing = lod
             .plan
             .roots
@@ -3092,21 +3092,19 @@ mod tests {
             })
         };
         assert!(
-            !wanted(&lod, containing),
-            "coarse roots beyond the cell cap must be left to fog"
+            wanted(&lod, containing),
+            "the root over the camera must fill the horizon while its children sample"
         );
         assert!(
-            lod.wanted.iter().all(|w| {
-                TileKey {
-                    x: w.0.x,
-                    z: w.0.z,
-                    level: w.0.level,
-                }
-                .size()
-                    / 16
-                    <= MAX_VISIBLE_CELL
-            }),
-            "a wanted tile exceeds the visible LOD cell cap"
+            lod.plan
+                .nodes
+                .iter()
+                .filter(|key| !lod.plan.split.contains(key))
+                .all(|key| wanted(&lod, *key) || lod.fully_covered(*key))
+        );
+        assert!(
+            lod.wanted.iter().any(|w| w.0.level == INFINITE_LEVEL),
+            "the coarsest horizon ring must be drawn"
         );
         // Samples go nearest first by screen-space size: the near resident
         // tiles and the fallback over the camera share the front, and the

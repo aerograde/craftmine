@@ -2,12 +2,12 @@
 // copied (bilinear) or anti-aliased with FXAA onto the screen before the
 // hand and HUD. Only used when a non-vanilla setting asks for it.
 //
-// The Visual Vibrance profile lives here: a quarter-resolution bright pass
+// The Miniature Shader profile lives here: a quarter-resolution bright pass
 // (threshold, light shafts), a separable Gaussian bloom, and one composite
 // that applies exposure, colour grade, the highlight shoulder and vignette.
 // Running the glow at a quarter of the pixels costs a fraction of the old
 // full-resolution taps while spreading it much wider, which is what the
-// reference's soft, filmic highlights need.
+// profile's soft, filmic highlights need.
 diagnostic(off, derivative_uniformity);
 @group(0) @binding(0) var world: texture_2d<f32>;
 @group(0) @binding(1) var world_sampler: sampler;
@@ -105,23 +105,23 @@ fn grade(c: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     // Exposure, a touch higher in the golden hour, brings the frame into the
     // filmic curve; below 1.0 keeps a bright noon from clipping.
     var graded = max(c, vec3<f32>(0.0)) * (visual.post.x * mix(1.0, 1.05, dusk));
-    // Visual Vibrance's vivid daylight: saturated, but the shade keeps its
+    // Miniature Shader's vivid daylight: saturated, but the shade keeps its
     // own colour instead of turning grey.
     let l = dot(graded, vec3<f32>(0.2126, 0.7152, 0.0722));
     graded = mix(vec3<f32>(l), graded, visual.params.z * (1.0 - 0.12 * dusk));
     // A filmic S-curve: crisp by day, gentler in the haze of dawn and dusk.
     let contrast = mix(visual.params.y, 1.0 + (visual.params.y - 1.0) * 0.55, dusk);
     graded = (graded - vec3<f32>(0.5)) * contrast + vec3<f32>(0.5);
-    // Cool daylight shadows against warm light; the reference's blue-grey
-    // shade under a pale sky, easing to neutral as the sun sets.
+    // Cool daylight shadows against warm light: blue-grey shade under a pale
+    // sky, easing to neutral as the sun sets.
     graded = graded
         + vec3<f32>(0.006, 0.008, 0.016) * (1.0 - l) * (1.0 - dusk)
         + vec3<f32>(0.016, 0.008, 0.002) * (1.0 - l) * dusk;
     // Warmth: a touch at noon so greens stay lively, amber at golden hour.
     let warmth = visual.params.w * (1.0 + 1.1 * dusk);
     graded = graded * vec3<f32>(1.0 + 0.055 * warmth, 1.0 + 0.006 * warmth, 1.0 - 0.045 * warmth);
-    // The galleries keep highlights pastel instead of clipping hard (the sun,
-    // cloud tops, sandstone, white concrete).
+    // Keep highlights pastel instead of clipping hard (the sun, cloud tops,
+    // sandstone, white concrete).
     let over = max(graded - vec3<f32>(0.78), vec3<f32>(0.0));
     graded = graded - over * (0.30 + 0.10 * dusk);
     // A round vignette, so the corners of a wide frame darken evenly. Scale by

@@ -22,11 +22,3 @@ same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
 
 `launch.svg?src=<url>` can point at another copy of the HTML for testing; that
 copy must send CORS headers and allow range requests.
-
-## Credits
-
-The bundled **Visual Vibrance** shader pack is by Josh Britain (jbritain),
-© 2025, and is redistributed unmodified for personal, non-commercial use under
-its own source-available license (not OSI open source). See the `LICENSE` inside
-`shaderpacks/Visual-Vibrance-v0.3.5a.zip` and `THIRD_PARTY_NOTICES.md` in the
-source repository. <https://jbritain.net>

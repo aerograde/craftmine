@@ -259,7 +259,19 @@ async function served() {
     const tar = new Uint8Array(
         await new Response(gz.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
     const manifest = await (await fetch("fs/manifest.txt")).text();
-    return { glue, tar, manifest, base: "fs/res/" };
+    // The served build ships the same pack archive the single file embeds, so
+    // the bundled Miniature pack lands in `/shaderpacks` before options load.
+    let packs = null;
+    try {
+        const packResponse = await fetch("packs.tar.gz");
+        if (packResponse.ok) {
+            packs = new Uint8Array(await new Response(
+                packResponse.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+        }
+    } catch (e) {
+        console.warn(`Horizon: no bundled shader packs: ${e}`);
+    }
+    return { glue, tar, packs, manifest, base: "fs/res/" };
 }
 
 async function main() {
@@ -287,26 +299,6 @@ async function main() {
             if (document.hidden) saveChanges(glue, root);
         });
         addEventListener("pagehide", () => saveChanges(glue, root));
-    }
-
-    // The Visual Vibrance reference pack (Iris/OptiFine format) ships with the
-    // dev build so the game can be compared against the actual reference, not a
-    // built-in impression of it. It appears in Shader Packs and is not selected
-    // unless the player picks it. The single-file build has its packs inside its
-    // own resources instead (web/package.py single).
-    if (!globalThis.horizonOffline) {
-        try {
-            const pack = await fetch("packs/Visual-Vibrance-v0.3.5a.zip");
-            if (pack.ok) {
-                glue.horizon_install_saved_file(
-                    "shaderpacks/Visual-Vibrance-v0.3.5a.zip",
-                    new Uint8Array(await pack.arrayBuffer()),
-                    Date.now(),
-                );
-            }
-        } catch (e) {
-            console.warn(`Horizon: reference shader pack not installed: ${e}`);
-        }
     }
 
     status.textContent = "Loading resources…";

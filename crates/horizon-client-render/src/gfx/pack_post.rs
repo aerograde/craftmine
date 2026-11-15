@@ -1442,13 +1442,17 @@ fn build_pass(
             entries: &entries,
         });
         let layouts: Vec<Option<&wgpu::BindGroupLayout>> = if cfg!(target_arch = "wasm32") {
-            // WebGPU allows four bind groups: the buffers take the ids slot and the geometry
-            // indices group is omitted (the pack's shaders do not use either).
+            // WebGPU allows four bind groups. Geometry programs that read `mc_Entity`
+            // (Miniature's terrain and entities do) need the block-id table at group 3;
+            // only programs without it can put the buffer objects there.
+            let ids = geometry.and_then(|g| g.ids);
             vec![
                 Some(&layout),
                 geometry.and_then(|g| g.table),
                 draw.then_some(draws),
-                (!interface.buffers.is_empty()).then_some(&pack.buffers.read_layout),
+                ids.or_else(|| {
+                    (!interface.buffers.is_empty()).then_some(&pack.buffers.read_layout)
+                }),
             ]
         } else {
             vec![
@@ -2828,9 +2832,7 @@ impl PackPost {
             }
             let (groups, ids) = (&self.page_groups, pass.ids);
             let page = |rp: &mut wgpu::RenderPass<'_>, page: u32| {
-                if !cfg!(target_arch = "wasm32")
-                    && let Some((_, group)) = groups.get(&page).filter(|_| ids)
-                {
+                if let Some((_, group)) = groups.get(&page).filter(|_| ids) {
                     rp.set_bind_group(3, group, &[]);
                 }
             };

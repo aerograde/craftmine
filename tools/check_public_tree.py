@@ -9,6 +9,7 @@ import sys
 PRIVATE_ROOTS = {".local", "decompiled", "minecraft", "assets", "run", "logs"}
 PRIVATE_EXTENSIONS = {".jar", ".class", ".jfr", ".hprof", ".java"}
 ORIGINAL_JDK_TOOLS = {"tools/JfrSummary.java", "tests/java/JfrFixture.java"}
+REFERENCE_PACK_NAMES = {"Visual-Vibrance-v0.3.5a.zip"}
 
 
 def prohibited(path):
@@ -19,6 +20,8 @@ def prohibited(path):
     # Original Horizon mod sources may also be tracked.
     if parsed.suffix == ".java" and path.startswith(("mods/horizon/src/", "mods/horizon-lab/src/")):
         return not ("/dev/horizonlab/" in path)
+    if parsed.name in REFERENCE_PACK_NAMES:
+        return True
     return bool(parsed.parts and parsed.parts[0] in PRIVATE_ROOTS) or parsed.suffix.lower() in PRIVATE_EXTENSIONS
 
 

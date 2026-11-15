@@ -689,9 +689,9 @@ impl<'p> Stage<'p> {
     /// `layout(std430, binding = n) buffer Name {`: an SSBO, in set 4 at its binding. Its
     /// access qualifiers go, so that every stage binds it alike (read and write).
     fn buffer_block(&mut self, words: &[usize]) {
-        // Fragment and vertex stages only read the pack's environment SSBOs. Declaring them
-        // readonly lets WebGPU bind them there (writable storage in a fragment stage is not
-        // available); the compute stages keep read-write.
+        // WebGPU has no writable storage buffers in a vertex or fragment stage here: the
+        // graphics layouts bind them read-only, so every stage declares it that way. Compute
+        // keeps read-write, and its layout matches.
         if self.kind != ShaderStage::Compute
             && let Some(&i) = words.iter().find(|&&i| self.tokens[i] == "buffer")
         {

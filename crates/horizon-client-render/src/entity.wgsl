@@ -28,10 +28,10 @@ struct Globals {
     emissive_count: vec4<u32>,
     sunrise_fan: array<vec4<f32>, 32>,
     filtering: vec4<f32>,
-    // Visual Vibrance's daylight pass (terrain.wgsl documents it): x on, y direct sun,
+    // Miniature Shader's daylight pass (terrain.wgsl documents it): x on, y direct sun,
     // z specular, w sun-tinted fog.
     visual: vec4<f32>,
-    // Visual Vibrance's near sun shadow map (terrain.wgsl documents it).
+    // Miniature Shader's near sun shadow map (terrain.wgsl documents it).
     shadow_view_proj: mat4x4<f32>,
     shadow_params: vec4<f32>,
     // The camera's world position, xyz (terrain.wgsl documents it).
@@ -277,8 +277,8 @@ fn entity_color(in: Out, front: bool) -> vec4<f32> {
         // clouds.fsh: alpha fades out towards the cloud fog end.
         var rgb = color.rgb;
         if globals.visual.x > 0.5 {
-            // The galleries' clouds are lit by their face: bright, warm tops,
-            // blue-grey undersides, and a sunset wash on the sunlit side.
+            // Clouds are lit by their face: bright, warm tops, blue-grey
+            // undersides, and a sunset wash on the sunlit side.
             let to_eye = normalize(globals.camera.xyz - in.world);
             var n = cross(dpdx(in.world), dpdy(in.world));
             let n_len = length(n);

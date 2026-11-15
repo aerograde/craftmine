@@ -800,8 +800,8 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
     mark_atomic(&module, &mut interface.images);
     // A declared image the shader never reads or writes needs no binding. Dropping it matters on
     // WebGPU, which refuses a read-write storage texture this device doesn't support even when
-    // the program only declares it (the Visual Vibrance `prepare2` declares its floodfill voxel
-    // map and never touches it).
+    // the program only declares it (a pack's prepare program may declare a floodfill voxel map
+    // and never touch it).
     let used = used_global_bindings(&module);
     interface
         .images
@@ -1109,6 +1109,23 @@ fn compile(stage: &Stage, text: &str, header_lines: usize) -> Result<naga::Modul
     // those keeps the IR's meaning for every backend and lets the web build
     // compile the same programs.
     clear_unreachable_fall_through(&mut module);
+    if stage.kind != naga::ShaderStage::Compute
+        && let Some(buffer) = written_storage_buffer(&module)
+    {
+        return Err(vec![Error {
+            file: "<horizon>".into(),
+            line: 0,
+            message: format!(
+                "the storage buffer `{buffer}` is written from a {} shader; graphics stages bind a pack's storage buffers read-only (WebGPU has no writable storage in the vertex stage), so writes belong in a compute program",
+                match stage.kind {
+                    naga::ShaderStage::Vertex => "vertex",
+                    naga::ShaderStage::Fragment => "fragment",
+                    naga::ShaderStage::Compute => "compute",
+                    _ => "graphics",
+                }
+            ),
+        }]);
+    }
     Validator::new(ValidationFlags::all(), Capabilities::all())
         .subgroup_operations(naga::valid::SubgroupOperationSet::all())
         .subgroup_stages(naga::valid::ShaderStages::all())
@@ -1126,6 +1143,79 @@ fn compile(stage: &Stage, text: &str, header_lines: usize) -> Result<naga::Modul
             vec![at(&text, span, message)]
         })?;
     Ok(module)
+}
+
+/// The storage buffer a graphics-stage entry point writes, if any.
+///
+/// Graphics stages declare every storage buffer read-only (`scan::Stage::buffer_block`): the
+/// graphics layouts bind them that way, and WebGPU forbids a vertex stage from writing storage
+/// at all. A pack that writes one therefore produces a module naga rejects with "The pointer
+/// [n] doesn't relate to a valid destination for a store", which names neither the buffer nor
+/// the reason. This finds the buffer first so the error can say both.
+fn written_storage_buffer(module: &naga::Module) -> Option<String> {
+    fn walk(
+        module: &naga::Module,
+        function: &naga::Function,
+        block: &naga::Block,
+        found: &mut Option<String>,
+    ) {
+        for statement in block.iter() {
+            match statement {
+                naga::Statement::Store { pointer, .. } => {
+                    let mut expression = *pointer;
+                    loop {
+                        match &function.expressions[expression] {
+                            naga::Expression::GlobalVariable(global) => {
+                                let variable = &module.global_variables[*global];
+                                if matches!(variable.space, naga::AddressSpace::Storage { .. }) {
+                                    // GLSL block names land on the global's type, not the
+                                    // variable (which naga leaves anonymous).
+                                    *found = Some(
+                                        variable
+                                            .name
+                                            .clone()
+                                            .or_else(|| module.types[variable.ty].name.clone())
+                                            .unwrap_or_else(|| {
+                                                format!("binding {}", global.index())
+                                            }),
+                                    );
+                                }
+                                break;
+                            }
+                            naga::Expression::Access { base, .. }
+                            | naga::Expression::AccessIndex { base, .. } => expression = *base,
+                            _ => break,
+                        }
+                    }
+                }
+                naga::Statement::Block(inner) => walk(module, function, inner, found),
+                naga::Statement::If { accept, reject, .. } => {
+                    walk(module, function, accept, found);
+                    walk(module, function, reject, found);
+                }
+                naga::Statement::Switch { cases, .. } => {
+                    for case in cases.iter() {
+                        walk(module, function, &case.body, found);
+                    }
+                }
+                naga::Statement::Loop {
+                    body, continuing, ..
+                } => {
+                    walk(module, function, body, found);
+                    walk(module, function, continuing, found);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = None;
+    for (_, function) in module.functions.iter() {
+        walk(module, function, &function.body, &mut found);
+    }
+    for entry in &module.entry_points {
+        walk(module, &entry.function, &entry.function.body, &mut found);
+    }
+    found
 }
 
 /// Clears `fall_through` on every switch case that cannot reach the next case.
@@ -2099,7 +2189,9 @@ mod tests {
 
     #[test]
     fn ssbo_blocks_translate() {
-        let vsh = "#version 120\nlayout(std430, binding = 0) buffer environmentData { vec3 sunlightColor; vec3 skylightColor; float weatherFrameTimeCounter; uint encodedHeldLightColor; };\nvoid main() { gl_Position = ftransform(); sunlightColor = vec3(1.0); }\n";
+        // Graphics stages bind the pack's storage buffers through the read-only layout, so
+        // both stages read them; writes are a compute-stage capability.
+        let vsh = "#version 120\nlayout(std430, binding = 0) buffer environmentData { vec3 sunlightColor; vec3 skylightColor; float weatherFrameTimeCounter; uint encodedHeldLightColor; };\nvoid main() { gl_Position = ftransform(); vec3 c = sunlightColor; }\n";
         let fsh = "#version 120\nlayout(std430, binding = 0) buffer environmentData { vec3 sunlightColor; vec3 skylightColor; float weatherFrameTimeCounter; uint encodedHeldLightColor; };\nvoid main() { gl_FragColor = vec4(skylightColor, 1.0); }\n";
         let p = program(
             &[("composite.vsh", vsh), ("composite.fsh", fsh)],
@@ -2107,5 +2199,23 @@ mod tests {
         );
         assert!(p.is_ok(), "{:?}", p.err());
         assert_eq!(p.unwrap().interface.buffers, vec![0]);
+    }
+
+    /// A graphics stage that writes an SSBO says which buffer and why it cannot, rather than
+    /// failing later with naga's "pointer doesn't relate to a valid destination for a store".
+    #[test]
+    fn graphics_stage_storage_write_names_the_buffer() {
+        let vsh = "#version 120\nlayout(std430, binding = 0) buffer environmentData { vec3 sunlightColor; };\nvoid main() { gl_Position = ftransform(); sunlightColor = vec3(1.0); }\n";
+        let fsh = "#version 120\nvoid main() { gl_FragColor = vec4(1.0); }\n";
+        let p = program(
+            &[("composite.vsh", vsh), ("composite.fsh", fsh)],
+            Target::Window,
+        );
+        let errors = p
+            .err()
+            .expect("a write to a read-only graphics buffer is refused");
+        let text = format!("{errors:?}");
+        assert!(text.contains("environmentData"), "{text}");
+        assert!(text.contains("compute"), "{text}");
     }
 }

@@ -439,7 +439,13 @@ def packs_archive(out_path: Path, packs: list[tuple[str, Path]]) -> None:
     with open(out_path, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=9, mtime=0) as gz:
         with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tar:
             for name, path in packs:
-                add_tar_file(tar, f"shaderpacks/{name}", path)
+                if path.is_dir():
+                    for file in sorted(path.rglob("*")):
+                        if file.is_file():
+                            rel = file.relative_to(path).as_posix()
+                            add_tar_file(tar, f"shaderpacks/{name}/{rel}", file)
+                else:
+                    add_tar_file(tar, f"shaderpacks/{name}", path)
 
 
 def dist_resources(dist: Path) -> Path:
@@ -497,13 +503,22 @@ def write_base64_block(out, element_id: str, path: Path) -> None:
 
 
 def pack_files() -> list[tuple[str, Path]]:
-    """The shader packs to put in the single file, its own folder first."""
+    """The shader packs to put in the single file, its own folder first.
+
+    The checkout ships its packs in `shaderpacks/` (the folder the game reads
+    natively), so the browser build and the desktop build share one copy.
+    """
     packs: dict[str, Path] = {}
-    for folder in (WEB / "packs", DIST / "packs"):
+    for folder in (REPO / "shaderpacks", WEB / "packs", DIST / "packs"):
         if not folder.is_dir():
             continue
-        for path in sorted(folder.glob("*.zip")):
-            packs.setdefault(path.name, path)
+        for path in sorted(folder.iterdir()):
+            if path.name.startswith(".") or path.name == "README.md":
+                continue
+            if path.is_file() and path.suffix != ".zip":
+                continue
+            if path.is_dir() or path.is_file():
+                packs.setdefault(path.name, path)
     return sorted(packs.items())
 
 

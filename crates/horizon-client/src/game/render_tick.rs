@@ -108,20 +108,16 @@ impl Game<'_> {
             self.res.fog()
         };
         let infinite_lod = self.lod.is_some() && self.settings.horizon.lod_infinite;
-        // The built-in profile's aerial perspective fades the infinite horizon
-        // into the sky. Without it (Visuals off, or a shader pack owns the
-        // frame) the LOD needs ordinary distance fog, or it ends at a hard rim
-        // at the render distance.
-        let aerial = self.settings.horizon.visuals && self.settings.horizon.shader_pack.is_empty();
         let input = FogInputs {
             fog_type,
             sky,
             water_fog_color,
             biome,
             render_distance_chunks: self.terrain_distance(),
-            // Infinite terrain is meant to be readable to the horizon: only
-            // the sky/cloud/light-shaft atmosphere remains, never distance fog.
-            distant_terrain: self.lod.is_some() && (!infinite_lod || !aerial),
+            // Infinite terrain is real geometry to its last ring: distance fog
+            // is never its horizon. Only the finite slider extends the
+            // vanilla-range atmosphere.
+            distant_terrain: self.lod.is_some() && !infinite_lod,
             cloud_range_chunks: self.settings.cloud_range,
             camera_y: camera.y,
             min_y: self.level_min_y(),
@@ -147,16 +143,6 @@ impl Game<'_> {
         let mut fog = horizon_client::fog::setup_fog(tables, &self.fog, &input);
         if !self.settings.horizon.fog {
             horizon_client::fog::clear_distance_fog(&mut fog, &input);
-        } else if infinite_lod && aerial && fog_type == FogType::Atmospheric {
-            // A light far haze is what keeps the infinite LOD readable: the
-            // near rings stay crisp, while the coarse horizon dissolves before
-            // its tile silhouettes become obvious. This is deliberately far enough
-            // to hide the last coarse LOD ring, but well past the near detail.
-            let (start, end) = (512.0, 1536.0);
-            fog.render_distance_start = start;
-            fog.render_distance_end = end;
-            fog.environmental_start = start;
-            fog.environmental_end = end;
         }
         fog
     }
