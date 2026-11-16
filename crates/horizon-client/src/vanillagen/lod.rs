@@ -37,8 +37,7 @@ fn cache_budget() -> usize {
     // atomic, not a `OnceLock`: the sampling workers ask this too, and a loser
     // of `get_or_init` blocks, which the browser traps as `Atomics.wait cannot
     // be called in this context` on a thread that may not wait.
-    static BUDGET: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(usize::MAX);
+    static BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
     let known = BUDGET.load(std::sync::atomic::Ordering::Relaxed);
     if known != usize::MAX {
         return known;
