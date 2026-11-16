@@ -14,6 +14,15 @@ Apache-2.0; both licenses are in that folder (`LICENSE.MIT`, `LICENSE.APACHE`).
 fixes to its GLSL frontend that shader packs need, each applied in the commit that needed it. It is licensed under MIT or Apache-2.0; both licenses
 are in that folder (`LICENSE.MIT`, `LICENSE.APACHE`).
 
+## winit
+
+`third_party/winit` is [winit](https://github.com/rust-windowing/winit) 0.30.13 by the winit
+developers, with one fix to its web (wasm) event loop: an event fired from inside an event
+handler re-entered `handle_event` and panicked with `RefCell already borrowed`, which unwound
+the frame loop and left a black canvas. Re-entrant events are queued instead, as the crate
+already does for events that arrive before the runner exists. It is licensed under Apache-2.0;
+the licence is in that folder (`LICENSE`).
+
 ## Minecraft Miniature Shader
 
 The bundled pack in `shaderpacks/Miniature/` (which the web build packages too) is the unmodified upstream

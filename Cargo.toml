@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal", "third_party/naga"]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal", "third_party/naga", "third_party/winit"]
 members = [
     "crates/horizon-core",
     "crates/horizon-os",
@@ -68,6 +68,9 @@ large_enum_variant = "allow"
 wgpu-hal = { path = "third_party/wgpu-hal" }
 # naga 30.0.1, with the fixes to its GLSL frontend that shader packs need (THIRD_PARTY_NOTICES.md).
 naga = { path = "third_party/naga" }
+# winit 0.30.13, with the web event loop no longer panicking on a re-entrant
+# event (THIRD_PARTY_NOTICES.md).
+winit = { path = "third_party/winit" }
 
 # Line tables keep file:line in backtraces; full debug info made every
 # example and test binary hundreds of megabytes and slow to link.
