@@ -933,18 +933,25 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
     // presets reach less far and draw coarser cells. Performance used to leave
     // both alone, which is why it barely helped on the 8 GB browser tabs that
     // need it most: the horizon cost the same as on Ultra.
+    //
+    // None of them turn infinite back on: the default horizon is bounded (96
+    // chunks) because past it the cells are wider than a block and read as one
+    // flat quad, and a preset that silently restored an 8192-block ring undid
+    // the setting the player is looking at. Infinite is an explicit choice.
     match preset {
         Preset::Performance => {
             g.lod_infinite = false;
-            g.lod_distance = 128;
+            g.lod_distance = 64;
             g.far_detail = FarDetail::Reduced;
         }
         Preset::Balanced => {
-            g.lod_infinite = true;
+            g.lod_infinite = false;
+            g.lod_distance = 96;
             g.far_detail = FarDetail::Reduced;
         }
         Preset::Quality | Preset::Ultra => {
-            g.lod_infinite = true;
+            g.lod_infinite = false;
+            g.lod_distance = 128;
             g.far_detail = FarDetail::Full;
         }
         Preset::Custom => {}

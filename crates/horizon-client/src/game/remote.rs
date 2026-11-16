@@ -5437,6 +5437,10 @@ impl Game<'_> {
             return;
         }
         r.level_load.finish();
+        // The screen is gone, so its line goes with it: `status` is reported by
+        // the control socket and read by the loading screen, and leaving it at
+        // "Loading terrain..." made a loaded world look stuck.
+        r.status.clear();
         if !r.loaded_sent {
             r.loaded_sent = true;
             self.send(S::PlayerLoaded(Empty));

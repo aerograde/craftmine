@@ -710,7 +710,9 @@ impl Plan {
         // Infinite terrain stops at 1-block cells within 128 blocks: resident
         // data fills them, and sampling them past that would outnumber the
         // resident chunks streaming needs. Finite terrain splits out to the
-        // resident render distance, as before.
+        // resident render distance, as before: those near tiles are the
+        // block-accurate stand-ins that must look like the chunks they replace,
+        // so shrinking the band would put coarse cells under the player's feet.
         let near = if infinite {
             key.distance(camera) < INFINITE_NEAR
         } else {

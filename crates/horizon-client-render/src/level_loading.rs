@@ -130,6 +130,17 @@ impl LevelLoadTracker {
     pub fn is_active(&self) -> bool {
         self.state.is_some()
     }
+    /// The tracker's state by name, for the `HORIZON_LOAD_DEBUG` line: a
+    /// loading screen that never closes is otherwise silent about which wait it
+    /// is stuck in.
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            None => "done",
+            Some(ClientState::WaitingForServer { .. }) => "waiting-for-server",
+            Some(ClientState::WaitingForPlayerChunk { .. }) => "waiting-for-chunk",
+            Some(ClientState::Ready { .. }) => "ready",
+        }
+    }
     /// `loadingPacketsReceived`: `LEVEL_CHUNKS_LOAD_START` came.
     pub fn loading_packets_received(&mut self) {
         if let Some(ClientState::WaitingForServer { timeout_after }) = self.state {
