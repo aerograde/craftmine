@@ -358,6 +358,18 @@ pub fn web_low_memory() -> bool {
         }
     })
 }
+/// A 4 GB-or-less browser device: the smallest Chromebooks, and the ones whose
+/// tab the browser kills first. Everything `web_low_memory` halves, this
+/// quarters.
+pub fn web_tiny_memory() -> bool {
+    static TINY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TINY.get_or_init(|| {
+        cfg!(target_arch = "wasm32") && {
+            let memory = horizon_os::device_memory_gib();
+            (memory > 0.0 && memory <= 4.0) || horizon_os::hardware_threads() <= 2
+        }
+    })
+}
 /// A LOD distance as far terrain uses it on this adapter.
 pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
     let distance = distance.min(crate::lod::MAX_CHUNKS);
@@ -553,7 +565,15 @@ impl Default for Graphics {
             visual_quality: VisualQuality::Auto,
             lod_distance: 0,
             lod_infinite: true,
-            far_detail: FarDetail::Full,
+            // Full detail everywhere it fits. `Reduced` is a visible change
+            // (coarser far cells), so it is only the 4 GB devices': there the
+            // choice is that or the browser killing the tab. An 8 GB machine
+            // keeps the horizon it has always drawn.
+            far_detail: if web_tiny_memory() {
+                FarDetail::Reduced
+            } else {
+                FarDetail::Full
+            },
             cave_culling: true,
             entity_culling: false,
             chunk_updates: if low { 48 } else { 0 },
@@ -621,6 +641,18 @@ impl Graphics {
             if !g.taa {
                 g.fxaa = true;
             }
+        }
+        if web_tiny_memory() {
+            // 4 GB: the tab is the first thing the browser reclaims. Render
+            // less far and at a lower internal resolution, which are the two
+            // costs that scale with the frame rather than with a setting.
+            g.far_detail = FarDetail::Reduced;
+            g.resolution_scale = g.resolution_scale.min(66);
+            // Half the texture set and half the per-frame upload: both are
+            // video memory the tab cannot get back once it has taken it.
+            g.texture_budget_mib = g.texture_budget_mib.min(32);
+            g.upload_budget_kib = g.upload_budget_kib.min(1024);
+            g.chunk_updates = g.chunk_updates.min(32);
         }
         if fs::remove_file(dir.join(HDR_MARKER)).is_ok() && g.hdr {
             g.hdr = false;
@@ -900,6 +932,54 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The device tiers are thresholds on the page's own report, so the only
+    /// thing to pin is that they nest: a 4 GB device must always take the
+    /// cheaper path, and a 4 GB one is always an 8 GB one too. A regression
+    /// that inverted or widened them would quietly give the smallest Chromebook
+    /// the full-detail horizon it cannot hold.
+    #[test]
+    fn the_tiny_tier_is_the_cheaper_half_of_the_low_one() {
+        // The wasm thresholds; the native build answers false to both.
+        let low = |mib: f64, cores: u16| (mib > 0.0 && mib <= 8.0) || cores <= 4;
+        let tiny = |mib: f64, cores: u16| (mib > 0.0 && mib <= 4.0) || cores <= 2;
+        for mib in [0.5, 2.0, 4.0, 6.0, 8.0, 16.0, 32.0] {
+            for cores in [1, 2, 4, 6, 8, 16] {
+                assert!(
+                    !tiny(mib, cores) || low(mib, cores),
+                    "tiny must be a subset of low at {mib} GiB and {cores} cores"
+                );
+            }
+        }
+        // The reported 8 GB Chromebooks land where the profile expects.
+        assert!(low(4.0, 4) && tiny(4.0, 4), "a 4 GB device takes both");
+        assert!(low(8.0, 4) && !tiny(8.0, 4), "8 GB keeps full far detail");
+        assert!(
+            !low(16.0, 8) && !tiny(16.0, 8),
+            "a real machine keeps it all"
+        );
+        // A two-thread machine is as memory-bound as a 4 GB one.
+        assert!(tiny(16.0, 2), "two threads means the tiny profile");
+    }
+
+    /// Whatever the device, the picture is only reduced where the alternative
+    /// is the tab being killed: `Reduced` far detail is a visible change, so
+    /// the default keeps `Full` on anything with room for it.
+    #[test]
+    fn the_default_far_detail_follows_the_tiny_tier() {
+        let g = Graphics::default();
+        if web_tiny_memory() {
+            assert_eq!(g.far_detail, FarDetail::Reduced);
+        } else {
+            assert_eq!(g.far_detail, FarDetail::Full);
+        }
+        if web_low_memory() {
+            assert!(
+                g.resolution_scale <= 80,
+                "a low-memory device must not render at full scale"
+            );
+        }
+    }
 
     #[test]
     fn the_api_choice_matches_the_system() {

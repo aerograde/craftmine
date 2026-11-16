@@ -32,9 +32,12 @@ const MAX_SAVED: usize = 1024;
 /// Summaries of resident chunks kept for refinement. A summary is 256 columns
 /// of a real chunk, so this is the LOD's second-largest allocation next to the
 /// planned tiles themselves; an 8 GB browser tab (Chromebooks, tablets) keeps a
-/// quarter of them, which its shore-bound view never asks for anyway.
+/// quarter of them, which its shore-bound view never asks for anyway, and a
+/// 4 GB one an eighth.
 pub fn max_saved() -> usize {
-    if crate::graphics::web_low_memory() {
+    if crate::graphics::web_tiny_memory() {
+        MAX_SAVED / 8
+    } else if crate::graphics::web_low_memory() {
         MAX_SAVED / 4
     } else {
         MAX_SAVED

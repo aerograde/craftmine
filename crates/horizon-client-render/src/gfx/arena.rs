@@ -142,8 +142,16 @@ impl Arena {
         capacity: u64,
         usage: wgpu::BufferUsages,
     ) -> Self {
-        // 256 MiB pages, or less where the device's buffers are smaller.
-        let bytes = device.limits().max_buffer_size.min(PAGE_BYTES);
+        // 32 MiB pages, or less where the device's buffers are smaller.
+        let mut bytes = device.limits().max_buffer_size.min(PAGE_BYTES);
+        // A 4 GB browser tab cannot commit 32 MiB pages: the arena was the
+        // largest single allocation the renderer made, and a page is only ever
+        // borrowed, never needed whole.
+        if !cfg!(test) && crate::graphics::web_tiny_memory() {
+            bytes = bytes.min(PAGE_BYTES / 4);
+        } else if !cfg!(test) && crate::graphics::web_low_memory() {
+            bytes = bytes.min(PAGE_BYTES / 2);
+        }
         let page_limit = (bytes / stride) / GRAIN * GRAIN;
         let capacity = capacity.next_multiple_of(GRAIN).min(page_limit);
         Self {
