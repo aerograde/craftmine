@@ -126,6 +126,35 @@ class SingleFileTests(unittest.TestCase):
             "the archive must be deterministic",
         )
 
+    def test_st_package_prefers_the_just_built_single_threaded_module(self):
+        """A stale `dist-st` must not shadow a fresh `dist/pkg-st`.
+
+        Both layouts exist (a plain THREADS=0 build writes `dist/pkg-st`,
+        `DIST=web/dist-st` writes `dist-st/pkg`). The threaded `dist/pkg` used to
+        be tried first, and only a file existence was checked — so packaging
+        silently shipped whatever was in `dist-st`, once an old module that
+        still drew the edition banner.
+        """
+        def wasm(path):
+            (path / "pkg").mkdir(parents=True, exist_ok=True)
+            (path / "pkg" / "horizon-client_bg.wasm").write_bytes(b"WASM")
+            return path
+
+        threaded = wasm(self.root / "dist")
+        stale = wasm(self.root / "dist-st")
+        self.assertEqual(package.st_package(stale, threaded), stale / "pkg")
+        self.assertEqual(package.st_package(stale, None), stale / "pkg")
+        # A `pkg-st` this build wrote outranks the copy in `dist-st`.
+        pkg_st = threaded / "pkg-st"
+        pkg_st.mkdir(parents=True)
+        (pkg_st / "horizon-client_bg.wasm").write_bytes(b"SINGLE")
+        self.assertEqual(package.st_package(stale, threaded), pkg_st)
+        # Nothing single-threaded anywhere: the threaded module is all there is,
+        # and `single()` then refuses to package it as the offline module.
+        (pkg_st / "horizon-client_bg.wasm").unlink()
+        (stale / "pkg" / "horizon-client_bg.wasm").unlink()
+        self.assertEqual(package.st_package(stale, threaded), threaded / "pkg")
+
     def test_single_threaded_only_leaves_the_threaded_glue_null(self):
         _, html = self.build("st")
         self.assertNotIn('id="horizon-wasm-threaded"', html)

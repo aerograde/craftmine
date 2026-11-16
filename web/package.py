@@ -471,8 +471,21 @@ def dist_resources(dist: Path) -> Path:
 
 
 def st_package(threaded_dist: Path, single_dist: Path | None = None) -> Path:
-    """The single-threaded build: web/dist-st/pkg, or web/dist/pkg-st."""
-    for candidate in (threaded_dist / "pkg", (single_dist or DIST) / "pkg-st"):
+    """The single-threaded build: `dist/pkg-st`, or `dist-st/pkg`.
+
+    Both layouts exist: a plain `THREADS=0 web/build.sh` writes the first and is
+    the path most builds take, `THREADS=0 DIST=web/dist-st web/build.sh` the
+    second. Neither may shadow the other: `dist-st/pkg` outranks a *threaded*
+    `dist/pkg`, but must not outrank a `dist/pkg-st` that the same build just
+    wrote, which is how a stale `dist-st` once shipped an old module.
+    """
+    candidates = []
+    if single_dist is not None:
+        candidates.append(single_dist / "pkg-st")
+    candidates.append(threaded_dist / "pkg")
+    if single_dist is not None:
+        candidates.append(single_dist / "pkg")
+    for candidate in candidates:
         if (candidate / "horizon-client_bg.wasm").is_file():
             return candidate
     return threaded_dist / "pkg"

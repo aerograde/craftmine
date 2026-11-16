@@ -33,15 +33,23 @@ const CACHE: usize = 1024;
 /// on a desktop and is most of the far view's memory in an 8 GB browser tab;
 /// those keep a quarter of it, which still covers the tiles being refined.
 fn cache_budget() -> usize {
-    // Asked on every decorated chunk that arrives, so resolve it once.
-    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *BUDGET.get_or_init(|| {
-        if horizon_client_render::graphics::web_low_memory() {
-            CACHE / 4
-        } else {
-            CACHE
-        }
-    })
+    // Asked on every decorated chunk that arrives, so resolve it once. An
+    // atomic, not a `OnceLock`: the sampling workers ask this too, and a loser
+    // of `get_or_init` blocks, which the browser traps as `Atomics.wait cannot
+    // be called in this context` on a thread that may not wait.
+    static BUDGET: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(usize::MAX);
+    let known = BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    if known != usize::MAX {
+        return known;
+    }
+    let budget = if horizon_client_render::graphics::web_low_memory() {
+        CACHE / 4
+    } else {
+        CACHE
+    };
+    BUDGET.store(budget, std::sync::atomic::Ordering::Relaxed);
+    budget
 }
 /// From this cell width up the LOD mesher draws a continuous heightfield,
 /// which reads only the surface and its top material. Keeping every block span
