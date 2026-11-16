@@ -265,20 +265,12 @@ impl WinScreen {
         // Everything below is drawn translated by `y_offs`.
         let y_offs = -self.scroll;
         // LogoRenderer(false) at full alpha.
-        let edition_x = (w / 2.0).floor() - 64.0;
         batch.sprite_region(
             atlas,
             "gui/title/minecraft",
             [logo_x, logo_y + y_offs, 256.0, 44.0],
             256.0,
             64.0,
-        );
-        batch.sprite_region(
-            atlas,
-            crate::title_edition::SPRITE,
-            [edition_x, logo_y + 44.0 - 7.0 + y_offs, 128.0, 14.0],
-            128.0,
-            16.0,
         );
         let mut y_pos = logo_y + 100.0;
         let last = self.lines.len().saturating_sub(1);

@@ -26,13 +26,15 @@ impl Tier {
     }
 
     pub const fn shadow(self) -> ShadowPlan {
-        // Minecraft Miniature Shader's NORMAL/LOW profiles. Its shadow pass is
-        // one nearest sample of a 1024² map over 128 blocks.
+        // One orthographic map over the near field. `taps` is the PCF width in
+        // texels: 3 on High because nine compares of a 1024² map is cheap next
+        // to the terrain shader, 0 on the integrated tiers where the extra
+        // samples cost more than the edge softness is worth there.
         match self {
             Self::High => ShadowPlan {
                 resolution: 1024,
                 distance: 128.0,
-                taps: 0.0,
+                taps: 3.0,
             },
             Self::Medium => ShadowPlan {
                 resolution: 512,

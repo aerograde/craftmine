@@ -166,6 +166,25 @@ pub trait LodSampler: Send {
         }
         columns
     }
+    /// The centre of every `stride`-block cell of a `side` x `side` tile whose
+    /// origin is `(x, z)`, in the same order as `grid`.
+    ///
+    /// A cell is `stride` blocks wide, so its centre is `stride / 2` blocks in
+    /// from its corner — which is exactly a corner of the next-finer level's
+    /// cell (`lod::lattice`). The mesher fans four triangles from it, so a hill
+    /// smaller than a cell can exist.
+    ///
+    /// Empty by default: a sampler that does not provide centres leaves the
+    /// mesher on its corner-only path, which draws exactly as before.
+    fn centres(
+        &mut self,
+        _x: i32,
+        _z: i32,
+        _stride: i32,
+        _side: usize,
+    ) -> Vec<Option<crate::lod::Surface>> {
+        Vec::new()
+    }
 }
 pub trait LodSource: Send + Sync {
     fn sampler(self: Arc<Self>) -> Box<dyn LodSampler>;

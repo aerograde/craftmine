@@ -547,21 +547,33 @@ fn sun_shadow(pos: vec3<f32>) -> f32 {
     if globals.shadow_params.x < 0.5 { return 1.0; }
     // QA: HORIZON_VISUAL_DEBUG=shadowblack keeps every surface in shadow.
     if globals.visual.w > 1.5 && globals.visual.w < 2.5 { return 0.0; }
-    // The pack quantises the receiver to SHADOW_PIXEL (16) world blocks, so its
-    // shadows are deliberately pixelated.
-    let world = pos + globals.camera.xyz;
-    let shadow_pos = floor(world / 16.0 + 0.5) * 16.0 - globals.camera.xyz;
-    let clip = globals.shadow_view_proj * vec4(shadow_pos, 1.0);
+    let clip = globals.shadow_view_proj * vec4(pos, 1.0);
     let ndc = clip.xyz / clip.w;
     let uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))
         || ndc.z <= 0.0 || ndc.z >= 1.0 {
         return 1.0;
     }
+    let texel = globals.shadow_params.y;
     let bias = ndc.z - globals.shadow_params.z;
-    // One nearest texel: the pack samples shadowtex1 once, with no PCF.
-    let snapped = (floor(uv / globals.shadow_params.y) + 0.5) * globals.shadow_params.y;
-    let lit = textureSampleCompareLevel(shadow_map, shadow_sampler, snapped, bias);
+    // The receiver used to snap to a 16-block world lattice, so a shaded
+    // surface took the lookup of a point up to 8 blocks away on every axis and
+    // shadow edges stepped in 16-block stairs. Sample at the fragment itself.
+    let taps = globals.shadow_params.w;
+    var lit = textureSampleCompareLevel(shadow_map, shadow_sampler, uv, bias);
+    if taps > 0.5 {
+        // A 3x3 tent around the texel: soft edges that stay put as the camera
+        // moves, at nine compares per terrain pixel.
+        let step = texel;
+        lit = 0.0;
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let offset = vec2<f32>(f32(x), f32(y)) * step;
+                lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + offset, bias);
+            }
+        }
+        lit /= 9.0;
+    }
     // Fade the map out at its edge instead of ending it with a hard ring:
     // the far terrain was either fully shadowed or fully lit at the seam.
     let edge = max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0;

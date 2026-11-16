@@ -347,10 +347,16 @@ pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
 /// and tablets report `Other` for their GPU, so the adapter class alone would
 /// pick the full shadow and bloom path there.
 pub fn web_low_memory() -> bool {
-    cfg!(target_arch = "wasm32") && {
-        let memory = horizon_os::device_memory_gib();
-        (memory > 0.0 && memory <= 8.0) || horizon_os::hardware_threads() <= 4
-    }
+    // Read once: both halves are JavaScript calls on the page, and this is
+    // asked per chunk summary and per cache insert. Neither value can change
+    // while the page lives.
+    static LOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOW.get_or_init(|| {
+        cfg!(target_arch = "wasm32") && {
+            let memory = horizon_os::device_memory_gib();
+            (memory > 0.0 && memory <= 8.0) || horizon_os::hardware_threads() <= 4
+        }
+    })
 }
 /// A LOD distance as far terrain uses it on this adapter.
 pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
@@ -862,6 +868,26 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
     s.graphics_preset = "custom".into();
     let g = &mut s.horizon;
     g.preset = preset;
+    // Far terrain is most of a frame's geometry in infinite mode, so the cheap
+    // presets reach less far and draw coarser cells. Performance used to leave
+    // both alone, which is why it barely helped on the 8 GB browser tabs that
+    // need it most: the horizon cost the same as on Ultra.
+    match preset {
+        Preset::Performance => {
+            g.lod_infinite = false;
+            g.lod_distance = 128;
+            g.far_detail = FarDetail::Reduced;
+        }
+        Preset::Balanced => {
+            g.lod_infinite = true;
+            g.far_detail = FarDetail::Reduced;
+        }
+        Preset::Quality | Preset::Ultra => {
+            g.lod_infinite = true;
+            g.far_detail = FarDetail::Full;
+        }
+        Preset::Custom => {}
+    }
     g.cave_culling = true;
     g.animated_textures = true;
     g.chunk_updates = 0;
@@ -1143,12 +1169,23 @@ mod tests {
         for text in ["farDetail:full\n", "farDetail:other\n", ""] {
             assert_eq!(Graphics::parse(text).far_detail, FarDetail::Full);
         }
-        // No preset changes it.
-        for preset in Preset::ALL {
+        // Far terrain is most of the frame's geometry, so the cheap presets
+        // draw it coarser and the expensive ones keep every cell.
+        for (preset, detail) in [
+            (Preset::Performance, FarDetail::Reduced),
+            (Preset::Balanced, FarDetail::Reduced),
+            (Preset::Quality, FarDetail::Full),
+            (Preset::Ultra, FarDetail::Full),
+        ] {
             let mut s = crate::settings::Settings::default();
             apply_preset(preset, &mut s);
-            assert_eq!(s.horizon.far_detail, FarDetail::Full, "{preset:?}");
+            assert_eq!(s.horizon.far_detail, detail, "{preset:?}");
         }
+        // Custom leaves whatever the player picked alone.
+        let mut s = crate::settings::Settings::default();
+        s.horizon.far_detail = FarDetail::Reduced;
+        apply_preset(Preset::Custom, &mut s);
+        assert_eq!(s.horizon.far_detail, FarDetail::Reduced);
     }
 
     #[test]

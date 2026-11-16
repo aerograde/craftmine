@@ -93,8 +93,7 @@ fn recover_issues(dir: &Path) -> [Option<crate::save::DatIssue>; 2] {
 /// The SafetyScreen's column (WarningScreen: title, 12 px around the message
 /// box of its lines and 4 px padding, the checkbox, then the buttons, 8 px
 /// apart): the title's top.
-/// `LogoRenderer.extractRenderState`: the logo's top 44 of 64 rows, then the
-/// edition banner's top 14 of 16 rows overlapping its bottom by 7.
+/// `LogoRenderer.extractRenderState`: the logo's top 44 of 64 rows.
 fn draw_logo(atlas: &HudAtlas, batch: &mut HudBatch, w: f32) {
     batch.sprite_region(
         atlas,
@@ -102,13 +101,6 @@ fn draw_logo(atlas: &HudAtlas, batch: &mut HudBatch, w: f32) {
         [(w / 2.0).floor() - 128.0, 30.0, 256.0, 44.0],
         256.0,
         64.0,
-    );
-    batch.sprite_region(
-        atlas,
-        crate::title_edition::SPRITE,
-        [(w / 2.0).floor() - 64.0, 30.0 + 44.0 - 7.0, 128.0, 14.0],
-        128.0,
-        16.0,
     );
 }
 
@@ -2402,7 +2394,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                         ];
                     }
                 }
-                let version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
+                let version = format!("Minecraft: Browser {}", horizon_core::VANILLA_VERSION);
                 batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
                 // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
                 // scale, so screenshots and reports say which build they come from.
@@ -4582,10 +4574,6 @@ mod classic_tests {
             h: 256,
         };
         atlas.sprites.insert("gui/title/minecraft".into(), r);
-        atlas.sprites.insert(
-            "gui/title/edition".into(),
-            crate::hud::Rect { w: 128, h: 16, ..r },
-        );
         for (i, icon) in ["friends/friends", "icon/language", "icon/accessibility"]
             .into_iter()
             .enumerate()
@@ -4605,12 +4593,22 @@ mod classic_tests {
         let mut batch = HudBatch::new([1920, 1080]);
         title.draw(&atlas, &mut batch, (0.0, 0.0), false);
         let cx = (batch.width / 2.0).floor();
+        // The logo alone: `LogoRenderer`'s 256x44 top of its 256x64 texture, with
+        // no edition banner under it (the title screen carries no edition line).
         assert_eq!(batch.vertices[0].pos, [cx - 128.0, 30.0]);
         assert_eq!(batch.vertices[2].pos, [cx + 128.0, 74.0]);
         assert_eq!(batch.vertices[2].uv, [1.0, 44.0 / 64.0]);
-        assert_eq!(batch.vertices[6].pos, [cx - 64.0, 67.0]);
-        assert_eq!(batch.vertices[8].pos, [cx + 64.0, 81.0]);
-        assert_eq!(batch.vertices[8].uv, [1.0, 14.0 / 16.0]);
+        assert!(
+            !batch
+                .vertices
+                .as_chunks::<6>()
+                .0
+                .iter()
+                .any(|quad| quad[0].uv[1] == 0.0
+                    && quad[2].uv[1] == 14.0 / 16.0
+                    && quad[0].pos[1] == 67.0),
+            "the edition banner is not drawn"
+        );
         for i in 0..3 {
             let quad = batch
                 .vertices

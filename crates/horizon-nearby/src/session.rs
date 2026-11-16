@@ -14,9 +14,14 @@ use horizon_protocol::connection::Pipe;
 use std::{
     io,
     sync::mpsc::{Receiver, Sender, TryRecvError},
-    thread,
     time::Instant,
 };
+// std's `thread::Builder` always fails on `wasm32-unknown-unknown`
+// (`ErrorKind::Unsupported`, "operation not supported on this platform"), which
+// is the "could not start the session" the nearby screen showed in a browser:
+// the session thread never began. `horizon_os` starts a Web Worker in the
+// shared-memory build and a green thread otherwise.
+use horizon_os::thread;
 
 /// What the service tells a session thread.
 pub enum Command {

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1200 760"
-     role="application" aria-label="Horizon launcher">
-  <title>Horizon - single-file launcher</title>
+     role="application" aria-label="Minecraft: Browser launcher">
+  <title>Minecraft: Browser - single-file launcher</title>
   <desc>Installs horizon.html in this origin's storage and serves it from a worker with the headers
         that let the game use its Web Workers. Its only network use is the game's own multiplayer.</desc>
 
@@ -37,12 +37,12 @@
     <rect x="1" y="4.4" width="10" height="1.6"/>
     <rect x="0" y="6.6" width="12" height="1.6" fill-opacity=".5"/>
   </g>
-  <text x="96" y="43" font-size="12" font-weight="600" letter-spacing="3.2" fill="#f6f6f8">HORIZON</text>
+  <text x="96" y="43" font-size="12" font-weight="600" letter-spacing="3.2" fill="#f6f6f8">MINECRAFT</text>
   <text x="1136" y="41" font-size="10" text-anchor="end" letter-spacing="1.8" fill="#a9a9b3" class="mono">SINGLE FILE</text>
   <rect class="hair" x="64" y="64" width="1072" height="1"/>
 
   <!-- Centre: the title, then the one live status line and its detail. -->
-  <text x="600" y="300" font-size="56" font-weight="700" letter-spacing=".5" text-anchor="middle" fill="#f6f6f8">HORIZON</text>
+  <text x="600" y="300" font-size="56" font-weight="700" letter-spacing=".5" text-anchor="middle" fill="#f6f6f8">MINECRAFT</text>
   <text x="600" y="332" font-size="14" text-anchor="middle" fill="#a9a9b3">Minecraft 26.3, compiled for the browser</text>
 
   <text id="st" x="600" y="396" font-size="19" font-weight="600" text-anchor="middle" fill="#f6f6f8"

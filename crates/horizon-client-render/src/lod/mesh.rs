@@ -1,5 +1,5 @@
 //! Exposed voxel-column faces, merged without changing their block-scale UVs.
-use super::{Column, HEIGHTFIELD_CELL, Span, Spans, TileKey};
+use super::{Column, HEIGHTFIELD_CELL, Span, Spans, Surface, TileKey};
 use crate::{
     fast_hash::{FxHashMap, FxHashSet},
     mesher::{OPAQUE_LAYER, SectionMesh, TILED_UV_STEPS, TerrainVertex, fluid_face},
@@ -65,6 +65,7 @@ impl Mesher {
         &mut self,
         key: TileKey,
         columns: &[&Column],
+        centres: &[Option<Surface>],
         covered: &FxHashSet<(i32, i32)>,
         covered_bounds: Option<[i32; 4]>,
         context: &WorkerContext,
@@ -75,6 +76,7 @@ impl Mesher {
         mesh_columns_with_edges(
             key,
             columns,
+            centres,
             covered,
             covered_bounds,
             neighbors,
@@ -291,6 +293,27 @@ fn mesh_columns(
 ) -> SectionMesh {
     mesh_columns_with_neighbors(key, columns, covered, covered_bounds, &[], material)
 }
+/// `mesh_columns` with per-cell centre heights, for the sub-cell fan.
+#[cfg(test)]
+fn mesh_columns_centres(
+    key: TileKey,
+    columns: &[Column],
+    centres: &[Option<Surface>],
+    material: impl FnMut(&Span, Direction, [i32; 2]) -> Material,
+) -> SectionMesh {
+    let refs: Vec<&Column> = columns.iter().collect();
+    mesh_columns_with_edges(
+        key,
+        &refs,
+        centres,
+        &FxHashSet::default(),
+        None,
+        &std::array::from_fn(|_| Vec::new()),
+        &[],
+        crate::chunk::MIN_Y,
+        material,
+    )
+}
 #[cfg(test)]
 fn mesh_columns_with_neighbors(
     key: TileKey,
@@ -319,6 +342,7 @@ fn mesh_columns_with_neighbors(
     mesh_columns_with_edges(
         key,
         &columns,
+        &[],
         covered,
         covered_bounds,
         &edges,
@@ -340,6 +364,13 @@ fn mesh_columns_with_neighbors(
 /// lip keeps the surface layer over the material beneath it, so the rings still
 /// show their strata; only the per-block side faces go away.
 const HEIGHTMAP_LEVEL: u8 = 1;
+/// How far a cell's centre must stand off its corners' plane, in blocks, before
+/// the cell is split into the four-triangle fan.
+///
+/// A cell that is flat to within a block is drawn as one quad: subdividing it
+/// would add two vertices and change nothing on screen. Heights are integers,
+/// so this is the smallest deviation that is real terrain rather than rounding.
+const CENTRE_SUBDIVIDE: f32 = 1.0;
 /// `column` as a heightmap: its ground reaching down to the bottom of the
 /// world (so the walls toward lower neighbours are one face, merged along the
 /// cliff), and whatever sits above it kept as it is: the sea, and a canopy
@@ -434,6 +465,7 @@ struct HeightVertex {
 fn mesh_heightfield(
     key: TileKey,
     columns: &[&Column],
+    centres: &[Option<Surface>],
     covered: &FxHashSet<(i32, i32)>,
     covered_bounds: Option<[i32; 4]>,
     neighbors: &[Vec<EdgeColumn<'_>>; 4],
@@ -620,15 +652,86 @@ fn mesh_heightfield(
                     [px, key.size() as f32 - pz]
                 }
             };
-            let points = [
+            let mut points = [
                 ([x0, d.height as f32, z1], uv(x0, z1)),
                 ([x1, c.height as f32, z1], uv(x1, z1)),
                 ([x1, b.height as f32, z0], uv(x1, z0)),
                 ([x0, a.height as f32, z0], uv(x0, z0)),
             ];
-            let values = [d, c, b, a];
-            for i in 0..4 {
-                push(&mut mesh, values[i], points[i].0, points[i].1, false);
+            let mut values = [d, c, b, a];
+            // The shared index buffer always splits a quad along its 0-2
+            // diagonal, so the pair of corners on that diagonal is the edge the
+            // surface is hinged on: d-b here. On a saddle, or a ridge running
+            // the other way, trailing over that hinge folds both triangles up
+            // and the cell reads as a blob. Hinge on the other diagonal (c-a)
+            // when its corners are the closer pair in height: the ridge then
+            // runs along the split, and the triangles meet at it instead of
+            // straddling it.
+            //
+            // A cyclic rotation of the four corners keeps their winding, so the
+            // indices, back-face culling and the UVs are all unchanged; it only
+            // moves the diagonal from d-b to c-a.
+            if (c.height - a.height).abs() < (d.height - b.height).abs() {
+                points.rotate_left(1);
+                values.rotate_left(1);
+            }
+            // A cell is four corner samples joined as one quad, so a hill
+            // smaller than a cell cannot exist in the mesh. The sampler can
+            // give each cell a centre too (`LodSampler::centres`), which is a
+            // corner of the next-finer level — so it adds a vertex that level
+            // places anyway and refinement moves nothing (`lod::lattice`).
+            // Where the centre stands off the corners' plane the cell is not
+            // flat, and the four triangles fanned from it carry the ridge the
+            // corners alone cannot.
+            //
+            // The fan is two ordinary four-vertex quads, (m,a,b,c) and
+            // (m,c,d,a): the shared index buffer splits each on its own
+            // diagonal, so no index or pipeline change is needed.
+            let centre = centres.get(z * CELLS + x).copied().flatten();
+            let flat = (a.height + b.height + c.height + d.height) as f32 / 4.0;
+            if let Some(centre) =
+                centre.filter(|centre| (centre.height as f32 - flat).abs() >= CENTRE_SUBDIVIDE)
+            {
+                let (mx, mz) = (x0 + stride as f32 / 2.0, z0 + stride as f32 / 2.0);
+                let span = Span {
+                    min: (centre.height - 1) as i16,
+                    max: centre.height as i16,
+                    state: centre.state,
+                    biome: centre.biome,
+                    light: a.paint.light,
+                };
+                let paint = material(&span, Direction::Up, [mx as i32 + wx, mz as i32 + wz])
+                    .faces
+                    .into_iter()
+                    .flatten()
+                    .next();
+                if let Some(paint) = paint {
+                    let middle = HeightVertex {
+                        height: centre.height,
+                        paint,
+                        wall: paint,
+                    };
+                    // `points`/`values` are already in the emitted order, hinge
+                    // rotation included, so the fan reads them directly: two
+                    // quads around the ring, each with the centre as its first
+                    // vertex. That keeps the outer corners exactly where the
+                    // one-quad path puts them.
+                    let middle_point = ([mx, centre.height as f32, mz], uv(mx, mz));
+                    for pair in [[0usize, 1, 2], [2, 3, 0]] {
+                        push(&mut mesh, middle, middle_point.0, middle_point.1, false);
+                        for i in pair {
+                            push(&mut mesh, values[i], points[i].0, points[i].1, false);
+                        }
+                    }
+                } else {
+                    for i in 0..4 {
+                        push(&mut mesh, values[i], points[i].0, points[i].1, false);
+                    }
+                }
+            } else {
+                for i in 0..4 {
+                    push(&mut mesh, values[i], points[i].0, points[i].1, false);
+                }
             }
             if let (Some(a), Some(b), Some(c), Some(d)) = (
                 grid[index(x, z)],
@@ -817,6 +920,7 @@ fn mesh_heightfield(
 fn mesh_columns_with_edges(
     key: TileKey,
     columns: &[&Column],
+    centres: &[Option<Surface>],
     covered: &FxHashSet<(i32, i32)>,
     covered_bounds: Option<[i32; 4]>,
     neighbors: &[Vec<EdgeColumn<'_>>; 4],
@@ -829,6 +933,7 @@ fn mesh_columns_with_edges(
         return mesh_heightfield(
             key,
             columns,
+            centres,
             covered,
             covered_bounds,
             neighbors,
@@ -1212,6 +1317,7 @@ mod refinement_tests {
         let mesh = mesh_columns_with_edges(
             parent,
             &columns,
+            &[],
             &FxHashSet::default(),
             None,
             &[Vec::new(), Vec::new(), Vec::new(), Vec::new()],
@@ -1307,6 +1413,7 @@ mod refinement_tests {
         let mesh = mesh_columns_with_edges(
             parent,
             &refs,
+            &[],
             &FxHashSet::default(),
             None,
             &[Vec::new(), Vec::new(), Vec::new(), Vec::new()],
@@ -2280,6 +2387,7 @@ mod tests {
         let mesh = mesh_columns_with_edges(
             key,
             &columns,
+            &[],
             &FxHashSet::default(),
             None,
             &neighbors,
@@ -2460,6 +2568,165 @@ mod tests {
             near.solid.iter().all(|v| v.layer & 0x4000 == 0),
             "near LOD keeps its block textures"
         );
+    }
+
+    /// Each cell's top is one four-corner quad, which the shared index buffer
+    /// always splits along its 0-2 diagonal. On a saddle — two high corners
+    /// facing each other — that hinge trails over the ridge and folds both
+    /// triangles up, so the cell reads as a blob. The contract the mesher owes
+    /// the renderer is therefore: in every emitted top quad, vertices 0 and 2
+    /// are the closer pair in height, so the split runs along the ridge.
+    #[test]
+    fn a_cell_hinges_on_the_diagonal_between_its_closest_corners() {
+        // A true saddle: inside each cell the two high corners sit on one
+        // diagonal and the two low ones on the other, so the two diagonals
+        // differ and the choice is not a tie. A ridge along x is not enough:
+        // its cells have equal diagonals, which is what made the first version
+        // of this test pass either way.
+        let mut columns = columns();
+        for (i, column) in columns.iter_mut().enumerate() {
+            let (x, z) = ((i % CELLS) as i32, (i / CELLS) as i32);
+            // Every cell of this surface is a non-tie: its d-b diagonal spans
+            // 20 blocks more than its c-a diagonal, so the default split is the
+            // worse one in all 256 cells.
+            column.surface = Some(Surface {
+                height: 64 + 10 * ((x + 2 * z) % 3),
+                state: BlockStateId(1),
+                water: None,
+                biome: 0,
+            });
+            column.spans = vec![span(0, 3, 1)].into();
+        }
+        let key = TileKey {
+            x: 0,
+            z: 0,
+            level: 9,
+        };
+        let mesh = mesh_columns(key, &columns, &FxHashSet::default(), None, material);
+        // Top quads are the ones that span a rectangle in x/z; the walls are
+        // vertical and have no x/z area.
+        let mut checked = 0;
+        for quad in mesh.solid.as_chunks::<4>().0 {
+            let p: Vec<[f32; 3]> = quad.iter().map(|v| v.position()).collect();
+            let area = (p[1][0] - p[0][0]) * (p[3][2] - p[0][2])
+                - (p[3][0] - p[0][0]) * (p[1][2] - p[0][2]);
+            if area.abs() < 1.0 {
+                continue;
+            }
+            let h: Vec<f32> = p.iter().map(|v| v[1]).collect();
+            let diagonal = (h[0] - h[2]).abs();
+            let other = (h[1] - h[3]).abs();
+            assert!(
+                diagonal <= other + f32::EPSILON,
+                "the quad is hinged across its ridge: diagonal {diagonal} > other {other} ({h:?})"
+            );
+            // A rotation of the corners, never a reflection: back-face culling
+            // would drop a reversed triangle.
+            let cross = |o: [f32; 3], a: [f32; 3], b: [f32; 3]| {
+                (a[0] - o[0]) * (b[2] - o[2]) - (a[2] - o[2]) * (b[0] - o[0])
+            };
+            let (t0, t1) = (cross(p[0], p[1], p[2]), cross(p[0], p[2], p[3]));
+            assert!(
+                (t0 > 0.0) == (t1 > 0.0),
+                "both triangles of a quad must wind the same way"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "the heightfield emitted no top quads");
+    }
+
+    /// A cell is one quad, so a hill inside it could not exist. When the sampler
+    /// gives the cell a centre that stands off its corners' plane, the mesher
+    /// fans four triangles from it — emitted as two ordinary four-vertex quads,
+    /// `(m,a,b,c)` and `(m,c,d,a)`, so the shared index buffer needs no change.
+    ///
+    /// This pins the three properties that fan must have: it appears only where
+    /// the centre is real terrain, it replaces the quad rather than adding to it,
+    /// and its triangles all wind as the original two did.
+    #[test]
+    fn a_cell_centre_becomes_four_triangles_that_keep_the_quad_wound() {
+        let key = TileKey {
+            x: 0,
+            z: 0,
+            level: 9,
+        };
+        let flat: Vec<Option<Surface>> = vec![None; CELLS * CELLS];
+        let flat_columns = columns();
+        let plain = mesh_columns_centres(key, &flat_columns, &flat, material);
+
+        // No centre, or a centre on the plane: one quad per cell, exactly as
+        // before. Nothing may change here, or every far ring grows vertices.
+        let on_plane: Vec<Option<Surface>> = (0..CELLS * CELLS)
+            .map(|_| {
+                Some(Surface {
+                    height: 64,
+                    state: BlockStateId(1),
+                    water: None,
+                    biome: 0,
+                })
+            })
+            .collect();
+        let plane = mesh_columns_centres(key, &flat_columns, &on_plane, material);
+        assert_eq!(
+            plane.solid.len(),
+            plain.solid.len(),
+            "a centre on the corners' plane must not subdivide the cell"
+        );
+
+        // A hill inside every cell: each top becomes two quads (8 vertices).
+        let mut hill_columns = columns();
+        for column in &mut hill_columns {
+            column.surface = Some(Surface {
+                height: 64,
+                state: BlockStateId(1),
+                water: None,
+                biome: 0,
+            });
+            column.spans = vec![span(0, 63, 1)].into();
+        }
+        let hill: Vec<Option<Surface>> = (0..CELLS * CELLS)
+            .map(|_| {
+                Some(Surface {
+                    height: 68,
+                    state: BlockStateId(1),
+                    water: None,
+                    biome: 0,
+                })
+            })
+            .collect();
+        let meshed = mesh_columns_centres(key, &hill_columns, &hill, material);
+        let tops: Vec<_> = meshed
+            .solid
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|quad| quad.iter().all(|v| v.position()[1] > 63.0))
+            .collect();
+        let centre_count = tops
+            .iter()
+            .filter(|quad| quad.iter().any(|v| (v.position()[1] - 68.0).abs() < 0.5))
+            .count();
+        assert!(
+            centre_count >= CELLS * CELLS,
+            "every bulging cell must carry a centre vertex, saw {centre_count}"
+        );
+        // The hill is real: the mesh reaches 68 where the corners stop at 64.
+        assert!(
+            meshed.solid.iter().any(|v| v.position()[1] > 66.0),
+            "the centre height must reach the mesh"
+        );
+        // Winding: no emitted quad may be reflected relative to its neighbours.
+        for quad in meshed.solid.as_chunks::<4>().0 {
+            let p: Vec<[f32; 3]> = quad.iter().map(|v| v.position()).collect();
+            let cross = |o: [f32; 3], a: [f32; 3], b: [f32; 3]| {
+                (a[0] - o[0]) * (b[2] - o[2]) - (a[2] - o[2]) * (b[0] - o[0])
+            };
+            let (t0, t1) = (cross(p[0], p[1], p[2]), cross(p[0], p[2], p[3]));
+            assert!(
+                t0 == 0.0 || t1 == 0.0 || (t0 > 0.0) == (t1 > 0.0),
+                "a fanned quad's two triangles must wind the same way"
+            );
+        }
     }
 
     #[test]

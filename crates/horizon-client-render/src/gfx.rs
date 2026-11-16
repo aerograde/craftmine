@@ -1981,7 +1981,11 @@ impl Renderer {
                 },
                 primitive: wgpu::PrimitiveState {
                     topology: tri,
-                    cull_mode: Some(wgpu::Face::Back),
+                    // Both faces: plants are crossed quads and a pane or a torch
+                    // shows one face to the light, so culling back faces dropped
+                    // half of every plant from the map. The shader pack pass has
+                    // always drawn both for this reason.
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -3307,7 +3311,11 @@ impl Renderer {
                 },
                 primitive: wgpu::PrimitiveState {
                     topology: tri,
-                    cull_mode: Some(wgpu::Face::Back),
+                    // Both faces: plants are crossed quads and a pane or a torch
+                    // shows one face to the light, so culling back faces dropped
+                    // half of every plant from the map. The shader pack pass has
+                    // always drawn both for this reason.
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -5326,7 +5334,12 @@ impl Renderer {
                 [
                     1.0,
                     1.0 / self.visual_shadow_settings.resolution as f32,
-                    0.0008,
+                    // Depth bias in NDC. The map spans `near`..`far` (256..740 at
+                    // 128 blocks), so 4e-4 is about a tenth of a block: enough to
+                    // stop acne on a flat face, small enough that a fence post's
+                    // shadow still meets its own base. The old 8e-4 paid for the
+                    // 16-block receiver snap that `sun_shadow` no longer does.
+                    0.0004,
                     visual_taps,
                 ]
             } else {

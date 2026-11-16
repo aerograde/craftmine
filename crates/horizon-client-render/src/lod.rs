@@ -29,6 +29,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 const CELLS: usize = 16;
 const MAX_SAVED: usize = 1024;
+/// Summaries of resident chunks kept for refinement. A summary is 256 columns
+/// of a real chunk, so this is the LOD's second-largest allocation next to the
+/// planned tiles themselves; an 8 GB browser tab (Chromebooks, tablets) keeps a
+/// quarter of them, which its shore-bound view never asks for anyway.
+pub fn max_saved() -> usize {
+    if crate::graphics::web_low_memory() {
+        MAX_SAVED / 4
+    } else {
+        MAX_SAVED
+    }
+}
 /// How many resident chunks may wait for the worker's summary at once
 /// (`Lod::observing`).
 pub const OBSERVE_AHEAD: usize = 8;
@@ -773,6 +784,8 @@ type Reduced = FxHashMap<(i32, i32), Arc<ReducedColumns>>;
 /// frame, tens of milliseconds for a large job on a 4-thread machine).
 struct Snapshot {
     samples: FxHashMap<TileKey, Arc<Vec<Column>>>,
+    /// Each tile's cell centres, shared with mesh jobs like `samples`.
+    centres: FxHashMap<TileKey, Arc<[Option<Surface>]>>,
     saved: Saved,
     reduced: Reduced,
 }
@@ -809,6 +822,9 @@ struct EdgeSource {
 struct MeshInput {
     /// The tile's samples, with `overrides` replacing some of them.
     base: Arc<Vec<Column>>,
+    /// The tile's per-cell centre heights, empty when it was sampled at its
+    /// corners only.
+    centres: Arc<[Option<Surface>]>,
     overrides: [Option<ColumnSource>; CELLS * CELLS],
     neighbors: [Vec<EdgeSource>; 4],
     finer: Vec<TileKey>,
@@ -882,6 +898,10 @@ enum Done {
     Sample {
         key: TileKey,
         samples: Vec<Column>,
+        /// One centre per cell, the mesher's sub-cell detail. Empty when the
+        /// sampler does not provide them (far rings), which leaves the mesher
+        /// on its corner-only path.
+        centres: Vec<Option<Surface>>,
     },
     Mesh {
         key: TileKey,
@@ -1009,6 +1029,10 @@ pub struct Lod {
     held_sample_at: horizon_os::time::Instant,
     /// Each tile's samples, shared with mesh jobs in flight.
     ready: FxHashMap<TileKey, Arc<Vec<Column>>>,
+    /// Each tile's per-cell centre heights (`LodSampler::centres`), the
+    /// mesher's sub-cell detail. Absent for tiles the sampler sampled at their
+    /// corners only, which is every far ring.
+    centres: FxHashMap<TileKey, Arc<[Option<Surface>]>>,
     /// Fully covered subtrees, by tile.
     complete: FxHashMap<TileKey, bool>,
     active: FxHashSet<TileKey>,
@@ -1188,6 +1212,7 @@ impl Lod {
                             let mut mesh = mesher.mesh(
                                 job.key,
                                 &columns,
+                                &input.centres,
                                 &job.covered,
                                 job.bounds,
                                 &context,
@@ -1289,10 +1314,19 @@ impl Lod {
                                         );
                                         let samples =
                                             sample.grid(x, z, key.size() / CELLS as i32, CELLS);
+                                        let centres =
+                                            sample.centres(x, z, key.size() / CELLS as i32, CELLS);
                                         if shared.stop.load(Ordering::Relaxed) {
                                             return;
                                         }
-                                        if tx.send(Done::Sample { key, samples }).is_err() {
+                                        if tx
+                                            .send(Done::Sample {
+                                                key,
+                                                samples,
+                                                centres,
+                                            })
+                                            .is_err()
+                                        {
                                             return;
                                         }
                                     }
@@ -1360,7 +1394,13 @@ impl Lod {
                                 let [x, _, z] = key.origin();
                                 sampler.set_approximate(worker.approximate.load(Ordering::Relaxed));
                                 let samples = sampler.grid(x, z, key.size() / CELLS as i32, CELLS);
-                                Done::Sample { key, samples }
+                                let centres =
+                                    sampler.centres(x, z, key.size() / CELLS as i32, CELLS);
+                                Done::Sample {
+                                    key,
+                                    samples,
+                                    centres,
+                                }
                             }
                         };
                         if tx.send(done).is_err() {
@@ -1413,6 +1453,7 @@ impl Lod {
             near_loading: false,
             held_sample_at: horizon_os::time::Instant::now(),
             ready: FxHashMap::default(),
+            centres: FxHashMap::default(),
             complete: FxHashMap::default(),
             active: FxHashSet::default(),
             dirty: FxHashMap::default(),
@@ -1783,7 +1824,7 @@ impl Lod {
             return;
         }
         if !self.saved.contains_key(&key) {
-            while self.saved.len() >= MAX_SAVED {
+            while self.saved.len() >= max_saved() {
                 if let Some(old) = self.saved_order.pop_front() {
                     self.saved.remove(&old);
                     self.reduced.remove(&old);
@@ -1855,7 +1896,7 @@ impl Lod {
             self.mark_data_changed(key);
         }
     }
-    fn finish_sample(&mut self, key: TileKey, samples: Vec<Column>) {
+    fn finish_sample(&mut self, key: TileKey, samples: Vec<Column>, centres: Vec<Option<Surface>>) {
         self.pending.remove(&key);
         if self.plan.nodes.contains(&key) && samples.len() == CELLS * CELLS {
             let mut samples = samples;
@@ -1865,6 +1906,11 @@ impl Lod {
                         samples[i] = old[i].clone();
                     }
                 }
+            }
+            if centres.len() == CELLS * CELLS {
+                self.centres.insert(key, centres.into());
+            } else {
+                self.centres.remove(&key);
             }
             let existed = self.ready.insert(key, Arc::new(samples)).is_some();
             self.refresh_ready(key, existed);
@@ -2079,7 +2125,14 @@ impl Lod {
                         .sampler
                         .set_approximate(self.shared.approximate.load(Ordering::Relaxed));
                     let samples = inline.sampler.grid(x, z, key.size() / CELLS as i32, CELLS);
-                    Done::Sample { key, samples }
+                    let centres = inline
+                        .sampler
+                        .centres(x, z, key.size() / CELLS as i32, CELLS);
+                    Done::Sample {
+                        key,
+                        samples,
+                        centres,
+                    }
                 }
                 // The inline page cannot generate a detail band: its resident
                 // streamer is the near view, and the far samples cover the rest.
@@ -2111,6 +2164,7 @@ impl Lod {
                 let mut mesh = inline.mesher.mesh(
                     job.key,
                     &columns,
+                    &input.centres,
                     &job.covered,
                     job.bounds,
                     &inline.context,
@@ -2255,9 +2309,13 @@ impl Lod {
                     crate::spans::time("lod_detail", || self.finish_observed(key, columns))
                 }
                 Done::DetailRequested => self.detail_request_pending = false,
-                Done::Sample { key, samples } => {
+                Done::Sample {
+                    key,
+                    samples,
+                    centres,
+                } => {
                     data_changed = true;
-                    self.finish_sample(key, samples)
+                    self.finish_sample(key, samples, centres)
                 }
                 Done::Mesh {
                     key,
@@ -2544,6 +2602,13 @@ impl Lod {
                             self.ready.get(key).map(|columns| (*key, columns.clone()))
                         })
                         .collect(),
+                    centres: self
+                        .active
+                        .iter()
+                        .filter_map(|key| {
+                            self.centres.get(key).map(|centres| (*key, centres.clone()))
+                        })
+                        .collect(),
                     saved: self.saved.clone(),
                     reduced: self.reduced.clone(),
                 });
@@ -2713,6 +2778,11 @@ impl Lod {
                 .iter()
                 .filter_map(|key| self.ready.get(key).map(|columns| (*key, columns.clone())))
                 .collect(),
+            centres: self
+                .active
+                .iter()
+                .filter_map(|key| self.centres.get(key).map(|centres| (*key, centres.clone())))
+                .collect(),
             saved: self.saved.clone(),
             reduced: self.reduced.clone(),
         }
@@ -2726,6 +2796,7 @@ impl Lod {
         mesh::Mesher::default().mesh(
             key,
             &columns,
+            &input.centres,
             &self.covered,
             self.covered_bounds,
             self.context.as_deref().expect("test mesh context"),
@@ -2827,6 +2898,7 @@ impl Snapshot {
         });
         MeshInput {
             base,
+            centres: self.centres.get(&key).cloned().unwrap_or_default(),
             overrides,
             neighbors,
             finer,
@@ -3819,7 +3891,7 @@ mod tests {
         assert_eq!(lod.detail_masks[&fine], [u64::MAX; 4]);
         lod.plan.nodes.insert(fine);
         lod.pending.insert(fine);
-        lod.finish_sample(fine, vec![Column::default(); 256]);
+        lod.finish_sample(fine, vec![Column::default(); 256], Vec::new());
         assert_eq!(
             lod.ready[&fine][0].surface.unwrap().height,
             121,
@@ -3970,7 +4042,7 @@ mod tests {
             0,
             "the nearest tiles load first"
         );
-        lod.finish_sample(nearby, vec![Column::default(); 256]);
+        lod.finish_sample(nearby, vec![Column::default(); 256], Vec::new());
         lod.update(camera, 2, 64, Some(FxHashSet::default()));
         let Some(Job::Sample(next)) = lock(&lod.shared.jobs).pop_front() else {
             panic!("the next ring was not scheduled");
@@ -4518,7 +4590,7 @@ mod tests {
                 }
             }
             for key in &keys {
-                lod.finish_sample(*key, columns.clone());
+                lod.finish_sample(*key, columns.clone(), Vec::new());
             }
             !keys.is_empty()
         };

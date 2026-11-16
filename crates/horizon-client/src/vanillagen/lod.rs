@@ -28,6 +28,21 @@ mod vegetation;
 use islands::EndIslands;
 use vegetation::Vegetation;
 const CACHE: usize = 1024;
+/// Decorated chunks kept for reuse, at most `CACHE`. Each entry is 256 columns
+/// of a fully decorated chunk, so the cache is small next to the planned tiles
+/// on a desktop and is most of the far view's memory in an 8 GB browser tab;
+/// those keep a quarter of it, which still covers the tiles being refined.
+fn cache_budget() -> usize {
+    // Asked on every decorated chunk that arrives, so resolve it once.
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        if horizon_client_render::graphics::web_low_memory() {
+            CACHE / 4
+        } else {
+            CACHE
+        }
+    })
+}
 /// From this cell width up the LOD mesher draws a continuous heightfield,
 /// which reads only the surface and its top material. Keeping every block span
 /// for a far tile would make the sample payload, not the mesh, the horizon's
@@ -35,6 +50,15 @@ const CACHE: usize = 1024;
 /// the voxel mesher is a single surface span, which it stretches down to the
 /// world floor — a giant grass wall where a hill should be.
 const COARSE_WIDTH: i32 = 16;
+/// The widest cell whose centre is sampled (`LodSampler::centres`).
+///
+/// A centre costs one extra `lod_grid` per tile, so this is the whole cost knob
+/// for sub-cell terrain detail. 64 blocks covers the rings where a knoll or a
+/// gully is still tens of pixels wide, which is where the eye is; past that a
+/// cell is a few pixels and its corners already carry the silhouette. Raising it
+/// multiplies the far sampler's work (the dominant cost on a low-memory
+/// machine); lowering it lets small hills merge back into ramps.
+const CENTRE_MAX_CELL: i32 = 64;
 /// Chunks waiting for decoration: enough batches to keep every thread busy.
 const REQUESTS: usize = 1024;
 /// Chunks a side a decoration batch emits. Each needs a two-chunk border of
@@ -392,6 +416,32 @@ fn shade_sky(column: &mut Column, states: &GenBlockStates) {
     column.spans = shaded.into();
 }
 
+/// The centres of `cached_grid`'s cells, from the same per-chunk columns.
+///
+/// A cell's centre is a real block position, so this reads the single column
+/// there rather than reducing a footprint: a cached tile must look exactly like
+/// a freshly sampled one, and for the centre those are the same world point.
+fn cached_centres(
+    cache: &FxHashMap<(i32, i32), Arc<[Column; 256]>>,
+    x: i32,
+    z: i32,
+    stride: i32,
+    side: usize,
+) -> Option<Vec<Option<Surface>>> {
+    if stride > 16 || cache.is_empty() {
+        return None;
+    }
+    let half = stride / 2;
+    let mut centres = Vec::with_capacity(side * side);
+    for dz in 0..side {
+        for dx in 0..side {
+            let (wx, wz) = (x + dx as i32 * stride + half, z + dz as i32 * stride + half);
+            let cached = cache.get(&(wx >> 4, wz >> 4))?;
+            centres.push(cached[(wz & 15) as usize * 16 + (wx & 15) as usize].surface);
+        }
+    }
+    Some(centres)
+}
 /// A whole tile inside visited chunks needs no density work at all. This
 /// used to evaluate the lattice first and throw all of it away in the per-cell
 /// cache check below.
@@ -511,7 +561,7 @@ impl LodSampler for VanillaLodSampler {
                 self.order.push_back(key);
             }
             self.cache.insert(key, columns.clone());
-            while self.cache.len() > CACHE {
+            while self.cache.len() > cache_budget() {
                 if let Some(old) = self.order.pop_front() {
                     self.cache.remove(&old);
                     builder
@@ -545,6 +595,46 @@ impl LodSampler for VanillaLodSampler {
             );
         }
         self.grid(x, z, width, 1).pop().unwrap_or_default()
+    }
+    /// The centre of every cell of a tile, for the mesher's four-triangle fan.
+    ///
+    /// A centre sits `stride / 2` in from a corner, which is a corner of the
+    /// tile's next-finer level — so this adds a vertex the finer tile places
+    /// anyway and refinement never moves terrain (`lod::lattice`).
+    ///
+    /// Only near rings ask: a centre costs a whole extra `lod_grid`, and a cell
+    /// wider than `CENTRE_MAX_CELL` is a few pixels where its corners already
+    /// carry the silhouette.
+    fn centres(&mut self, x: i32, z: i32, stride: i32, side: usize) -> Vec<Option<Surface>> {
+        // Only a heightfield cell uses a centre: narrower cells are meshed as
+        // voxel columns, which already carry per-block detail, so sampling
+        // them would be work thrown away. `COARSE_WIDTH` is that threshold and
+        // must stay in step with `HEIGHTFIELD_CELL`.
+        if !(COARSE_WIDTH..=CENTRE_MAX_CELL).contains(&stride) {
+            return Vec::new();
+        }
+        // A tile the chunk cache covers reads its centres straight from real
+        // block columns, so a cached tile and a freshly sampled one agree and
+        // this costs nothing at all.
+        if stride <= 16
+            && let Some(centres) = cached_centres(&self.cache, x, z, stride, side)
+        {
+            return centres;
+        }
+        let half = stride / 2;
+        match self
+            .worker
+            .lod_grid(x + half, z + half, stride, side, false)
+        {
+            Ok(samples) => samples
+                .into_iter()
+                .map(|(surface, _)| surface.map(|sample| self.generator.client_surface(sample)))
+                .collect(),
+            Err(error) => {
+                log::warn!("Horizon: far cell centres failed: {error}");
+                Vec::new()
+            }
+        }
     }
     fn grid(&mut self, x: i32, z: i32, width: i32, side: usize) -> Vec<Column> {
         if let Some(columns) = cached_grid(&self.cache, x, z, width, side) {

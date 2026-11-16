@@ -651,15 +651,6 @@ impl HudAtlas {
             images.extend(more);
             animated.extend(more_animated);
         }
-        // The title screen's "JAVA EDITION" banner reads "RUST EDITION".
-        if let Some(edition) = images
-            .iter_mut()
-            .find(|i| i.0 == crate::title_edition::SPRITE)
-            && let Some(pixels) =
-                crate::title_edition::rust_edition(edition.1, edition.2, &edition.3)
-        {
-            edition.3 = pixels;
-        }
         images.push(("horizon/white".into(), 4, 4, vec![255; 64]));
         if full {
             Self::slots(&mut images, crate::trims::slot_size(root));
