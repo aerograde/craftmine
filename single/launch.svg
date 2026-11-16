@@ -89,9 +89,21 @@
 // worker serve it with the headers that enable the game's threads.
 var Q = new URLSearchParams(location.search);
 var GAME = "horizon.html";
-var SOURCE = Q.get("src") ? new URL(Q.get("src"), location.href).href : new URL(GAME, location.href).href;
-var SW_URL = "launch-sw.js";
-var SW_BUILD = "horizon-single-1";
+// The game comes from Google Drive through an API key restricted to the
+// cdn.jsdelivr.net referrer, so this page is meant to be opened from jsDelivr.
+// ?src= points at another copy, which then has to send CORS headers and allow
+// range requests.
+var DRIVE_ID = "1Pi-9SLO6z0dl7qwl_N77Q0fc9aVt7KCY";
+var DRIVE_KEY = "AIzaSyC5HrSEXwPdoHF3jCvp6gUwzCCyjc6Mimo";
+var DRIVE_URL = "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(DRIVE_ID) + "?alt=media&key=" + encodeURIComponent(DRIVE_KEY);
+var SOURCE = Q.get("src") ? new URL(Q.get("src"), location.href).href : DRIVE_URL;
+var SW_URL = "horizon-launch-sw.js";
+var SW_BUILD = "ba419177fff3";
+// The key is restricted to this referrer, so any other host is refused. Say so
+// and send the player to the copy that works, instead of failing at 403.
+var CANONICAL = "https://cdn.jsdelivr.net/gh/retrograde-sdk/horizon-single@298988611/launch.svg";
+var KEY_HOST = "cdn.jsdelivr.net";
+var wrongHost = !Q.get("src") && location.hostname !== KEY_HOST;
 var DB_NAME = "horizon-launcher";
 var DB_VERSION = 1;
 var CHUNK = 4 << 20;
@@ -152,7 +164,7 @@ function warn(text) { writeLines("warn", text || ""); }
 function diag(text) { el("diag").textContent = text || ""; }
 
 function pct(fraction, label) {
-  var width = Math.max(0, Math.min(1, fraction || 0)) * 820;
+  var width = Math.max(0, Math.min(1, fraction || 0)) * 800;
   el("fill").setAttribute("width", String(width));
   el("pct").textContent = label || (Math.round((fraction || 0) * 100) + "%");
 }
@@ -341,6 +353,8 @@ async function install() {
 
     say(total ? "Downloading " + bytes(total) : "Downloading the game");
     note(SOURCE);
+
+    var attempts = 0;
     for (;;) {
       var response;
       try {
@@ -356,7 +370,7 @@ async function install() {
         continue;
       }
       if (!response.ok) {
-        if (response.status === 404) throw new Error("horizon.html was not found beside launch.svg. Put the single file here, or open launch.svg?src=...");
+        if (response.status === 404) throw new Error("horizon.html was not found at the download link. Open launch.svg?src=... to point at another copy.");
         throw new Error(SOURCE + " answered " + response.status + " " + response.statusText + ".");
       }
       if (have && response.status !== 206) {
@@ -384,9 +398,7 @@ async function install() {
           var step = await reader.read();
           if (step.done) break;
           var value = step.value;
-          if (headText.length < 200) {
-            headText += new TextDecoder().decode(value.slice(0, 200 - headText.length));
-          }
+          if (headText.length < 200) headText += new TextDecoder().decode(value.slice(0, 200 - headText.length));
           var pos = 0;
           while (pos < value.length) {
             var amount = Math.min(CHUNK - offset, value.length - pos);
@@ -522,6 +534,14 @@ async function refresh() {
     note("downloads " + SOURCE);
     pct(0, "0%");
   }
+  if (wrongHost) {
+    el("golabel").textContent = "OPEN ON JSDELIVR";
+    say("Open this page from jsDelivr");
+    note(CANONICAL);
+    warn("The download's API key only answers " + KEY_HOST + ", so the game cannot be installed from " +
+         location.hostname + ". The button opens the copy that works.");
+    return;
+  }
   if (!isSecureContext || !navigator.serviceWorker) {
     warn("This page cannot use a service worker. OPEN DIRECTLY runs the game without workers.");
   }
@@ -539,7 +559,10 @@ function wireButton(id, action) {
 }
 
 function wire() {
-  wireButton("go", function () { start(); });
+  wireButton("go", function () {
+    if (wrongHost) { location.href = CANONICAL; return; }
+    start();
+  });
   wireButton("direct", direct);
   wireButton("clr", function () { clear(); });
 }
