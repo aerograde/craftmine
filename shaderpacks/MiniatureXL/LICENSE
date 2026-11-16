@@ -1,0 +1,34 @@
+Miniature XL 1.2
+Based on Miniature Shader 2.19 by Mateus A. Kreuch, used under the MIT License
+reproduced below. Modifications (Miniature XL): selective glow/bloom pipeline,
+voxel flood-fill colored lighting (Overworld, Nether, End), entity and dropped
+item lights, sky/sun color settings, day-night shadow rework, native Voxy
+LOD integration (voxy.json shader patch), resource pack lava recoloring,
+per-material emissive glow masks (lightness-ranked, nether stem veins, Photon-
+like nether portal), glow ink and calibrated sculk sensor glow, sun & moon
+glow toggle, water edge fade at the LOD boundary, entity shadow fade,
+quality profiles.
+
+---
+
+MIT License
+
+Copyright (c) 2022 Mateus A. Kreuch
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

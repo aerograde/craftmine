@@ -114,7 +114,7 @@ pub fn rows(level: Level) -> Vec<Row> {
     let visuals = h(
         H::Visuals,
         High,
-        "Miniature Shader: the pack's colour, light and atmosphere. Off is vanilla.",
+        "Miniature XL: the pack's colour, light and atmosphere. Off is vanilla.",
     );
     let visual_quality = h(
         H::VisualQuality,
@@ -1766,7 +1766,10 @@ mod tests {
         // The default is a bounded horizon: 96 chunks, not infinite.
         assert_eq!(
             item.label(&s).plain(),
-            format!("LOD Distance: {} chunks", crate::graphics::DEFAULT_LOD_DISTANCE)
+            format!(
+                "LOD Distance: {} chunks",
+                crate::graphics::DEFAULT_LOD_DISTANCE
+            )
         );
         assert_eq!(infinite.label(&s).plain(), "Infinite Terrain: Off");
         // 96 sits between the 64 and 128 stops, and the slider shows the stop it

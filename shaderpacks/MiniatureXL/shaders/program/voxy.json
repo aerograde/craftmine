@@ -1,0 +1,39 @@
+{
+	"unusedString": "
+#include "/shader.h"
+",
+	"version": 1,
+#ifdef BLOOM
+	"opaqueDrawBuffers": [0, 6, 7, 2],
+	"translucentDrawBuffers": [0, 6, 7, 2],
+#else
+	"opaqueDrawBuffers": [0, 6, 7],
+	"translucentDrawBuffers": [0, 6, 7],
+#endif
+	"blending": {
+		-1 : "off",
+		0 : "SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ONE_MINUS_SRC_ALPHA"
+	},
+	"uniforms": [
+		"gbufferModelView",
+		"gbufferModelViewInverse",
+		"vxProjInv",
+		"vxModelViewInv",
+		"sunPosition",
+		"shadowLightPosition",
+		"screenBrightness",
+		"eyeBrightnessSmooth",
+		"rainStrength",
+		"isEyeInWater",
+		"worldTime",
+		"fogColor",
+		"skyColor",
+		"fogStart",
+		"fogEnd",
+		"viewWidth",
+		"viewHeight"
+	],
+	"samplers": [
+		"lightmap"
+	]
+}

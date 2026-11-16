@@ -16,10 +16,11 @@ use horizon_client::gfx::pack_draw::EntitySpan;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
-/// The pack shipped with Horizon: the MIT-licensed Miniature Shader. It is the
-/// default look and a 1:1 reference; the built-in profile stays as the fallback
-/// when the folder is absent.
-const BUNDLED_PACK: &str = "Miniature";
+/// The pack shipped with Horizon: the MIT-licensed Miniature XL, a fork of
+/// Miniature Shader that adds a voxel coloured-light volume, per-material
+/// emissive glow and day-night shadow strength. It is the default look; the
+/// built-in profile stays as the fallback when the folder is absent.
+const BUNDLED_PACK: &str = "MiniatureXL";
 
 fn bundled_pack_exists() -> bool {
     Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists()
@@ -31,7 +32,7 @@ fn bundled_pack_exists() -> bool {
 /// A pack applies no preset unless the player picks one: an empty map leaves the pack's own
 /// `#define` and `const` defaults, which is the look the reference renders and the one its
 /// author tuned. Horizon used to substitute its own `dgpu`/`igpu`/`potato` tiers here, but
-/// those names belong to Horizon, not to packs, and Miniature's `HIGH` preset raises the
+/// those names belong to Horizon, not to packs, and Miniature XL's `HIGH` preset raises the
 /// shadow map to 4096² and the shadow distance to 384 blocks for a look no faster than the
 /// defaults.
 fn chosen_shader_options(name: &str) -> BTreeMap<String, String> {

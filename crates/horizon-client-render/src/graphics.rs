@@ -634,7 +634,7 @@ impl Default for Graphics {
             shader_pack: if cfg!(target_arch = "wasm32") {
                 String::new()
             } else {
-                "Miniature".into()
+                "MiniatureXL".into()
             },
         }
     }
@@ -1167,7 +1167,10 @@ mod tests {
             transient_saves_memory: None,
             limit_bucket: None,
         };
-        assert_eq!(endless.lod_distance_on(&discrete), crate::lod::INFINITE_CHUNKS);
+        assert_eq!(
+            endless.lod_distance_on(&discrete),
+            crate::lod::INFINITE_CHUNKS
+        );
         // The bounded default is what a discrete GPU is actually asked for.
         assert_eq!(g.lod_distance_on(&discrete), DEFAULT_LOD_DISTANCE);
     }

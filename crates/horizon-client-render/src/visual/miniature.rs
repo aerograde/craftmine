@@ -8,7 +8,12 @@
 
 use glam::{Vec3, Vec3Swizzles};
 
-pub const SHADOW_DARKNESS: f32 = 0.0;
+/// Miniature XL 1.2's default. The pack Horizon bundled before it set this to
+/// 0.0, which multiplies a shaded surface by 1.0 — no darkening at all, which
+/// is why its shadows read as "not accurate": what looked like a shadow edge
+/// was only the ambient term. XL's 0.5 is the shading the model was written
+/// around.
+pub const SHADOW_DARKNESS: f32 = 0.5;
 pub const LIGHT_BRIGHTNESS: f32 = 0.9;
 pub const SHADOW_BLUENESS: f32 = 0.2;
 
@@ -154,10 +159,20 @@ mod tests {
     #[test]
     fn the_pack_constants_are_preserved() {
         assert_eq!(LIGHT_BRIGHTNESS, 0.9);
-        assert!((SHADOW_COLOR - Vec3::new(1.0, 1.06666, 1.2)).length() < 1.0e-5);
+        // Miniature XL 1.2's `shader.h` default, and the reason a shadow is
+        // visible at all: at the old 0.0 this vector was (1, 1, 1).
+        assert_eq!(SHADOW_DARKNESS, 0.5);
+        assert!((SHADOW_COLOR - Vec3::new(0.5, 0.56666, 0.7)).length() < 1.0e-5);
+        assert!(SHADOW_COLOR.x < 1.0, "a shadow must darken its surface");
         assert_eq!(TORCH_INNER, [1.0, 0.85, 0.7]);
         assert_eq!(MOON, [0.1, 0.15, 0.3]);
         assert_eq!(OVERWORLD_FOG_MIN, 0.3);
+        // The shipped pack and the CPU reference must agree, or the ported
+        // shader and the WGSL beside it drift apart.
+        let shader = include_str!("../../../../shaderpacks/MiniatureXL/shaders/shader.h");
+        assert!(shader.contains("#define SHADOW_DARKNESS 0.5"));
+        assert!(shader.contains("#define LIGHT_BRIGHTNESS 0.9"));
+        assert!(shader.contains("vec3 SHADOW_COLOR = vec3(1.0 - SHADOW_DARKNESS)"));
     }
 
     #[test]

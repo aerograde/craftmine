@@ -23,14 +23,19 @@ the frame loop and left a black canvas. Re-entrant events are queued instead, as
 already does for events that arrive before the runner exists. It is licensed under Apache-2.0;
 the licence is in that folder (`LICENSE`).
 
-## Minecraft Miniature Shader
+## Miniature XL
 
-The bundled pack in `shaderpacks/Miniature/` (which the web build packages too) is the unmodified upstream
-pack, run through Horizon's shader-pack translator. The lighting and atmosphere model in
-`crates/horizon-client-render/src/visual/miniature.rs` and the Minecraft Miniature Shader section of
-`crates/horizon-client-render/src/terrain.wgsl` is a Rust/WGSL port of
-[Minecraft Miniature Shader](https://github.com/mateuskreuch/minecraft-miniature-shader) by Mateus A.
-Kreuch, at commit [`bdb6e00`](https://github.com/mateuskreuch/minecraft-miniature-shader/tree/bdb6e0020b4318d4e845902cbcc3e3552b0e9274).
+The bundled pack in `shaderpacks/MiniatureXL/` is
+[Miniature XL](https://github.com/matv-studio/miniatureXL) 1.2 by matv-studio, an unmodified copy
+(MIT License, in `shaderpacks/MiniatureXL/LICENSE`). It is a fork of
+[Minecraft Miniature Shader](https://github.com/MateusKreuch/miniature-shader) 2.19 by Mateus A.
+Kreuch, MIT, which Horizon bundled before it; the fork adds a voxel coloured-light volume
+propagated in a `shadowcomp` compute program, per-material emissive glow masks, day-night shadow
+strength and quality profiles. Horizon reads it as a pack, through its Iris shader translator; the
+lighting and atmosphere model in `crates/horizon-client-render/src/visual/miniature.rs` and the
+Minecraft Miniature Shader section of `crates/horizon-client-render/src/terrain.wgsl` is a
+Rust/WGSL port of the upstream model, at commit
+[`bdb6e00`](https://github.com/mateuskreuch/minecraft-miniature-shader/tree/bdb6e0020b4318d4e845902cbcc3e3552b0e9274).
 The upstream pack is under the MIT license:
 
 MIT License

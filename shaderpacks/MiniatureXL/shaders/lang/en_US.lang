@@ -1,0 +1,237 @@
+#shaders/lang/en_us.lang
+
+profile.LOW=Faible
+profile.LOW.comment=Shadows 512 px / 64 blocks, no block reflections, fast glow, no particle glow and no sun shafts, colored light over 64 blocks
+profile.MEDIUM=Medium
+profile.MEDIUM.comment=The default settings: shadows 1024 px / 128 blocks, balanced glow, colored light over 128 blocks
+profile.HIGH=Élevé
+profile.HIGH.comment=Shadows 2048 px / 192 blocks, longer reflections, fancy glow, colored light over 192 blocks
+
+screen.WATER_SCREEN=Water
+screen.WAVING_SCREEN=Waving
+screen.WAVING_SCREEN.comment=Leaves, plants and water move in the wind. Built into the pack: resource-pack waving (Vanilla Tweaks Wavy Leaves/Plants/Water) cannot run under shaders
+option.WAVY_LEAVES=Wavy leaves
+option.WAVY_PLANTS=Wavy plants §e[?]
+option.WAVY_PLANTS.comment=Grass, flowers, crops, ferns, saplings, coral and seagrass bend from their base; vines, roots and kelp sway as a whole
+option.WAVY_WATER=Wavy water §e[?]
+option.WAVY_WATER.comment=The water surface rises and falls. Independent of Water > Wave size, which only ripples the reflections
+option.WAVE_INDOORS=Indoor waving §e[?]
+option.WAVE_INDOORS.comment=How much still moves under a roof. The wind follows the sky light each leaf, plant or water surface receives: full under open sky, fading as it gets covered. 0 = no wind indoors
+option.WAVE_STRENGTH=Wave strength §e[?]
+option.WAVE_STRENGTH.comment=Amplitude of all waving. Rain strengthens the wind further
+option.WAVE_SPEED=Wave speed
+option.WATER_BRIGHTNESS=Water brightness
+option.WATER_B=Water blueness
+option.WATER_A=Water opacity
+option.WATER_MIN_GLINT=Glint strength §e[?]
+option.WATER_MIN_GLINT.comment=Determines how much texture the water retains; moving water still keeps all texture
+option.WATER_GLINT_BRIGHTNESS=Glint brightness
+option.WATER_EDGE_FADE=Water edge fade
+option.WATER_EDGE_FADE.comment=Fades water reflections and glint to 0 over this many blocks before the render distance ends, so loaded water blends into Voxy LOD water (which has neither) without a visible chunk edge. 0 = off
+option.WATER_GLINT_CUTOFF=Glint cutoff
+option.WATER_WAVE_SIZE=Wave size
+option.WATER_WAVE_SPEED=Wave speed
+
+# Colors tab removed: the torch gradient is now fixed; moon is in Sky colors
+option.MOON_R=Moon §cR
+option.MOON_G=Moon §2G
+option.MOON_B=Moon §9B
+
+screen.ATMOSPHERE_SCREEN=Atmosphere
+option.ENABLE_FOG=Enable fog
+option.WEATHER_OPACITY=Weather Opacity
+option.ENABLE_SKY=Enable sky §e[?]
+option.ENABLE_SKY.comment=Disable this option if you are using a sky resource pack
+option.OVERWORLD_FOG_MAX_SLIDER=Dawn & dusk fog §e[?]
+option.OVERWORLD_FOG_MAX_SLIDER.comment=Fog intensity during sunsets and sunrises
+option.OVERWORLD_FOG_MIN_SLIDER=Overworld fog
+option.SUN_SHAFTS=Sun shafts §e[?]
+option.SUN_SHAFTS.comment=Crepuscular rays around the sun (Overworld); blocked by terrain and clouds
+option.SUN_SHAFTS_STRENGTH=Sun shafts strength
+option.END_STARS_SPEED=End stars speed
+option.END_STARS_AMOUNT=End stars amount
+option.END_STARS_OPACITY=End stars opacity
+
+screen.SHADOWS_SCREEN=Shadows
+screen.LIGHTING_SCREEN=Lighting
+option.SHADOW_BLUENESS=Shadow blueness
+option.shadowDistance=Shadow distance
+option.shadowMapResolution=Shadow resolution
+option.shadowIntervalSize=Shadow refocus §e[?]
+option.shadowIntervalSize.comment=Determines after how many blocks shadows refocus on the player
+option.entityShadowDistanceMul=Entity shadow range §e[?]
+option.entityShadowDistanceMul.comment=As a percentage of shadow distance. Entity shadows fade out over the last 20% of this range instead of popping
+option.SHADOW_PIXEL=Shadow pixelization
+option.HDR=HDR highlights §e[?]
+option.HDR.comment=Keeps light brighter than white instead of clipping it: glowing texels, flames and strongly lit surfaces roll off toward white (hot cores) instead of flattening to one color. Everything below white is unchanged
+option.LIGHT_CONTRAST=Light contrast §e[?]
+option.LIGHT_CONTRAST.comment=Separates light levels a little more: darker caves, shade and nights, block light that pools around its source with a brighter core, and deeper sun shadows. Bright sunlit surfaces are untouched. 0 = original look
+option.LIGHT_BRIGHTNESS=Sun brightness
+option.sunPathRotation=Sun path angle §e[!]
+option.sunPathRotation.comment=Miniature was designed with straight shadows in mind and may produce artifacts if changed
+option.SHADOW_DARKNESS=Shadow darkness
+option.FLAT_LIGHTING=Flat lighting §e[?]
+option.FLAT_LIGHTING.comment=Without flat lighting, blocks will have shadows that do not match the sun's position, like in vanilla
+option.ENABLE_SHADOWS=Enable shadows
+option.SHADOW_ENTITY=Entity shadows
+value.SHADOW_ENTITY.-1=§aOff
+value.SHADOW_ENTITY.0=§ePlayer
+value.SHADOW_ENTITY.1=§eAll
+
+screen.REFLECTIONS_SCREEN=Reflections
+option.REFLECTIONS=Reflection opacity
+option.BLOCK_REFLECTIONS=Block reflections §e[?]
+option.BLOCK_REFLECTIONS.comment=Adds reflections to blocks such as stone bricks, quartz, etc.
+option.SSR_MAX_STEPS=Maximum steps
+option.SSR_BINARY_STEPS=Refining steps
+option.SSR_STEP_SIZE=Step size
+
+screen.BLOOM_SCREEN=Glow
+option.BLOOM=Enable glow
+option.BLOOM_STRENGTH=Glow strength
+option.BLOOM_HALO_SIZE=Glow size §e[?]
+option.BLOOM_HALO_SIZE.comment=How far the glow spreads around light sources. 0 keeps only a tight glow hugging the source; 1 is the default soft halo; higher values give a wide, Photon-like bloom
+option.BLOOM_QUALITY=Glow quality §e[?]
+option.BLOOM_QUALITY.comment=Fast blurs at quarter resolution with fewer samples; Fancy uses more samples for smoother glow
+value.BLOOM_QUALITY.0=§aFast
+value.BLOOM_QUALITY.1=§eBalanced
+value.BLOOM_QUALITY.2=§cFancy
+option.BLOOM_SATURATION=Glow saturation §e[?]
+option.BLOOM_SATURATION.comment=Above 1 makes the glow color more vivid than the source texture; below 1 washes it out
+option.SUN_GLOW=Sun & moon glow §e[?]
+option.SUN_GLOW.comment=Glow around the sun and moon: the bloom halo and the sun shafts. Off: neither (the Sun shafts setting then has no effect)
+option.BLOOM_EMISSIVE_TEXTURES=Pack emissives §e[?]
+option.BLOOM_EMISSIVE_TEXTURES.comment=Adds glow to emissive overlay textures from resource packs (rendered fullbright)
+option.BLOOM_PARTICLES=Particle glow §e[?]
+option.BLOOM_PARTICLES.comment=Bright particles (fire, flames, lava drips) glow. The beacon beam has its own dedicated glow, always on with Glow enabled
+screen.COLORED_LIGHT_SCREEN=Colored light
+option.COLORED_LIGHT=Colored lighting §e[?]
+option.COLORED_LIGHT.comment=Real colored block light: every light source spreads its own color through a light volume around you, at its real vanilla light level. Light flows around corners and through doorways, is tinted by stained glass, never passes through walls, and colors from several sources mix. Iris only, all dimensions
+option.COLORED_LIGHT_STRENGTH=Color intensity §e[?]
+option.COLORED_LIGHT_STRENGTH.comment=Saturation of the light colors: higher values deepen the hues, lower values keep them subtle. Brightness is unaffected
+option.CL_ENTITY_LIGHT=Entity lights §e[?]
+option.CL_ENTITY_LIGHT.comment=Light items held by other players and mobs emit colored light, burning entities and flaming arrows glow warm, and blazes, magma cubes, glow squids and allays emit their own light. Requires Entity shadows set to All (Shadows screen)
+option.CL_ITEM_LIGHT=Item lights §e[?]
+option.CL_ITEM_LIGHT.comment=Dropped light items and item frames holding one (torch, lantern, glowstone...) emit colored light. Requires Entity shadows set to All (Shadows screen)
+option.VOXEL_SIZE=Colored light range §e[?]
+option.VOXEL_SIZE.comment=How far around you colored light is shown: half the value, in blocks (128 = 64 blocks), fading back to plain light at the edge. Also capped by the Shadow distance, which feeds the light volume. GPU memory: 64-128 light, 256 about 85 MB, 384 about 380 MB, 512 about 670 MB
+value.VOXEL_SIZE.64=32 blocks
+value.VOXEL_SIZE.128=64 blocks
+value.VOXEL_SIZE.192=96 blocks
+value.VOXEL_SIZE.256=128 blocks
+value.VOXEL_SIZE.384=192 blocks
+value.VOXEL_SIZE.512=256 blocks
+option.TORCH_FALLOFF=Light softness §e[?]
+option.TORCH_FALLOFF.comment=Reshapes the vanilla block light curve: above 1 lifts dark corners and smooths the hard distance steps of torch light (works everywhere, no leaking possible); below 1 makes falloff harsher. 1.0 = vanilla curve
+option.CL_LAVA_TEXTURE=Lava texture color §e[?]
+option.CL_LAVA_TEXTURE.comment=Lava and magma take their light color from the resource pack (biome tint or texture) instead of the Lava & magma palette sliders. Off = fixed palette color
+option.CL_FALLOFF=Light reach §e[?]
+option.CL_FALLOFF.comment=How far each colored light carries past vanilla's reach. Lowest = vanilla (a level-15 source fades out after about 17 blocks); highest carries it to about 25 blocks and keeps more light at mid range (8 blocks: 60% instead of 47%). Most visible at night and in caves
+option.CL_BEHIND_DISTANCE=Lights behind you §e[?]
+option.CL_BEHIND_DISTANCE.comment=Distance in blocks around you in which light sources keep feeding the colored light even when out of view (behind you). Higher costs shadow-pass rendering and can cause hitches on fast turns. 0 = off: lights behind you drop out of the colored light
+value.CL_BEHIND_DISTANCE.0=Off
+
+screen.CL_COLORS_SCREEN=Light colors
+option.CL_FLAME_R=Flame §cR
+option.CL_FLAME_R.comment=Torches, lanterns, campfires, fire
+option.CL_FLAME_G=Flame §2G
+option.CL_FLAME_B=Flame §9B
+option.CL_SOUL_R=Soul fire §cR
+option.CL_SOUL_G=Soul fire §2G
+option.CL_SOUL_B=Soul fire §9B
+option.CL_LAVA_R=Lava & magma §cR
+option.CL_LAVA_G=Lava & magma §2G
+option.CL_LAVA_B=Lava & magma §9B
+option.CL_REDSTONE_R=Redstone §cR
+option.CL_REDSTONE_G=Redstone §2G
+option.CL_REDSTONE_B=Redstone §9B
+option.CL_AMETHYST_R=Amethyst §cR
+option.CL_AMETHYST_G=Amethyst §2G
+option.CL_AMETHYST_B=Amethyst §9B
+option.CL_SEA_R=Sea lantern §cR
+option.CL_SEA_R.comment=Sea lantern, sea pickle, conduit
+option.CL_SEA_G=Sea lantern §2G
+option.CL_SEA_B=Sea lantern §9B
+option.CL_PORTAL_R=Portal & anchor §cR
+option.CL_PORTAL_G=Portal §2G
+option.CL_PORTAL_B=Portal §9B
+option.CL_GLOW_R=Glowstone §cR
+option.CL_GLOW_R.comment=Glowstone, shroomlight, lamps
+option.CL_GLOW_G=Glowstone §2G
+option.CL_GLOW_B=Glowstone §9B
+option.CL_ROD_R=End rod §cR
+option.CL_ROD_G=End rod §2G
+option.CL_ROD_B=End rod §9B
+option.CL_LICHEN_R=Glow lichen §cR
+option.CL_LICHEN_G=Glow lichen §2G
+option.CL_LICHEN_B=Glow lichen §9B
+option.BLOOM_HIGHLIGHTS=Sun & moon glow amount §e[?]
+option.BLOOM_HIGHLIGHTS.comment=Strength of the bloom halo around the sun and moon (Sun & moon glow on); has no effect on blocks
+option.BLOOM_THRESHOLD=Sky glow threshold §e[?]
+option.BLOOM_THRESHOLD.comment=Sky brightness above which the sky starts to glow
+
+option.HIGHLIGHT_WAXED=Show waxed blocks §e[?]
+option.HIGHLIGHT_WAXED.comment=Holding a honeycomb highlights waxed blocks
+option.GLOWING_ORES=Glowing ores
+option.NETHER_COLOR_GRADING=Nether color grading
+option.HAND_DYNAMIC_LIGHTING=Hand dynamic lighting
+value.HAND_DYNAMIC_LIGHTING.-1=§aOff
+value.HAND_DYNAMIC_LIGHTING.0=§eWith light
+value.HAND_DYNAMIC_LIGHTING.1=§eAlways
+screen.SKY_COLORS_SCREEN=Sky colors
+option.SUN_NOON_R=Sun at noon §cR
+option.SUN_NOON_G=Sun at noon §2G
+option.SUN_NOON_B=Sun at noon §9B
+option.SUN_DUSK_R=Sun at dusk §cR
+option.SUN_DUSK_G=Sun at dusk §2G
+option.SUN_DUSK_B=Sun at dusk §9B
+option.SKY_DAY_R=Day sky tint §cR
+option.SKY_DAY_G=Day sky tint §2G
+option.SKY_DAY_B=Day sky tint §9B
+option.SKY_DUSK_R=Dusk sky tint §cR
+option.SKY_DUSK_G=Dusk sky tint §2G
+option.SKY_DUSK_B=Dusk sky tint §9B
+option.SKY_NIGHT_R=Night sky tint §cR
+option.SKY_NIGHT_G=Night sky tint §2G
+option.SKY_NIGHT_B=Night sky tint §9B
+option.ENCHANT_GLOW=Enchant glint glow §e[?]
+option.ENCHANT_GLOW.comment=How strongly the enchantment glint on items and armor glows, following the glint texture itself (a custom purple glint from a resource pack glows purple). 0 = off
+screen.GLOW_BLOCKS_SCREEN=Glow per block
+screen.GLOW_BLOCKS_SCREEN.comment=Glow strength of each group of glowing blocks and mobs. 0 turns that group's glow off; the blocks still light up and still cast colored light
+option.GLOW_FLAMES=Torches & lanterns
+option.GLOW_FLAMES.comment=Also candles, lit furnaces, copper torches and lanterns
+option.GLOW_SOUL=Soul fire
+option.GLOW_LAVA=Lava, magma, fire
+option.GLOW_REDSTONE=Redstone
+option.GLOW_REDSTONE.comment=Redstone torches, lit redstone ore, powered dust, redstone block, powered components
+option.GLOW_LAMPS=Glowstone, lamps
+option.GLOW_LAMPS.comment=Glowstone, redstone lamp, shroomlight, beacon core and beacon beam
+option.GLOW_SEA=Sea lanterns
+option.GLOW_SEA.comment=Sea lantern, sea pickle, conduit
+option.GLOW_FROGLIGHTS=Froglights
+option.GLOW_AMETHYST=Amethyst
+option.GLOW_END_ROD=End rods
+option.GLOW_PORTALS=Portals & obsidian
+option.GLOW_PORTALS.comment=Nether portal, crying obsidian, respawn anchor, end portal frame, ender chest
+option.GLOW_SCULK=Sculk
+option.GLOW_STEMS=Nether stems
+option.GLOW_STEMS.comment=Warped and crimson stems and hyphae
+option.GLOW_CONTRAST=Glow contrast
+option.GLOW_CONTRAST.comment=Lightness-ranked glow (copper bulbs, lamps, fire, amethyst, crying obsidian...): the lightest texels glow 100%, darker ones less by their lightness. Higher = more contrast
+option.NETHER_VEIN_BASE=Nether vein glow
+option.NETHER_VEIN_BASE.comment=Warped and crimson stems: glow of the plain veins relative to the lighter animated pulse (100%). The bark never glows
+option.PORTAL_OPACITY=Portal opacity
+option.PORTAL_OPACITY.comment=Nether portal opacity. Like Photon, its dark body is see-through and its bright swirl opaque; 1.0 = Photon-like, lower = more see-through overall
+option.SCULK_CRYSTAL_IDLE=Calibrated sensor crystal at rest
+option.SCULK_CRYSTAL_IDLE.comment=Glow of the calibrated sculk sensor's amethyst crystal while idle. It glows 100% while the sensor fires, then fades through its cooldown
+option.GLOW_INK_TEXT=Glow ink text
+option.GLOW_INK_TEXT.comment=Light glow on sign text written with a glow ink sac. Kept low so the text stays readable. 0 = off
+option.GLOW_PLANTS=Glowing plants
+option.GLOW_PLANTS.comment=Open eyeblossom, glow berries, glow lichen, nether fungi, torchflower, chorus
+option.GLOW_BREWING=Brewing stand
+option.GLOW_MISC=Spawners & hearts
+option.GLOW_MISC.comment=Spawners and the awake creaking heart
+option.GLOW_OTHER=Other light sources
+option.GLOW_OTHER.comment=Light-emitting blocks without a group of their own: copper bulbs, crafters, modded lights...
+option.GLOW_MOBS=Glowing mobs
+option.GLOW_MOBS.comment=Allay, vex, glow squid, blaze, magma cube, mob eyes (spider, enderman, phantom...), warden and creaking emissive layers, resource pack emissive textures
