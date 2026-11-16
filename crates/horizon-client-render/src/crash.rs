@@ -543,10 +543,17 @@ pub fn install(home: PathBuf, side: &'static str) {
         }
         default(info);
         #[cfg(target_arch = "wasm32")]
-        log::error!(
-            "Horizon panic stack (browser):\n{}",
-            horizon_os::web::horizon_js_stack()
-        );
+        {
+            log::error!(
+                "Horizon panic stack (browser):\n{}",
+                horizon_os::web::horizon_js_stack()
+            );
+            // A panic on the page's own thread unwinds out of the frame loop,
+            // so the canvas keeps its last frame and the player is left with a
+            // black screen and no reason. `web/main.js` listens for this and
+            // draws the failure instead.
+            horizon_os::web::report_panic(&panic_message(info));
+        }
         let main = horizon_os::thread::current().name() == Some("main");
         if main {
             deliver(&home, panic_report(info, side));

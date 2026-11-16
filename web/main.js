@@ -39,11 +39,11 @@ window.addEventListener("unhandledrejection", (event) => rememberError(event.rea
 // Whether this browser can draw the game; says why not on the page.
 async function webgpu() {
     if (!navigator.gpu) {
-        status.textContent = `Horizon needs WebGPU, which this browser doesn't offer.`;
+        status.textContent = `This game needs WebGPU, which this browser doesn't offer.`;
         return false;
     }
     if (!(await navigator.gpu.requestAdapter().catch(() => null))) {
-        status.textContent = "Horizon needs WebGPU, and this browser offers it but found no GPU to use " +
+        status.textContent = "This game needs WebGPU, and this browser offers it but found no GPU to use " +
             `(it may be switched off, or the graphics driver not supported).`;
         return false;
     }
@@ -315,20 +315,21 @@ async function main() {
     }
 }
 
-main().catch((e) => {
-    console.error(e);
+// Draws a failure over the canvas: what went wrong, what to try, and the last
+// few console lines. A panic unwinds out of the frame loop, so without this the
+// page keeps whatever frame it last drew — usually black, with no reason given.
+function showFailure(titleText, failure, hintText) {
     const isolation = window.crossOriginIsolated ? "" :
         "The page isn't cross-origin isolated, so the threaded build cannot use workers; " +
         "the single-threaded build is used instead.";
     status.className = "error";
     status.replaceChildren();
     const title = document.createElement("h1");
-    title.textContent = "Horizon could not start";
+    title.textContent = titleText;
     const message = document.createElement("p");
-    message.textContent = String(e);
+    message.textContent = String(failure);
     const hint = document.createElement("p");
-    hint.textContent = "Try Reload. If this repeats, clear the cached game files. " +
-        "WebGPU and a supported browser are required.";
+    hint.textContent = hintText;
     const details = document.createElement("pre");
     details.textContent = [...new Set(startupErrors)].slice(-5).join("\n");
     const actions = document.createElement("div");
@@ -358,4 +359,19 @@ main().catch((e) => {
     const isolationNote = document.createElement("p");
     isolationNote.textContent = isolation;
     status.append(title, message, hint, details, actions, isolationNote);
+}
+
+// The game reports a panic here (`horizon_os::web::report_panic`): the frame
+// loop has stopped, so say so rather than leaving the last frame on screen.
+globalThis.horizonPanicked = (message) => {
+    showFailure("The game stopped", message,
+        "This is a bug in the game, not your setup: Reload and it usually runs. " +
+        "If it repeats, press Clear cached files and reload.");
+};
+
+main().catch((e) => {
+    console.error(e);
+    showFailure("The game could not start", e,
+        "Try Reload. If this repeats, clear the cached game files. " +
+        "WebGPU and a supported browser are required.");
 });

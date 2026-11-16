@@ -92,11 +92,21 @@ export function horizon_take_picked() {
     picked = null;
     return p;
 }
+// What the game could not draw, for the page to show instead of a blank canvas.
+export function horizon_report_panic(message) {
+    try {
+        if (typeof globalThis.horizonPanicked === "function") globalThis.horizonPanicked(String(message));
+    } catch (e) {}
+}
 "#)]
 extern "C" {
     fn horizon_pick_file(kind: &str, accept: &str);
     fn horizon_take_picked() -> JsValue;
     fn horizon_console(level: u32, message: &str);
+    /// Hands a panic's message to the page (`web/main.js`), which draws it: a
+    /// panic unwinds out of the frame loop and the canvas would otherwise keep
+    /// its last frame, leaving a black screen with no reason.
+    pub fn horizon_report_panic(message: &str);
     /// The browser's stack for this point, with the wasm frames' names.
     pub fn horizon_js_stack() -> String;
     fn horizon_pointer_lock(want: bool);
@@ -192,6 +202,13 @@ pub(crate) fn args() -> Vec<String> {
 /// warning, more for the rest).
 pub fn console(level: u32, message: &str) {
     horizon_console(level, message);
+}
+
+/// Hands a panic's message to the page, which draws it in place of the canvas:
+/// a panic unwinds out of the frame loop, and the last frame it left is what
+/// the player sees otherwise — a black screen with no reason given.
+pub fn report_panic(message: &str) {
+    horizon_report_panic(message);
 }
 
 /// Locks the pointer to the game's canvas, or lets it go. Browsers lock it
