@@ -134,10 +134,15 @@ pub fn fitted(device: &wgpu::Device, settings: &Settings) -> Settings {
     }
 }
 
-/// The cell the shadow camera keeps to, in blocks along the world's axes: the player stays
-/// within 7 blocks of the centre (half the cell on each axis), where the map is still over
-/// three times as fine as at its edge.
-const SNAP: f32 = 8.0;
+/// The cell the shadow camera keeps to, in blocks along the world's axes.
+///
+/// One block, then `camera` snaps the origin to whole shadow texels inside it:
+/// a larger cell quantises the whole map, so a shadow jumps sideways when the
+/// player crosses a boundary, which is the "not accurate" that shows up most
+/// next to the block casting it. A texel is the finest step that still leaves
+/// every texel on the same world point (so nothing is resampled and nothing
+/// crawls while the player walks).
+const SNAP: f32 = 1.0;
 
 /// The ground one shadow texel covers right under the camera, in blocks: a 32nd, half a texture
 /// pixel, so shadow edges near the player stay as sharp as the blocks casting them.

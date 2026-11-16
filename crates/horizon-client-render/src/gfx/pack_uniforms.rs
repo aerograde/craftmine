@@ -264,6 +264,9 @@ pub fn shadow_camera(light: Vec3, camera: DVec3, shadow: &Shadow) -> (Mat4, Mat4
     let rotation = DMat4::from_rotation_x(std::f64::consts::FRAC_PI_2)
         * DMat4::from_rotation_z(zenith)
         * DMat4::from_rotation_x(tilt);
+    // `interval` is the pack's own snap (Iris: `shadowIntervalSize`), kept
+    // exactly as it specifies — packs pin these matrices, so the origin here is
+    // their contract, not ours to round to a texel.
     let step = f64::from(shadow.interval);
     let origin = if step > 0.0 {
         let remainder = if shadow.euclidean_snap {

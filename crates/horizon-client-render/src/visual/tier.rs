@@ -27,9 +27,11 @@ impl Tier {
 
     pub const fn shadow(self) -> ShadowPlan {
         // One orthographic map over the near field. `taps` is the PCF width in
-        // texels: 3 on High because nine compares of a 1024² map is cheap next
-        // to the terrain shader, 0 on the integrated tiers where the extra
-        // samples cost more than the edge softness is worth there.
+        // texels: a 3x3 tent on every tier, because a single compare gives a
+        // shadow edge with hard stair-steps a block wide, which is what "the
+        // shadows look wrong" was. Nine taps once per terrain pixel is small
+        // beside the terrain shader itself, and the cheaper tiers already pay
+        // for it with a smaller map rather than with a jagged edge.
         match self {
             Self::High => ShadowPlan {
                 resolution: 1024,
@@ -38,13 +40,13 @@ impl Tier {
             },
             Self::Medium => ShadowPlan {
                 resolution: 512,
-                distance: 64.0,
-                taps: 0.0,
+                distance: 96.0,
+                taps: 3.0,
             },
             Self::Low => ShadowPlan {
-                resolution: 256,
+                resolution: 512,
                 distance: 64.0,
-                taps: 0.0,
+                taps: 3.0,
             },
         }
     }
@@ -150,10 +152,31 @@ mod tests {
     #[test]
     fn shadows_follow_the_pack_profiles() {
         let low = Params::for_quality(VisualQuality::Low, true);
-        assert_eq!(low.shadow.resolution, 256);
+        // A 512 map at 64 blocks rather than 256 at 64: half the texel size, so
+        // the shadow a block casts is twice as sharp — the complaint was that
+        // they were not accurate, not that they were too soft.
+        assert_eq!(low.shadow.resolution, 512);
         assert_eq!(low.shadow.distance, 64.0);
         assert_eq!(low.bloom, 0.0);
         assert_eq!(low.shafts, 0.0);
+        // Every tier filters. A single compare gives a stair-stepped edge a
+        // block wide; no tier may ship that.
+        for quality in [
+            VisualQuality::High,
+            VisualQuality::Medium,
+            VisualQuality::Low,
+        ] {
+            let plan = Tier::from_quality(quality).shadow();
+            assert_eq!(plan.taps, 3.0, "{quality:?} must filter its shadow edge");
+            let texel = 2.0 * plan.distance / plan.resolution as f32;
+            // A block's shadow must cover more than one texel, or it cannot be
+            // drawn at all; 0.5 blocks a texel is the coarsest that reads.
+            assert!(texel <= 0.5, "{quality:?}: {texel} blocks a texel");
+        }
+        let high = Tier::High.shadow();
+        let medium = Tier::Medium.shadow();
+        assert!(high.resolution >= medium.resolution);
+        assert!(high.distance >= medium.distance);
     }
 
     #[test]

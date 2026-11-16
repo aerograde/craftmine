@@ -329,6 +329,12 @@ pub fn hdr_offered() -> bool {
 /// Apple's: they share the CPU's memory bandwidth, and past it far terrain
 /// costs them more frame time than it is worth.
 pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
+/// The LOD Distance a fresh install gets, in chunks. Far terrain is a fallback
+/// horizon under the resident chunks, and the farther it reaches the wider its
+/// coarsest cells must be: 96 chunks tops out at 2048-block roots, where
+/// infinite terrain goes to 8192 and its last rings are one flat quad a cell,
+/// which is exactly the soft blob. Infinite stays one switch away.
+pub const DEFAULT_LOD_DISTANCE: u32 = 96;
 /// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
 /// are integrated too, with memory and bandwidth enough for every distance.
 /// Software and virtual GPUs share the same limits as other integrated ones.
@@ -580,8 +586,14 @@ impl Default for Graphics {
             preset: Preset::Custom,
             visuals: true,
             visual_quality: VisualQuality::Auto,
-            lod_distance: 0,
-            lod_infinite: true,
+            lod_distance: DEFAULT_LOD_DISTANCE,
+            // Far terrain is a *fallback* horizon, not a second world: past
+            // `DEFAULT_LOD_DISTANCE` chunks the cells are wider than a block and
+            // read as ridges rather than as the ground. A bounded distance keeps
+            // every cell inside the rings that still hold detail, which is what
+            // the default is for; `lod_infinite` stays available for a horizon
+            // that never ends.
+            lod_infinite: false,
             // Full detail everywhere it fits. `Reduced` is a visible change
             // (coarser far cells), so it is only the 4 GB devices': there the
             // choice is that or the browser killing the tab. An 8 GB machine
@@ -1123,6 +1135,44 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_install_draws_a_bounded_lod_horizon() {
+        // The default used to be infinite: a horizon to 4096 chunks, whose last
+        // rings are 8192-block cells drawn as one flat quad each — the soft blob
+        // at the edge of the world. 96 chunks keeps the coarsest roots inside
+        // the rings that still carry shape.
+        let g = Graphics::default();
+        assert_eq!(g.lod_distance, DEFAULT_LOD_DISTANCE);
+        assert_eq!(DEFAULT_LOD_DISTANCE, 96);
+        assert!(!g.lod_infinite, "the default horizon is bounded");
+        assert!(
+            DEFAULT_LOD_DISTANCE <= 128,
+            "an integrated GPU's cap must not lower the default"
+        );
+        // Infinite is still reachable, and still what an explicit choice gets.
+        let endless = Graphics {
+            lod_infinite: true,
+            ..Graphics::default()
+        };
+        let discrete = wgpu::AdapterInfo {
+            name: "NVIDIA GeForce RTX 4070".into(),
+            vendor: 0,
+            device: 0,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            device_pci_bus_id: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+            backend: wgpu::Backend::Vulkan,
+            subgroup_min_size: 0,
+            subgroup_max_size: 0,
+            transient_saves_memory: None,
+            limit_bucket: None,
+        };
+        assert_eq!(endless.lod_distance_on(&discrete), crate::lod::INFINITE_CHUNKS);
+        // The bounded default is what a discrete GPU is actually asked for.
+        assert_eq!(g.lod_distance_on(&discrete), DEFAULT_LOD_DISTANCE);
+    }
+
+    #[test]
     fn integrated_gpus_other_than_apple_cap_the_lod_distance() {
         let adapter = |name: &str, device_type| wgpu::AdapterInfo {
             name: name.into(),
@@ -1166,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn infinite_terrain_is_on_by_default_and_has_no_distance_cap() {
+    fn infinite_terrain_is_opt_in_and_uncapped() {
         let hd620 = wgpu::AdapterInfo {
             name: "Intel(R) HD Graphics 620 (KBL GT2)".into(),
             vendor: 0,
@@ -1182,16 +1232,20 @@ mod tests {
             limit_bucket: None,
         };
         let g = Graphics::default();
-        assert!(g.lod_infinite);
-        assert_eq!(g.lod_distance, 0, "the slider stays off behind infinite");
-        assert_eq!(g.lod_distance_on(&hd620), crate::lod::INFINITE_CHUNKS);
+        // The default is a bounded horizon now: infinite reaches 8192-block
+        // cells, whose last rings are one flat quad each — the soft blob.
+        assert!(!g.lod_infinite);
+        assert_eq!(g.lod_distance, DEFAULT_LOD_DISTANCE);
+        assert_eq!(g.lod_distance_on(&hd620), DEFAULT_LOD_DISTANCE);
+        // Infinite is still what an explicit choice gets, with no distance cap.
+        let on = Graphics::parse("lodInfinite:true\n");
+        assert!(on.lod_infinite);
+        assert_eq!(on.lod_distance_on(&hd620), crate::lod::INFINITE_CHUNKS);
         // Explicit Off persists, and the finite slider returns.
         let off = Graphics::parse("lodInfinite:false\nlodDistance:256\n");
         assert!(!off.lod_infinite);
         assert_eq!(off.lod_distance_on(&hd620), INTEGRATED_LOD_DISTANCE);
         assert_eq!(Graphics::parse(&off.serialize()), off);
-        let on = Graphics::parse("lodInfinite:true\n");
-        assert!(on.lod_infinite);
     }
 
     #[test]
@@ -1241,8 +1295,8 @@ mod tests {
     }
 
     #[test]
-    fn lod_distance_is_opt_in_and_bounded() {
-        assert_eq!(Graphics::default().lod_distance, 0);
+    fn lod_distance_defaults_to_96_and_round_trips() {
+        assert_eq!(Graphics::default().lod_distance, DEFAULT_LOD_DISTANCE);
         for distance in [0, 64, 128, 256, 512, 1024, 65_536, crate::lod::MAX_CHUNKS] {
             let g = Graphics::parse(&format!("lodDistance:{distance}\n"));
             assert_eq!(g.lod_distance, distance);
@@ -1252,8 +1306,15 @@ mod tests {
             Graphics::parse("lodDistance:99999999\n").lod_distance,
             crate::lod::MAX_CHUNKS
         );
-        assert_eq!(Graphics::parse("lodDistance:-1\n").lod_distance, 0);
-        assert_eq!(Graphics::parse("lodDistance:invalid\n").lod_distance, 0);
+        // Invalid input keeps the default rather than clearing the horizon.
+        assert_eq!(
+            Graphics::parse("lodDistance:-1\n").lod_distance,
+            DEFAULT_LOD_DISTANCE
+        );
+        assert_eq!(
+            Graphics::parse("lodDistance:invalid\n").lod_distance,
+            DEFAULT_LOD_DISTANCE
+        );
     }
 
     #[test]
