@@ -346,29 +346,46 @@ pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
 /// An 8 GB-or-less browser device (or a four-thread one): low-power Chromebooks
 /// and tablets report `Other` for their GPU, so the adapter class alone would
 /// pick the full shadow and bloom path there.
+///
+/// Cached in an atomic rather than a `OnceLock`: the worldgen and meshing
+/// workers ask this too, and `OnceLock::get_or_init` *blocks* a loser, which on
+/// the browser is `Atomics.wait cannot be called in this context` unless the
+/// thread is allowed to wait. Losing the race here only means computing the
+/// two JavaScript calls again.
 pub fn web_low_memory() -> bool {
-    // Read once: both halves are JavaScript calls on the page, and this is
-    // asked per chunk summary and per cache insert. Neither value can change
-    // while the page lives.
-    static LOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *LOW.get_or_init(|| {
-        cfg!(target_arch = "wasm32") && {
-            let memory = horizon_os::device_memory_gib();
-            (memory > 0.0 && memory <= 8.0) || horizon_os::hardware_threads() <= 4
-        }
+    static LOW: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
+    cached(&LOW, || {
+        let memory = horizon_os::device_memory_gib();
+        (memory > 0.0 && memory <= 8.0) || horizon_os::hardware_threads() <= 4
     })
 }
 /// A 4 GB-or-less browser device: the smallest Chromebooks, and the ones whose
-/// tab the browser kills first. Everything `web_low_memory` halves, this
-/// quarters.
+/// tab the browser kills first.
 pub fn web_tiny_memory() -> bool {
-    static TINY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TINY.get_or_init(|| {
-        cfg!(target_arch = "wasm32") && {
-            let memory = horizon_os::device_memory_gib();
-            (memory > 0.0 && memory <= 4.0) || horizon_os::hardware_threads() <= 2
-        }
+    static TINY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
+    cached(&TINY, || {
+        let memory = horizon_os::device_memory_gib();
+        (memory > 0.0 && memory <= 4.0) || horizon_os::hardware_threads() <= 2
     })
+}
+/// Not computed yet. The two cached answers; `0` and `1` are the values.
+const UNKNOWN: u8 = 2;
+/// `cell`'s answer, computing it at most once per thread that wins the race.
+fn cached(cell: &std::sync::atomic::AtomicU8, answer: impl Fn() -> bool) -> bool {
+    // Off the browser there is nothing to cache: the answer is a constant.
+    if !cfg!(target_arch = "wasm32") {
+        return false;
+    }
+    match cell.load(std::sync::atomic::Ordering::Relaxed) {
+        UNKNOWN => {
+            let value = answer();
+            // A relaxed store: another thread seeing the old value just
+            // recomputes, which is only two JavaScript reads.
+            cell.store(u8::from(value), std::sync::atomic::Ordering::Relaxed);
+            value
+        }
+        known => known == 1,
+    }
 }
 /// A LOD distance as far terrain uses it on this adapter.
 pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
