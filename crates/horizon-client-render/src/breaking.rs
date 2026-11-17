@@ -31,10 +31,25 @@ pub fn stage_light([u0, v0]: [f32; 2]) -> u32 {
     q(u0) | (q(v0) << 16)
 }
 
+/// The atlas layer of `destroy_stage_0`, which every stage sprite follows.
+///
+/// The crack quads are drawn from the destroy-stage sprites, and a sprite's
+/// layer is its *insertion order* in the atlas, so a literal here is a copy of
+/// a number the atlas owns: it was `11` (12 translucent), and any sprite added
+/// before the destroy stages would silently point the cracks at the wrong
+/// texture. `layers` is the atlas's own map; the stage sprites are contiguous
+/// from this layer, one per stage.
+pub fn stage_layer(layers: &std::collections::BTreeMap<String, u32>) -> Option<u32> {
+    layers
+        .get("block/destroy_stage_0")
+        .or_else(|| layers.get("minecraft:block/destroy_stage_0"))
+        .copied()
+}
+
 pub fn geometry(
     model: &BakedModel,
     origin: glam::Vec3,
-    translucent: bool,
+    layer: u32,
     stage: [f32; 2],
     out: &mut Vec<Vertex>,
 ) {
@@ -45,7 +60,7 @@ pub fn geometry(
                 out.push(Vertex {
                     pos: (origin + glam::Vec3::from(pos)).to_array(),
                     uv: decal_uv(pos, face.quad.facing),
-                    layer: if translucent { 12 } else { 11 },
+                    layer,
                     color: 0xffff_ffff,
                     light: stage_light(stage),
                     normal: [0; 4],
@@ -146,7 +161,7 @@ mod tests {
         geometry(
             &model,
             glam::Vec3::new(2.0, 3.0, 4.0),
-            false,
+            11,
             [0.0; 2],
             &mut vertices,
         );
@@ -160,7 +175,7 @@ mod tests {
     fn entity_overlay_uses_block_local_projected_uvs() {
         let origin = glam::Vec3::new(12.0, -3.0, 8.0);
         let mut expected = Vec::new();
-        geometry(&slab_top(), origin, false, [0.0; 2], &mut expected);
+        geometry(&slab_top(), origin, 11, [0.0; 2], &mut expected);
         let mut actual = expected.clone();
         for vertex in &mut actual {
             vertex.uv = [0.0; 2];
@@ -181,17 +196,36 @@ mod tests {
         assert!(((b[1] - a[1]).abs() - 0.5).abs() < 1e-6);
     }
     #[test]
-    fn translucent_overlay_has_its_own_pass() {
+    fn the_overlay_draws_from_the_layer_it_is_given() {
+        // The crack pass draws the destroy-stage sprite whose layer the atlas
+        // reports; the quad carries exactly that, so the atlas's own numbering
+        // decides the texture and no literal can drift from it.
         let mut vertices = Vec::new();
-        geometry(&slab_top(), glam::Vec3::ZERO, true, [0.0; 2], &mut vertices);
+        geometry(&slab_top(), glam::Vec3::ZERO, 12, [0.0; 2], &mut vertices);
         assert!(vertices.iter().all(|v| v.layer == 12));
+        vertices.clear();
+        geometry(&slab_top(), glam::Vec3::ZERO, 3, [0.5, 0.25], &mut vertices);
+        assert!(vertices.iter().all(|v| v.layer == 3));
+        assert!(vertices.iter().all(|v| v.light == stage_light([0.5, 0.25])));
+    }
+    #[test]
+    fn the_stage_layer_comes_from_the_atlas() {
+        let mut layers = std::collections::BTreeMap::new();
+        assert_eq!(stage_layer(&layers), None, "no atlas entry, no cracks");
+        layers.insert("gui/other".to_owned(), 0);
+        layers.insert("block/destroy_stage_0".to_owned(), 11);
+        assert_eq!(stage_layer(&layers), Some(11));
+        // The namespaced spelling a pack may use resolves too.
+        let mut namespaced = std::collections::BTreeMap::new();
+        namespaced.insert("minecraft:block/destroy_stage_0".to_owned(), 7);
+        assert_eq!(stage_layer(&namespaced), Some(7));
     }
     #[test]
     fn empty_model_has_no_cube_overlay() {
         let mut model = slab_top();
         model.faces.clear();
         let mut vertices = Vec::new();
-        geometry(&model, glam::Vec3::ZERO, false, [0.0; 2], &mut vertices);
+        geometry(&model, glam::Vec3::ZERO, 11, [0.0; 2], &mut vertices);
         assert!(vertices.is_empty());
     }
 }

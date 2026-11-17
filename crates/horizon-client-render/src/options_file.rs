@@ -163,13 +163,30 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         b("reducedDebugInfo", false),
         def("renderClouds", O(Clouds), V::Int(2)),
         i("cloudRange", 2, 128, 128),
+        // The desktop default, shared with `Settings::default` so a fresh
+        // install and an options.txt that never named the key agree. A browser
+        // tab is the exception: 16 chunks of resident geometry is most of an
+        // 8 GB Chromebook's frame, and the far terrain covers what it drops.
         i(
             "renderDistance",
             2,
             MAX_RENDER_DISTANCE,
-            if low { 8 } else { 12 },
+            if low {
+                8
+            } else {
+                crate::settings::DEFAULT_RENDER_DISTANCE
+            },
         ),
-        i("simulationDistance", 5, 32, if low { 8 } else { 12 }),
+        i(
+            "simulationDistance",
+            5,
+            32,
+            if low {
+                8
+            } else {
+                crate::settings::DEFAULT_SIMULATION_DISTANCE
+            },
+        ),
         u("screenEffectScale", 1.0),
         def("soundDevice", O(AnyStr), V::Str(String::new())),
         b("vignette", true),
@@ -520,6 +537,15 @@ impl OptionsFile {
         match self.get(key) {
             Some(V::Int(i)) => *i,
             _ => 0,
+        }
+    }
+    /// `key`'s number, or `default` when the file does not name it. `int`
+    /// answers 0 for an absent key, which is right for a numeric option whose
+    /// zero is meaningful and wrong for one whose zero means "unset".
+    pub fn int_or(&self, key: &str, default: i32) -> i32 {
+        match self.get(key) {
+            Some(V::Int(i)) => *i,
+            _ => default,
         }
     }
     pub fn double(&self, key: &str) -> f64 {

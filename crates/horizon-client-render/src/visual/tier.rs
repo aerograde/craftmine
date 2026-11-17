@@ -32,6 +32,14 @@ impl Tier {
         // shadows look wrong" was. Nine taps once per terrain pixel is small
         // beside the terrain shader itself, and the cheaper tiers already pay
         // for it with a smaller map rather than with a jagged edge.
+        //
+        // `distance` must keep the shadow camera's 7-block snap on a whole
+        // number of texels, or every redraw shifts the map by a fraction of a
+        // texel and the shadow visibly slides when anything in the scene
+        // changes — placing one block did it. Texel = 2 * distance / resolution,
+        // so 128 on 1024 gives 0.25 blocks and 7 / 0.25 = 28 texels exactly.
+        // 160 gives 0.3125 and 22.4, which is not: it looked sharper on paper
+        // and crawled in practice.
         match self {
             Self::High => ShadowPlan {
                 resolution: 1024,
@@ -40,15 +48,28 @@ impl Tier {
             },
             Self::Medium => ShadowPlan {
                 resolution: 512,
-                distance: 96.0,
+                // 112 / 512 gives a 0.4375-block texel: 7 / 0.4375 = 16 exactly.
+                // 96 gave 18.667 and crawled the same way High's 160 did.
+                distance: 112.0,
                 taps: 3.0,
             },
             Self::Low => ShadowPlan {
                 resolution: 512,
+                // 0.25-block texels: 28 per snap, as High's.
                 distance: 64.0,
                 taps: 3.0,
             },
         }
+    }
+    /// Whether `distance` at `resolution` keeps the snap on whole texels.
+    ///
+    /// `interval` is the pack's `shadowIntervalSize`; the origin moves in that
+    /// many blocks, so it has to be a whole number of the map's texels or the
+    /// map resamples itself on every redraw and the shadow crawls.
+    pub fn snap_is_whole_texels(distance: f32, resolution: u32, interval: f32) -> bool {
+        let texel = 2.0 * distance / resolution.max(1) as f32;
+        let steps = interval / texel;
+        (steps - steps.round()).abs() < 1e-4
     }
 }
 
@@ -146,7 +167,30 @@ mod tests {
         assert_eq!(low.uniform(), high.uniform());
         assert_eq!(high.post_uniform(), [1.0, 0.0, 0.0, 0.0]);
         assert_eq!(high.shadow.resolution, 1024);
+        // High reaches 128 blocks of shadow on a 1024 map: 0.25-block texels.
         assert_eq!(high.shadow.distance, 128.0);
+    }
+
+    #[test]
+    fn every_tier_keeps_its_snap_on_whole_texels() {
+        // The shadow camera moves in `shadowIntervalSize` blocks (the pack's 7).
+        // If that is not a whole number of the map's texels, every redraw
+        // resamples the map and the shadow crawls sideways — placing a single
+        // block was enough to see it.
+        for tier in [Tier::High, Tier::Medium, Tier::Low] {
+            let plan = tier.shadow();
+            assert!(
+                Tier::snap_is_whole_texels(plan.distance, plan.resolution, 7.0),
+                "{}: {} blocks on a {} map is not a whole number of 7-block snaps",
+                tier.label(),
+                plan.distance,
+                plan.resolution
+            );
+        }
+        // The check itself must reject the values this bug came from.
+        assert!(!Tier::snap_is_whole_texels(160.0, 1024, 7.0));
+        assert!(!Tier::snap_is_whole_texels(96.0, 512, 7.0));
+        assert!(Tier::snap_is_whole_texels(128.0, 1024, 7.0));
     }
 
     #[test]

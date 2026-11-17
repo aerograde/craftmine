@@ -206,12 +206,35 @@ pub struct Settings {
     /// The picked pack's options while its Shader Options page is open.
     pub shader_options: Option<crate::shader_options::ShaderOptions>,
 }
+/// The view distance a fresh install reaches, in chunks. Vanilla's Fancy preset
+/// uses 16; with far terrain drawing the horizon past it, these chunks carry all
+/// the near detail a player actually reads, so 16 is where the picture looks
+/// highest without the resident geometry dominating the frame.
+pub const DEFAULT_RENDER_DISTANCE: i32 = 16;
+/// How far the simulation ticks. 12 keeps vanilla's rule that simulation is at
+/// most as far as the view, and the far terrain leaves nothing to simulate out
+/// there.
+pub const DEFAULT_SIMULATION_DISTANCE: i32 = 12;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             fov: 70.0,
-            render_distance: 12,
-            simulation_distance: 12,
+            // The single source of the default, shared with the option table in
+            // `options_file`: a fresh install and an options.txt that never
+            // named the key used to disagree. A browser tab keeps the smaller
+            // distance the table uses there, since its frame is the one the
+            // resident geometry dominates.
+            render_distance: if crate::graphics::web_low_memory() {
+                8
+            } else {
+                DEFAULT_RENDER_DISTANCE
+            },
+            simulation_distance: if crate::graphics::web_low_memory() {
+                8
+            } else {
+                DEFAULT_SIMULATION_DISTANCE
+            },
             sensitivity: 0.5,
             master_volume: 1.0,
             volumes: [1.0; 11],
@@ -418,6 +441,7 @@ impl Settings {
     }
     /// Typed view of an options file.
     pub fn from_file(f: OptionsFile) -> Self {
+        let default = Self::default();
         let mut keys = KeyBinds::default();
         for (name, _, _) in crate::keybinds::MAPPINGS {
             keys.set(name, &f.key_binding(name));
@@ -428,8 +452,12 @@ impl Settings {
         }
         Self {
             fov: f.int("fov") as f32,
-            render_distance: f.int("renderDistance"),
-            simulation_distance: f.int("simulationDistance"),
+            // A missing key must take the default, not zero: `OptionsFile::int`
+            // answers 0 for an absent key, so a partially written options.txt
+            // used to open the world at view distance 0 (clamped to 2) instead
+            // of the Fancy distance. Only a file that names the key overrides it.
+            render_distance: f.int_or("renderDistance", default.render_distance),
+            simulation_distance: f.int_or("simulationDistance", default.simulation_distance),
             sensitivity: f.double("mouseSensitivity") as f32,
             master_volume: volumes[0],
             volumes,
@@ -924,9 +952,26 @@ mod tests {
         assert_eq!(Settings::default().client_information(10).main_hand, 1);
     }
     #[test]
+    fn a_fresh_install_reaches_fancy_detail() {
+        // Ultra-ish out of the box: the view distance Fancy uses, with the
+        // simulation inside it, and the two defaults agreeing so the picture
+        // does not depend on whether options.txt happened to name the key.
+        let fresh = Settings::default();
+        assert_eq!(fresh.render_distance, DEFAULT_RENDER_DISTANCE);
+        assert_eq!(fresh.simulation_distance, DEFAULT_SIMULATION_DISTANCE);
+        assert_eq!(fresh.render_distance, Settings::parse("").render_distance);
+        assert_eq!(DEFAULT_RENDER_DISTANCE, 16);
+        // The rest of Fancy's look is on: clouds, entity shadows, full mipmaps.
+        assert_eq!(fresh.clouds, "true");
+        assert!(fresh.entity_shadows);
+        assert_eq!(fresh.mipmap_levels, 4);
+        assert_eq!(fresh.biome_blend, 2);
+        assert!(fresh.cutout_leaves);
+    }
+
+    #[test]
     fn no_options_txt_paces_frames_like_an_empty_one() {
         let (fresh, empty) = (Settings::default(), Settings::parse(""));
-        assert_eq!(fresh.max_fps, 120);
         assert_eq!(fresh.max_fps, empty.max_fps);
         assert_eq!(fresh.vsync, empty.vsync);
         assert_eq!(fresh.inactivity_fps_limit, empty.inactivity_fps_limit);

@@ -10716,11 +10716,17 @@ impl Game<'_> {
                     .offset(state, pos[0], pos[2])
                     .unwrap_or([0.0; 3]);
                 let origin = o + glam::DVec3::from(offset).as_vec3();
-                let translucent = models
-                    .iter()
-                    .any(|(_, model)| model.faces.iter().any(|f| f.translucent));
+                // The layer is the atlas's own destroy-stage entry, not a
+                // literal: `11`/`12` were copies of an insertion order the
+                // atlas owns, so a sprite added before the stage sprites
+                // pointed the cracks at an unrelated texture.
+                let Some(layer) =
+                    horizon_client::breaking::stage_layer(&self.pack.render.sprite_layers)
+                else {
+                    continue;
+                };
                 for (_, model) in models {
-                    horizon_client::breaking::geometry(model, origin, translucent, stage, &mut out);
+                    horizon_client::breaking::geometry(model, origin, layer, stage, &mut out);
                 }
             }
         }

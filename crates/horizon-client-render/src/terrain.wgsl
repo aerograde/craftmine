@@ -527,7 +527,19 @@ fn miniature_lit(albedo: vec3<f32>, tint: vec4<f32>, pos: vec3<f32>, sky: f32,
     let normal = sun_normal(pos);
     let fog_mix = miniature_fog_mix(pos);
     let diffuse = miniature_diffuse(globals.sun.y, sky, normal, light, fog_mix);
-    let strength = max(diffuse * sun_shadow(pos), 0.0);
+    // `strength` is `diffuse * shadow`, and it multiplies every sun term below,
+    // so a surface the sun does not face contributes nothing whatever the map
+    // says. Skip the map there: nine dependent texture compares per terrain
+    // pixel, for a factor that is about to be zero.
+    //
+    // An `if`, not `select`: WGSL evaluates both arguments of `select`, so that
+    // spelling still pays for the compares. A branch is cheap here because
+    // terrain is flat per quad, so a whole warp takes the same side and the
+    // other path is skipped rather than serialised.
+    var strength = 0.0;
+    if diffuse > 0.0 {
+        strength = max(diffuse * sun_shadow(pos), 0.0);
+    }
     let brightness = max(0.0, MINIATURE_LIGHT_BRIGHTNESS - 0.5 * pow(miniature_luma(albedo), 3.0));
     let light_color = miniature_light_color(globals.sun.y, sky);
     var ambient = miniature_ambient(sky, globals.sun.y);
@@ -562,17 +574,24 @@ fn sun_shadow(pos: vec3<f32>) -> f32 {
     let taps = globals.shadow_params.w;
     var lit = textureSampleCompareLevel(shadow_map, shadow_sampler, uv, bias);
     if taps > 0.5 {
-        // A 3x3 tent around the texel: soft edges that stay put as the camera
-        // moves, at nine compares per terrain pixel.
-        let step = texel;
+        // A rotated 4-tap disc, not a fixed 3x3 grid.
+        //
+        // `textureSampleCompareLevel` already compares 2x2 hardware texels, so
+        // the extra taps only need to widen the kernel. A 3x3 grid at exactly
+        // one texel of spacing lands its taps on texel centres or on texel
+        // corners depending on where the fragment falls, and the two alternate
+        // from texel to texel: that is the checkerboard. Spacing the taps wider
+        // than a texel, on the diagonals, and rotating them removes the lattice
+        // entirely. Four taps instead of nine is also less than half the
+        // compares.
+        let step = texel * 1.5;
+        let d = vec2<f32>(0.7071, 0.7071) * step;
         lit = 0.0;
-        for (var y = -1; y <= 1; y++) {
-            for (var x = -1; x <= 1; x++) {
-                let offset = vec2<f32>(f32(x), f32(y)) * step;
-                lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + offset, bias);
-            }
-        }
-        lit /= 9.0;
+        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(d.x, d.y), bias);
+        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-d.x, d.y), bias);
+        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(d.x, -d.y), bias);
+        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-d.x, -d.y), bias);
+        lit *= 0.25;
     }
     // Fade the map out at its edge instead of ending it with a hard ring:
     // the far terrain was either fully shadowed or fully lit at the seam.
