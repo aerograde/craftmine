@@ -13,7 +13,7 @@ anyone-with-link, and the API key in `launch.svg` is restricted to the
 `cdn.jsdelivr.net` referrer: opened from another host the key is refused, which
 is why the jsDelivr URL above is the way in.
 
-- file id: `1Pi-9SLO6z0dl7qwl_N77Q0fc9aVt7KCY`
+- file id: `1JgrK8D8C0VZu01ECTEKUMWSbuyDKXfsX`
 - build: `d26a2f0911b4` (first 12 hex digits of the file's SHA-256)
 - size: 354,801,277 bytes
 

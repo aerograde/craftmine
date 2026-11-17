@@ -93,7 +93,7 @@ var GAME = "horizon.html";
 // cdn.jsdelivr.net referrer, so this page is meant to be opened from jsDelivr.
 // ?src= points at another copy, which then has to send CORS headers and allow
 // range requests.
-var DRIVE_ID = "1Pi-9SLO6z0dl7qwl_N77Q0fc9aVt7KCY";
+var DRIVE_ID = "1JgrK8D8C0VZu01ECTEKUMWSbuyDKXfsX";
 var DRIVE_KEY = "AIzaSyC5HrSEXwPdoHF3jCvp6gUwzCCyjc6Mimo";
 var DRIVE_URL = "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(DRIVE_ID) + "?alt=media&key=" + encodeURIComponent(DRIVE_KEY);
 var SOURCE = Q.get("src") ? new URL(Q.get("src"), location.href).href : DRIVE_URL;
