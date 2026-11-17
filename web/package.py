@@ -470,25 +470,25 @@ def dist_resources(dist: Path) -> Path:
     return root
 
 
-def st_package(threaded_dist: Path, single_dist: Path | None = None) -> Path:
-    """The single-threaded build: `dist/pkg-st`, or `dist-st/pkg`.
+def st_package(dist_st: Path, threaded_dist: Path | None = None) -> Path:
+    """Where the single-threaded module is: `dist-st/pkg`, or `dist/pkg-st`.
 
     Both layouts exist: a plain `THREADS=0 web/build.sh` writes the first and is
     the path most builds take, `THREADS=0 DIST=web/dist-st web/build.sh` the
-    second. Neither may shadow the other: `dist-st/pkg` outranks a *threaded*
-    `dist/pkg`, but must not outrank a `dist/pkg-st` that the same build just
-    wrote, which is how a stale `dist-st` once shipped an old module.
+    second. `dist/pkg-st` is the name a build writes *itself*, so it outranks
+    the copied `dist-st/pkg` — that order is what once shipped a stale `dist-st`
+    module that still drew the edition banner. The threaded `dist/pkg` is only
+    a last resort: nothing single-threaded was built, and it still runs on the
+    page (its workers fail to start there and the game does their work).
     """
-    candidates = []
-    if single_dist is not None:
-        candidates.append(single_dist / "pkg-st")
-    candidates.append(threaded_dist / "pkg")
-    if single_dist is not None:
-        candidates.append(single_dist / "pkg")
+    candidates = [dist_st / "pkg"]
+    if threaded_dist is not None:
+        candidates.insert(0, threaded_dist / "pkg-st")
+    candidates.append(threaded_dist / "pkg" if threaded_dist is not None else dist_st / "pkg")
     for candidate in candidates:
         if (candidate / "horizon-client_bg.wasm").is_file():
             return candidate
-    return threaded_dist / "pkg"
+    return dist_st / "pkg"
 
 
 def gzip_file(source: Path, target: Path) -> None:
