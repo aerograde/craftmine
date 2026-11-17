@@ -623,6 +623,11 @@ pub(super) struct Remote {
     clock_game_time: i64,
     /// `ClientChunkCache.Storage`'s view centre (ClientboundSetChunkCacheCenterPacket).
     chunk_center: (i32, i32),
+    /// `SetChunkCacheCenter` arrived: `chunk_center` is the server's, not the
+    /// `(0, 0)` the session was built with. Until then no column may be judged
+    /// out of range, or a spawn far from the origin loses the very chunk the
+    /// loading screen waits for.
+    chunk_center_known: bool,
     /// Received events a frame left for the next one, in order, and when
     /// the oldest of them first waited (`poll_remote`).
     backlog: VecDeque<Received>,
@@ -1034,6 +1039,7 @@ impl Game<'_> {
             clock_partial: 0.0,
             clock_game_time: 0,
             chunk_center: (0, 0),
+            chunk_center_known: false,
             backlog: VecDeque::new(),
             backlog_since: None,
             server_links: Vec::new(),
@@ -2047,6 +2053,7 @@ impl Game<'_> {
                 r.level_player_textures.clear();
                 // A new ClientLevel: a new chunk storage, centred on 0, 0.
                 r.chunk_center = (0, 0);
+                r.chunk_center_known = false;
             }
             self.clear_lod();
             self.pending_uploads.clear();
@@ -2074,10 +2081,20 @@ impl Game<'_> {
     /// view centre, `calculateStorageRange` (the server's radius, at least
     /// two, plus three) chunks each way.
     pub(super) fn remote_chunk_in_range(&self, x: i32, z: i32) -> bool {
-        self.remote.as_ref().is_none_or(|r| {
-            let range = r.view_distance.max(2) + 3;
-            (x - r.chunk_center.0).abs() <= range && (z - r.chunk_center.1).abs() <= range
-        })
+        // The player's own chunk is always in range. Dropping it takes `lit`
+        // with it (`Streaming::forget`), and the loading screen waits on exactly
+        // that — so a server centring its cache anywhere but where the player
+        // stands would stall "Loading terrain..." with no way out.
+        let player = self.player.as_ref().map(|p| {
+            (
+                p.position.x.floor() as i32 >> 4,
+                p.position.z.floor() as i32 >> 4,
+            )
+        });
+        let (center, known, view) = self.remote.as_ref().map_or(((0, 0), true, 0), |r| {
+            (r.chunk_center, r.chunk_center_known, r.view_distance)
+        });
+        chunk_is_in_range((x, z), player, center, known, view)
     }
     /// The columns a moved or resized storage no longer holds.
     fn drop_remote_chunks_out_of_range(&mut self) {
@@ -4514,6 +4531,7 @@ impl Game<'_> {
             C::SetChunkCacheCenter(p) => {
                 if let Some(r) = self.remote.as_mut() {
                     r.chunk_center = (p.x, p.z);
+                    r.chunk_center_known = true;
                 }
                 self.drop_remote_chunks_out_of_range();
             }
@@ -5429,6 +5447,20 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return;
         };
+        // A loading screen that never closes used to be silent about which wait
+        // it was stuck in. One line a second, only when it is still up.
+        if std::env::var_os("HORIZON_LOAD_DEBUG").is_some() {
+            static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let at = LAST.load(std::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(at) >= 1000 {
+                LAST.store(now, std::sync::atomic::Ordering::Relaxed);
+                log::info!(
+                    "load debug: state={} section_ready={section_ready} wants={} player_chunk=({cx},{cz}) check={check:?}",
+                    r.level_load.state_name(),
+                    r.level_load.wants_player_section()
+                );
+            }
+        }
         if section_ready && r.level_load.wants_player_section() {
             r.level_load.player_section_ready();
         }
@@ -9714,6 +9746,33 @@ fn snapshot_value(s: &play::AttributeSnapshot) -> f64 {
     value
 }
 
+/// Whether a column the server sent belongs in the client's chunk storage.
+///
+/// `player` is the chunk the player stands in. It is always in range: the
+/// loading screen waits for that chunk to be lit, and `Streaming::forget` drops
+/// its lit mark, so discarding it stalls the screen with no way out.
+///
+/// `known` is whether the server has said where its cache is centred yet.
+/// `chunk_center` starts at `(0, 0)`, so before that packet a player who spawned
+/// anywhere else had every column measured against a centre they are nowhere
+/// near — the whole world was out of range, including their own chunk.
+fn chunk_is_in_range(
+    (x, z): (i32, i32),
+    player: Option<(i32, i32)>,
+    center: (i32, i32),
+    known: bool,
+    view_distance: i32,
+) -> bool {
+    if player == Some((x, z)) {
+        return true;
+    }
+    if !known {
+        return true;
+    }
+    let range = view_distance.max(2) + 3;
+    (x - center.0).abs() <= range && (z - center.1).abs() <= range
+}
+
 /// `Util.getMillis` for the level load tracker's timeouts.
 fn client_millis() -> u64 {
     static ORIGIN: std::sync::OnceLock<horizon_os::time::Instant> = std::sync::OnceLock::new();
@@ -9725,7 +9784,31 @@ fn client_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::chunk_is_in_range;
     use super::synced_local_use;
+
+    #[test]
+    fn a_column_is_never_dropped_before_the_server_says_where_it_is_centred() {
+        // `chunk_center` starts at (0, 0). A player who spawned 1,400 blocks out
+        // had every column judged against it and thrown away, their own included
+        // — and dropping the player's chunk clears its lit mark, which is the
+        // one thing the loading screen waits for. That is the stall.
+        let far = (87, 97);
+        assert!(chunk_is_in_range(far, Some(far), (0, 0), false, 12));
+        assert!(
+            chunk_is_in_range(far, Some(far), (0, 0), true, 12),
+            "the player's own chunk survives even a known, distant centre"
+        );
+        // Another column that far out is only kept once the centre is known.
+        assert!(chunk_is_in_range((88, 97), Some(far), (0, 0), false, 12));
+        assert!(!chunk_is_in_range((88, 97), Some(far), (0, 0), true, 12));
+        // With the centre known, the storage radius decides as before.
+        assert!(chunk_is_in_range((2, 3), Some(far), (0, 0), true, 12));
+        assert!(!chunk_is_in_range((40, 3), Some(far), (0, 0), true, 12));
+        // At least two chunks each way, plus three.
+        assert!(chunk_is_in_range((5, 0), Some(far), (0, 0), true, 0));
+        assert!(!chunk_is_in_range((6, 0), Some(far), (0, 0), true, 0));
+    }
 
     #[test]
     fn the_server_stopping_the_use_lowers_the_shield() {
