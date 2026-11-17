@@ -17,6 +17,8 @@ use horizon_shader_api::{Pack, check};
 use super::Game;
 
 const LOOK_EVERY: Duration = Duration::from_millis(500);
+/// The longest the scan waits while the pack stays unchanged.
+const LOOK_EVERY_MAX: Duration = Duration::from_secs(8);
 const RED: u32 = 0xFF5555;
 
 #[derive(Default)]
@@ -26,6 +28,9 @@ pub(super) struct NativeShaders {
     /// The pack's files when it was last read (`fingerprint`).
     stamp: Option<u64>,
     looked: Option<Instant>,
+    /// The wait before the next `fingerprint`, doubling up to `LOOK_EVERY_MAX`
+    /// (0: not started, so `LOOK_EVERY`).
+    every_ms: u64,
 }
 
 impl NativeShaders {
@@ -42,14 +47,24 @@ impl Game<'_> {
     pub(super) fn tick_native_shader_pack(&mut self, path: &Path) {
         let now = Instant::now();
         let state = &mut self.native_shaders;
-        if state.looked.is_some_and(|t| now - t < LOOK_EVERY) {
+        // A pack is a folder of 170-odd files and `fingerprint` stats every one
+        // of them, which on the page is a call into the virtual filesystem each.
+        // Nobody waits on a hot reload, so the scan backs off as the pack stays
+        // unchanged: early checks for a developer saving a file, then rarely.
+        if state.every_ms == 0 {
+            state.every_ms = LOOK_EVERY.as_millis() as u64;
+        }
+        let every = Duration::from_millis(state.every_ms);
+        if state.looked.is_some_and(|t| now - t < every) {
             return;
         }
         state.looked = Some(now);
         let stamp = fingerprint(path);
         if stamp == state.stamp {
+            state.every_ms = (state.every_ms * 2).min(LOOK_EVERY_MAX.as_millis() as u64);
             return;
         }
+        state.every_ms = LOOK_EVERY.as_millis() as u64;
         let reload = state.stamp.is_some();
         state.stamp = stamp;
         let Some(renderer) = &mut self.renderer else {

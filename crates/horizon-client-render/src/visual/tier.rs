@@ -102,13 +102,27 @@ pub struct Params {
 impl Params {
     pub fn for_quality(quality: VisualQuality, on: bool) -> Self {
         let tier = Tier::from_quality(quality);
-        // The pack has no post grade, bloom or vignette: its look comes from
-        // terrain lighting, torch colour, fog and the sky. Keep the grade
-        // neutral so the port is the pack's output, not ours on top of it.
-        let (contrast, saturation, warmth, bloom, threshold, radius, vignette) =
-            (1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        // The pack's own look, from its `shader.h` defaults: a strong glow
+        // (strength 1.0, threshold 0.45, halo 1.0) and light shafts at 2.0. The
+        // grade stays neutral (no contrast/saturation/warmth of ours on top of
+        // the pack's lighting), so the built-in profile is the pack's output.
+        //
+        // The glow is a chain of three textures the size of the output and two
+        // passes, so it is on where the tier already pays for a scaled target
+        // and off on Low, which renders at native size with no chain at all.
+        // A tier that cannot afford it reads the pack's lighting only.
+        let glow = !matches!(tier, Tier::Low);
+        let (contrast, saturation, warmth) = (1.0, 1.0, 0.0);
+        let (bloom, threshold, radius, vignette) = if glow {
+            // BLOOM_STRENGTH, BLOOM_THRESHOLD, BLOOM_HALO_SIZE.
+            (1.0, 0.45, 1.0, 0.0)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
         let exposure = 1.0;
-        let shafts = 0.0;
+        // SUN_SHAFTS_STRENGTH, at High only: they sample the sky at a quarter
+        // of the pixels and the pass keys off the glow radius being High's.
+        let shafts = if matches!(tier, Tier::High) { 2.0 } else { 0.0 };
         Self {
             tier,
             on,
@@ -164,10 +178,35 @@ mod tests {
         let high = Params::for_quality(VisualQuality::High, true);
         let medium = Params::for_quality(VisualQuality::Medium, true);
         let low = Params::for_quality(VisualQuality::Low, true);
-        assert_eq!(high.uniform(), [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(medium.uniform(), high.uniform());
-        assert_eq!(low.uniform(), high.uniform());
-        assert_eq!(high.post_uniform(), [1.0, 0.0, 0.0, 0.0]);
+        // The glow is the pack's own: strength 1.0, threshold 0.45, halo 1.0.
+        for tier in [high, medium] {
+            assert_eq!((tier.bloom, tier.threshold, tier.radius), (1.0, 0.45, 1.0));
+            assert_eq!(tier.uniform(), [1.0, 1.0, 1.0, 0.0, 1.0, 0.45, 1.0, 0.0]);
+        }
+        // The grade stays neutral: the built-in look is the pack's lighting, not
+        // ours on top of it.
+        assert_eq!(
+            (high.contrast, high.saturation, high.warmth),
+            (1.0, 1.0, 0.0)
+        );
+        // Low allocates no chain at all, so it reads the pack's lighting only.
+        assert_eq!((low.bloom, low.threshold, low.radius), (0.0, 0.0, 0.0));
+        assert_eq!(low.uniform(), [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        // SUN_SHAFTS_STRENGTH 2.0, at High only: they key off its glow radius.
+        assert_eq!(high.shafts, 2.0);
+        assert_eq!(medium.shafts, 0.0);
+        assert_eq!(low.shafts, 0.0);
+        // The tier without the glow allocates no chain: its extra cost is only
+        // its shadow map, so the glow's three quarter-size textures show as the
+        // difference beyond that.
+        let output = [1920, 1080];
+        let glow = u64::from(1920u32.div_ceil(4)) * u64::from(1080u32.div_ceil(4)) * 8 * 3;
+        let shadow = |r: u32| u64::from(r) * u64::from(r) * 4;
+        assert_eq!(
+            high.bytes(output) - low.bytes(output),
+            glow + shadow(1024) - shadow(512)
+        );
+        assert_eq!(high.post_uniform()[1], 2.0);
         assert_eq!(high.shadow.resolution, 1024);
         // High reaches 128 blocks of shadow on a 1024 map: 0.25-block texels.
         assert_eq!(high.shadow.distance, 128.0);

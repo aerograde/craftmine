@@ -1082,10 +1082,13 @@ mod tests {
             tier(VisualQuality::Medium),
             tier(VisualQuality::Low),
         );
-        assert_eq!(low[4], 0.0, "the pack draws no bloom taps");
-        assert_eq!(high, medium);
-        assert_eq!(medium, low);
-        // The pack's look is in the terrain/sky passes, not a post grade.
+        // The pack's own glow, where the tier can hold its chain: strength,
+        // threshold and halo at the pack's defaults.
+        assert_eq!((high[4], high[5], high[6]), (1.0, 0.45, 1.0));
+        assert_eq!(high, medium, "Medium holds the glow too");
+        // Low allocates no glow chain, so it reads the pack's lighting only.
+        assert_eq!((low[4], low[5], low[6]), (0.0, 0.0, 0.0));
+        // The grade itself stays the pack's, not ours on top of its lighting.
         assert_eq!(low[1], 1.0);
         assert_eq!(low[2], 1.0);
         assert_eq!(low[0], 1.0);
