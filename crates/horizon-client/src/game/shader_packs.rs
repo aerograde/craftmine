@@ -26,6 +26,13 @@ fn bundled_pack_exists() -> bool {
     Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists()
 }
 
+/// Whether this device should keep the built-in profile rather than pay for a
+/// pack's compile at every world load. The browser reports both figures from the
+/// page; off it, the answer is always no.
+fn too_small_for_pack() -> bool {
+    horizon_client::graphics::web_low_memory()
+}
+
 /// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`); with no
 /// file, none, so the pack keeps its own defaults. Any saved value overrides the profile.
 ///
@@ -154,7 +161,13 @@ impl Game<'_> {
         let dev = DEV_PACK.get_or_init(|| std::env::var("HORIZON_SHADER_PACK").ok());
         let configured = dev.as_deref().unwrap_or(&self.settings.horizon.shader_pack);
         let mut picked = active_pack(configured, &self.settings.mods).to_owned();
-        if dev.is_none() && picked.is_empty() && bundled_pack_exists() {
+        // The bundled pack is the default look, but it is a whole shader pack:
+        // 173 files and four compute programs, translated and compiled on the
+        // frame thread at every world load (6.9 s on a desktop GPU, which is
+        // minutes on a small laptop). A device that reports little memory or
+        // few cores keeps the built-in profile instead; picking the pack on the
+        // Shader Options page still runs it, so this only decides the default.
+        if dev.is_none() && picked.is_empty() && bundled_pack_exists() && !too_small_for_pack() {
             picked = BUNDLED_PACK.to_owned();
         }
         if self.native_shaders.picked != picked {
