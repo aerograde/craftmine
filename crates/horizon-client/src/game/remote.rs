@@ -5449,7 +5449,7 @@ impl Game<'_> {
         };
         // A loading screen that never closes used to be silent about which wait
         // it was stuck in. One line a second, only when it is still up.
-        if std::env::var_os("HORIZON_LOAD_DEBUG").is_some() {
+        if horizon_os::env::has("HORIZON_LOAD_DEBUG") {
             static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let at = LAST.load(std::sync::atomic::Ordering::Relaxed);
             if now.saturating_sub(at) >= 1000 {

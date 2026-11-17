@@ -587,11 +587,12 @@ fn sun_shadow(pos: vec3<f32>) -> f32 {
         let step = texel * 1.5;
         let d = vec2<f32>(0.7071, 0.7071) * step;
         lit = 0.0;
+        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, bias);
         lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(d.x, d.y), bias);
         lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-d.x, d.y), bias);
         lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(d.x, -d.y), bias);
         lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-d.x, -d.y), bias);
-        lit *= 0.25;
+        lit *= 0.2;
     }
     // Fade the map out at its edge instead of ending it with a hard ring:
     // the far terrain was either fully shadowed or fully lit at the seam.

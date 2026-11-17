@@ -5,6 +5,25 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub use std::env::{args, current_dir, current_exe, temp_dir};
 
+/// One of the page's `horizonEnv` variables, or a `?env=NAME=VALUE` of the
+/// URL: the environment the native build reads, which the browser has none of.
+/// `None` when unset, as std's `var_os`.
+#[cfg(target_arch = "wasm32")]
+pub fn var(name: &str) -> std::option::Option<std::string::String> {
+    crate::web::env(name)
+}
+
+/// The environment's flags on the native build.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn var(name: &str) -> std::option::Option<std::string::String> {
+    std::env::var(name).ok()
+}
+
+/// Whether the environment has `name` at all (its value unused).
+pub fn has(name: &str) -> bool {
+    var(name).is_some()
+}
+
 /// The arguments the page started the game with, after a program name as
 /// std's `args` has.
 #[cfg(target_arch = "wasm32")]

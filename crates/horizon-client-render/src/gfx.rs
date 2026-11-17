@@ -8533,6 +8533,39 @@ mod tests {
             assert_eq!(super::array_layers(count, false), count);
         }
     }
+    /// The shadow filter must keep its centre tap.
+    ///
+    /// Four taps on a rotated disc alone leave a hole in the middle: the
+    /// kernel then averages only the corners about the fragment, so a fragment
+    /// on an edge reads its neighbours' depth instead of its own and shadow
+    /// edges come out as a lattice of pale and dark cells — a checkerboard.
+    /// The centre tap is what ties the kernel to the fragment.
+    #[test]
+    fn shadow_filter_samples_the_fragment_itself() {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/terrain.wgsl"),
+        )
+        .expect("terrain.wgsl");
+        let at = text.find("let step = texel").expect("the PCF kernel");
+        let kernel = &text[at..];
+        let end = kernel.find("lit *= ").expect("the kernel's average");
+        let kernel = &kernel[..end];
+        let taps = kernel.matches("textureSampleCompareLevel").count();
+        assert_eq!(
+            taps, 5,
+            "the kernel takes the fragment itself and four about it: {kernel}"
+        );
+        assert!(
+            kernel.contains("shadow_sampler, uv, bias"),
+            "the centre tap is the fragment's own uv: {kernel}"
+        );
+        // Five taps average by a fifth, not by a quarter.
+        assert!(
+            text.contains("lit *= 0.2;"),
+            "the kernel's average matches its number of taps"
+        );
+    }
+
     #[test]
     fn entity_shader_validates_with_its_overlay_constants() {
         let module = naga::front::wgsl::parse_str(&super::entity_shader()).unwrap();

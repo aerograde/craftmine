@@ -5,6 +5,24 @@ use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
+// The page's `horizonEnv`, for flags the native build reads from the
+// environment (`HORIZON_LOAD_DEBUG`, say). A URL parameter sets one too, so a
+// run can be diagnosed without a console: `?env=HORIZON_LOAD_DEBUG=1`.
+export function env_raw(name) {
+    const table = globalThis.horizonEnv;
+    if (table && typeof table[name] === "string") return table[name];
+    try {
+        const asked = new URLSearchParams(location.search).get("env");
+        if (asked) {
+            for (const pair of asked.split(",")) {
+                const at = pair.indexOf("=");
+                if (at > 0 && pair.slice(0, at) === name) return pair.slice(at + 1);
+            }
+        }
+    } catch (e) {}
+    return undefined;
+}
+
 export function horizon_console(level, message) {
     if (level <= 1) console.error(message);
     else if (level === 2) console.warn(message);
@@ -103,6 +121,7 @@ extern "C" {
     fn horizon_pick_file(kind: &str, accept: &str);
     fn horizon_take_picked() -> JsValue;
     fn horizon_console(level: u32, message: &str);
+    fn env_raw(name: &str) -> Option<String>;
     /// Hands a panic's message to the page (`web/main.js`), which draws it: a
     /// panic unwinds out of the frame loop and the canvas would otherwise keep
     /// its last frame, leaving a black screen with no reason.
@@ -153,6 +172,11 @@ pub fn horizon_install_saved_dir(path: &str) {
 /// The player's files changed since the last call, for the page to save:
 /// `[path, "file", bytes]`, `[path, "dir" | "cleardir"]` (emptied first) or
 /// `[path, "gone"]`, parents before children.
+/// The page's `horizonEnv` entry `name`, or a `?env=` URL parameter.
+pub fn env(name: &str) -> Option<String> {
+    env_raw(name)
+}
+
 #[wasm_bindgen]
 pub fn horizon_take_changes() -> js_sys::Array {
     let changes = js_sys::Array::new();

@@ -632,7 +632,7 @@ impl Default for Graphics {
             hdr_ui_brightness: 100,
             hdr_key: "key.keyboard.unknown".into(),
             battery: false,
-            shadow_cache: true,
+            shadow_cache: false,
             api: GraphicsApi::Auto,
             shader_pack: if cfg!(target_arch = "wasm32") {
                 String::new()
@@ -971,6 +971,25 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reusing the last shadow map is off by default, deliberately.
+    ///
+    /// The cache's key is a revision of the scene, so any edit that changes it
+    /// redraws — but a map that is reused while the key still matches cannot
+    /// know about a draw list change the key does not carry, and the shadow
+    /// then stays where it was when a block is placed. It is an opt-in for
+    /// still scenes (`horizon-graphics.txt` `shadowCache`), not a default.
+    #[test]
+    fn the_shadow_map_is_redrawn_unless_asked_otherwise() {
+        assert!(
+            !Graphics::default().shadow_cache,
+            "a fresh install redraws the shadow map every frame"
+        );
+        assert!(Graphics::parse("").shadow_cache == Graphics::default().shadow_cache);
+        // The key exists and turns it on.
+        assert!(Graphics::parse("shadowCache:true").shadow_cache);
+        assert!(!Graphics::parse("shadowCache:false").shadow_cache);
+    }
 
     /// The device tiers are thresholds on the page's own report, so the only
     /// thing to pin is that they nest: a 4 GB device must always take the

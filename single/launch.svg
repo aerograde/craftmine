@@ -101,7 +101,7 @@ var SW_URL = "horizon-launch-sw.js";
 var SW_BUILD = "d26a2f0911b4";
 // The key is restricted to this referrer, so any other host is refused. Say so
 // and send the player to the copy that works, instead of failing at 403.
-var CANONICAL = "https://cdn.jsdelivr.net/gh/retrograde-sdk/horizon-single@298988611/launch.svg";
+var CANONICAL = "https://cdn.jsdelivr.net/gh/retrograde-sdk/horizon-single@57d02924f/launch.svg";
 var KEY_HOST = "cdn.jsdelivr.net";
 var wrongHost = !Q.get("src") && location.hostname !== KEY_HOST;
 var DB_NAME = "horizon-launcher";
@@ -436,6 +436,7 @@ async function install() {
       chunks: chunks,
       name: "horizon.html",
       source: SOURCE,
+      build: SW_BUILD,
       storedAt: Date.now(),
     });
     pct(1, "100%");
@@ -482,13 +483,19 @@ function sameSource(meta) {
   return !meta || !meta.source || meta.source === SOURCE;
 }
 
+// A stored game from an older build is replaced, not relaunched: the launcher
+// updates by changing SW_BUILD, and without this the old HTML is served forever.
+function sameBuild(meta) {
+  return !!meta && meta.build === SW_BUILD;
+}
+
 async function start() {
   var meta = await getMeta().catch(function () { return null; });
-  if (meta && meta.size && sameSource(meta)) return launch();
+  if (meta && meta.size && sameSource(meta) && sameBuild(meta)) return launch();
   await install();
   if (Q.get("autostart") === "1") {
     var installed = await getMeta().catch(function () { return null; });
-    if (installed && installed.size && sameSource(installed)) return launch();
+    if (installed && installed.size && sameSource(installed) && sameBuild(installed)) return launch();
   }
 }
 

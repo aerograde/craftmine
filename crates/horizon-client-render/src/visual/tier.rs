@@ -26,12 +26,14 @@ impl Tier {
     }
 
     pub const fn shadow(self) -> ShadowPlan {
-        // One orthographic map over the near field. `taps` is the PCF width in
-        // texels: a 3x3 tent on every tier, because a single compare gives a
-        // shadow edge with hard stair-steps a block wide, which is what "the
-        // shadows look wrong" was. Nine taps once per terrain pixel is small
-        // beside the terrain shader itself, and the cheaper tiers already pay
-        // for it with a smaller map rather than with a jagged edge.
+        // One orthographic map over the near field. `taps` only switches the
+        // filter on (the shader tests it against 0.5): every tier runs the same
+        // five-sample kernel, four on a rotated disc about the fragment. A
+        // single compare gives a shadow edge with hard stair-steps a block
+        // wide, which is what "the shadows look wrong" was. Five compares once
+        // per terrain pixel is small beside the terrain shader itself, and the
+        // cheaper tiers already pay for the filter with a smaller map rather
+        // than with a jagged edge.
         //
         // `distance` must keep the shadow camera's 7-block snap on a whole
         // number of texels, or every redraw shifts the map by a fraction of a
