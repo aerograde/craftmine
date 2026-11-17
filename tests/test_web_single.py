@@ -178,6 +178,41 @@ class SingleFileTests(unittest.TestCase):
         self.assertIn('const BUILD = "horizon-single-1"', worker)
         self.assertIn('"Cross-Origin-Opener-Policy": "same-origin"', worker)
         self.assertIn('"Cross-Origin-Embedder-Policy": "require-corp"', worker)
+        # The two must agree: the launcher asks the worker for its BUILD and
+        # warns when they differ, so a half-updated pair is a broken deploy.
+        build = lambda text, pat: __import__("re").search(pat, text).group(1)
+        self.assertEqual(
+            build(svg, r'var SW_BUILD = "([^"]+)"'),
+            build(worker, r'const BUILD = "([^"]+)"'),
+            "launch.svg and horizon-launch-sw.js must name the same build",
+        )
+
+    def test_the_launcher_names_the_build_that_is_shipped(self):
+        """`single/` must describe the HTML in `web/out`, not an older one.
+
+        The build id is the first 12 hex digits of the file's SHA-256, so this
+        can be checked without the 355 MB file: the README states both, and the
+        launcher and worker carry the id. A stale id is invisible at runtime
+        until the launcher warns, and it once shipped an old module.
+        """
+        import hashlib
+        import re
+        html = WEB / "out" / "horizon.html"
+        if not html.is_file():
+            self.skipTest("no packaged HTML: run web/package.py single")
+        digest = hashlib.sha256(html.read_bytes()).hexdigest()[:12]
+        repo = WEB.parent
+        readme = (repo / "single" / "README.md").read_text()
+        self.assertIn(
+            f"`{digest}`", readme, "single/README.md names a build that is not the shipped one"
+        )
+        svg = (repo / "single" / "launch.svg").read_text()
+        self.assertEqual(re.search(r'var SW_BUILD = "([^"]+)"', svg).group(1), digest)
+        worker = (repo / "single" / "horizon-launch-sw.js").read_text()
+        self.assertEqual(re.search(r'const BUILD = "([^"]+)"', worker).group(1), digest)
+        # And the size the README claims is the file's.
+        size = f"{html.stat().st_size:,}"
+        self.assertIn(size, readme, "single/README.md states the wrong size")
 
     def test_audio_profiles(self):
         self.assertIsNone(package.audio_profile("assets/minecraft/sounds/music/a.ogg", "off"))
