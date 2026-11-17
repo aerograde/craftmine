@@ -569,8 +569,11 @@ pub struct Graphics {
     /// it changes when frames are drawn, never what they show or the ticks.
     pub battery: bool,
     /// Reuse the shader pack's last shadow map when sun, view, scene revision and
-    /// pack uniforms still match. Off by default: vanilla loaders redraw every frame
-    /// (or every `shadowInterval`), and a hit with a stale key shows old shadows.
+    /// pack uniforms still match. On by default: the key covers the sun and moon
+    /// angle, the snapped camera and the scene revision, so standing still with
+    /// the sun up redraws nothing, and any change to what casts or where the
+    /// light is misses the cache. Vanilla loaders redraw every frame, which is
+    /// most of a frame's cost here for an identical image.
     pub shadow_cache: bool,
     /// The graphics API (Windows only; see `GraphicsApi`).
     pub api: GraphicsApi,
@@ -629,7 +632,7 @@ impl Default for Graphics {
             hdr_ui_brightness: 100,
             hdr_key: "key.keyboard.unknown".into(),
             battery: false,
-            shadow_cache: false,
+            shadow_cache: true,
             api: GraphicsApi::Auto,
             shader_pack: if cfg!(target_arch = "wasm32") {
                 String::new()
