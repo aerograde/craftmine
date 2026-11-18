@@ -5440,6 +5440,7 @@ impl Game<'_> {
             outside_build_height: camera_y < shape.min_y || camera_y >= shape.min_y + shape.height,
             spectator: player.spectator,
             alive: player.health.health() > 0.0,
+            section_ready,
         };
         let now = client_millis();
         // LevelLoadingScreen.tick.

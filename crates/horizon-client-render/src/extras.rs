@@ -122,7 +122,7 @@ impl Default for Extras {
     fn default() -> Self {
         Self {
             fullbright: false,
-            dynamic_lights: false,
+            dynamic_lights: true,
             zoom: false,
             zoom_key: "key.keyboard.z".into(),
             zoom_level: 4,
@@ -564,7 +564,9 @@ mod tests {
     #[test]
     fn everything_is_off_by_default_and_round_trips() {
         let d = Extras::default();
-        assert!(!d.fullbright && !d.dynamic_lights);
+        assert!(!d.fullbright);
+        // The one extra on by default: light sources colour what they light.
+        assert!(d.dynamic_lights);
         assert!(!d.zoom && !d.fps && !d.keystrokes && !d.minimap && !d.auto_reconnect);
         assert!(!d.mouse_tweaks && !d.sort && !d.own_name_tag);
         assert!(d.discord_presence);
@@ -573,8 +575,9 @@ mod tests {
         let mut e = d.clone();
         Item::Fullbright.cycle(&mut e, false);
         assert_eq!(Item::Fullbright.switch(&e), Some(true));
+        // On by default, so cycling it turns it off.
         Item::DynamicLights.cycle(&mut e, false);
-        assert_eq!(Item::DynamicLights.switch(&e), Some(true));
+        assert_eq!(Item::DynamicLights.switch(&e), Some(false));
         assert_eq!(Extras::parse(&e.serialize()), e);
         e.zoom = true;
         e.zoom_key = "key.keyboard.c".into();

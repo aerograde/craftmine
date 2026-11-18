@@ -95,6 +95,9 @@ pub struct PlayerCheck {
     pub outside_build_height: bool,
     pub spectator: bool,
     pub alive: bool,
+    /// The column the camera is in is lit (`LevelRenderer`'s
+    /// `playerCompiledSectionCallback`), so the section is there to stay on.
+    pub section_ready: bool,
 }
 
 /// The client half of `LevelLoadTracker`: what the loading screen waits for
@@ -167,24 +170,38 @@ impl LevelLoadTracker {
     }
     /// `tickClientLoad`.
     pub fn tick_client_load(&mut self, now: u64, player: PlayerCheck) {
-        if let Some(ClientState::WaitingForPlayerChunk {
-            player_section_ready,
-            timeout_after,
-        }) = self.state
-        {
-            let ready = if now > timeout_after {
-                log::warn!(
-                    "Timed out while waiting for the client to load chunks, letting the player into the world anyway"
-                );
-                true
-            } else if !player.outside_build_height && !player.spectator && player.alive {
-                player_section_ready
-            } else {
-                true
-            };
-            if ready {
-                self.state = Some(ClientState::Ready { ready_at: now });
+        match self.state {
+            // `LEVEL_CHUNKS_LOAD_START` may never come: Horizon's own server sends the
+            // columns themselves and no such event. Vanilla's timeout only covers the
+            // next state, so without this the screen waited on an event that was never
+            // coming, forever. The player's own section is enough to go on.
+            Some(ClientState::WaitingForServer { timeout_after })
+                if now > timeout_after || player.section_ready =>
+            {
+                self.state = Some(ClientState::WaitingForPlayerChunk {
+                    player_section_ready: player.section_ready,
+                    timeout_after,
+                });
             }
+            Some(ClientState::WaitingForPlayerChunk {
+                player_section_ready,
+                timeout_after,
+            }) => {
+                let ready = if now > timeout_after {
+                    log::warn!(
+                        "Timed out while waiting for the client to load chunks, letting the player into the world anyway"
+                    );
+                    true
+                } else if !player.outside_build_height && !player.spectator && player.alive {
+                    player_section_ready
+                } else {
+                    true
+                };
+                if ready {
+                    self.state = Some(ClientState::Ready { ready_at: now });
+                }
+            }
+            _ => {}
         }
     }
     /// `isLevelReady`.
@@ -709,6 +726,7 @@ mod tracker_tests {
         outside_build_height: false,
         spectator: false,
         alive: true,
+        section_ready: false,
     };
 
     #[test]
@@ -791,6 +809,28 @@ mod tracker_tests {
             tracker.tick_client_load(10, player);
             assert!(tracker.is_level_ready(10));
         }
+    }
+
+    /// `LEVEL_CHUNKS_LOAD_START` is not guaranteed: Horizon's own server sends the columns
+    /// and no such event, so waiting for it alone was a permanent stall. The player's own
+    /// lit section gets the screen past that state, and the timeout still ends it.
+    #[test]
+    fn the_wait_ends_without_the_load_start_event() {
+        let mut tracker = LevelLoadTracker::new(0);
+        tracker.start_client_load(0, Reason::Other);
+        assert_eq!(tracker.state_name(), "waiting-for-server");
+        // Never arrives; the player's section does.
+        let ready = PlayerCheck {
+            section_ready: true,
+            ..ALIVE
+        };
+        tracker.tick_client_load(10, ready);
+        assert_eq!(tracker.state_name(), "waiting-for-chunk");
+        tracker.tick_client_load(20, ready);
+        assert!(
+            tracker.is_level_ready(20),
+            "the section alone ends the wait"
+        );
     }
 
     #[test]
