@@ -2236,6 +2236,11 @@ struct Game<'a> {
     /// item glows (built the first time the extra is on).
     dynamic_lights: Vec<[f32; 4]>,
     luminance: Option<horizon_client::dynamic_light::Luminance>,
+    /// The light-emitting blocks last scanned around the camera, and the block that scan
+    /// was centred on (`native_visuals.rs`): a scan is a fixed cube of block lookups, so it
+    /// reruns only once the camera crosses into another block.
+    scanned_lights: Vec<native_hooks::NativeColoredLight>,
+    scanned_lights_at: Option<glam::IVec3>,
     /// Name tags drawn over everything (`RenderPipelines.TEXT_SEE_THROUGH`).
     see_through_vertices: Vec<Vertex>,
     /// Entity shadow casters this frame, pooled like `entity_vertices`.
@@ -17624,6 +17629,8 @@ impl<'a> Game<'a> {
             entity_vertices: Vec::new(),
             dynamic_lights: Vec::new(),
             luminance: None,
+            scanned_lights: Vec::new(),
+            scanned_lights_at: None,
             see_through_vertices: Vec::new(),
             shadow_casters: Vec::new(),
             weather_vertices: Vec::new(),

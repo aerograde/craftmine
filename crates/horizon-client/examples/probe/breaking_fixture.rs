@@ -22,6 +22,10 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assets = Assets::load(root)?;
     let render = assets.reload(root)?;
     let facts = BlockFacts::load(root, assets.registry)?;
+    // The atlas's own destroy-stage layer, as the game reads it: a literal would be a copy
+    // of an insertion order the atlas owns.
+    let layer = breaking::stage_layer(&render.sprite_layers)
+        .ok_or("the atlas has no block/destroy_stage_0")?;
     let tables = MeshTables::new(
         &assets,
         &render,
@@ -49,7 +53,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .any(|(_, m)| m.faces.iter().any(|f| f.translucent));
             for (_, m) in models {
-                breaking::geometry(m, origin, translucent, STAGE, &mut vertices);
+                breaking::geometry(m, origin, layer, STAGE, &mut vertices);
             }
         }
         let quads: Vec<_> = vertices
@@ -61,7 +65,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|v| {
                         assert_eq!(v.color, 0xffff_ffff);
                         assert_eq!(v.light, breaking::stage_light(STAGE));
-                        assert_eq!(v.layer, if translucent { 12 } else { 11 });
+                        assert_eq!(v.layer, layer, "the fixture asked for another layer");
                         [v.pos[0], v.pos[1], v.pos[2], v.uv[0], v.uv[1]]
                     })
                     .collect::<Vec<_>>()
