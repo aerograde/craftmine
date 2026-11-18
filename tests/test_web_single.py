@@ -4,6 +4,7 @@ import base64
 import gzip
 import importlib.util
 import io
+import re
 import sys
 import tarfile
 import tempfile
@@ -213,6 +214,23 @@ class SingleFileTests(unittest.TestCase):
         # And the size the README claims is the file's.
         size = f"{html.stat().st_size:,}"
         self.assertIn(size, readme, "single/README.md states the wrong size")
+
+    def test_the_embedded_blobs_are_streamed_not_read_whole(self):
+        """A gunzip that reads the whole result keeps two copies in the heap.
+
+        The resource store is 220 MB plain and the page holds its base64 too,
+        so an `arrayBuffer()` on the decompressed stream doubles the largest
+        allocation on the boot path. The loader must read it in parts and drop
+        the compressed side as it goes.
+        """
+        # The source, not a built page: an old `web/out` on disk would let a
+        # whole-read pass here while the shipped file still had it.
+        self.build()
+        for handler in re.findall(r"async function gunzip\(bytes\) \{.*?\n\}", package.OFFLINE_LOADER, re.S):
+            self.assertNotIn("arrayBuffer()", handler, "reads the whole result")
+            self.assertIn("getReader()", handler, "reads it in parts")
+            self.assertIn("bytes = null", handler, "drops the compressed copy")
+        self.assertGreaterEqual(package.OFFLINE_LOADER.count("async function gunzip"), 1)
 
     def test_audio_profiles(self):
         self.assertIsNone(package.audio_profile("assets/minecraft/sounds/music/a.ogg", "off"))

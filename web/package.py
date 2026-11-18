@@ -172,9 +172,28 @@ function held(id) {
     return bytes;
 }
 
+// The compressed bytes stream through, and are dropped as they are read, so the
+// two copies (compressed and plain) never both sit in the heap for the length
+// of the call: the resource store alone is 220 MB plain.
 async function gunzip(bytes) {
-    return new Uint8Array(await new Response(
-        new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+    const reader = new Blob([bytes]).stream()
+        .pipeThrough(new DecompressionStream("gzip")).getReader();
+    bytes = null;
+    const parts = [];
+    let length = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        length += value.length;
+    }
+    const out = new Uint8Array(length);
+    let at = 0;
+    for (const part of parts) {
+        out.set(part, at);
+        at += part.length;
+    }
+    return out;
 }
 
 globalThis.horizonOffline = async () => {
@@ -554,9 +573,28 @@ function held(id) {
     return bytes;
 }
 
+// The compressed bytes stream through, and are dropped as they are read, so the
+// two copies (compressed and plain) never both sit in the heap for the length
+// of the call: the resource store alone is 220 MB plain.
 async function gunzip(bytes) {
-    return new Uint8Array(await new Response(
-        new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+    const reader = new Blob([bytes]).stream()
+        .pipeThrough(new DecompressionStream("gzip")).getReader();
+    bytes = null;
+    const parts = [];
+    let length = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        length += value.length;
+    }
+    const out = new Uint8Array(length);
+    let at = 0;
+    for (const part of parts) {
+        out.set(part, at);
+        at += part.length;
+    }
+    return out;
 }
 
 function threadedBuild() {
