@@ -98,7 +98,7 @@ var DRIVE_KEY = "AIzaSyC5HrSEXwPdoHF3jCvp6gUwzCCyjc6Mimo";
 var DRIVE_URL = "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(DRIVE_ID) + "?alt=media&key=" + encodeURIComponent(DRIVE_KEY);
 var SOURCE = Q.get("src") ? new URL(Q.get("src"), location.href).href : DRIVE_URL;
 var SW_URL = "horizon-launch-sw.js";
-var SW_BUILD = "09d67c221ecc";
+var SW_BUILD = "314be32532e9";
 // The key is restricted to this referrer, so any other host is refused. Say so
 // and send the player to the copy that works, instead of failing at 403.
 var CANONICAL = "https://cdn.jsdelivr.net/gh/retrograde-sdk/horizon-single@57d02924f/launch.svg";

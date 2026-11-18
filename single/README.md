@@ -14,12 +14,14 @@ anyone-with-link, and the API key in `launch.svg` is restricted to the
 is why the jsDelivr URL above is the way in.
 
 - file id: `1GTf4LaN75PMx2_-i4UO30JfYOCLbKUf_`
-- build: `09d67c221ecc` (first 12 hex digits of the file's SHA-256)
-- size: 355,423,737 bytes
+- build: `314be32532e9` (first 12 hex digits of the file's SHA-256)
+- size: 358,806,371 bytes
 
 This build samples a cell's centre as well as its four corners, so terrain finer
 than a coarse LOD cell — a knoll, a gully, a cliff edge — is drawn instead of
-merging into a smooth ramp.
+merging into a smooth ramp. It also opens single-player worlds in the browser:
+before it, a world sat at "Loading terrain..." with the scene frozen behind the
+loader (see `web/README.md`).
 
 The launcher downloads the file once, keeps it in that origin's IndexedDB, and
 lets the worker serve it as `__horizon.html` with:
