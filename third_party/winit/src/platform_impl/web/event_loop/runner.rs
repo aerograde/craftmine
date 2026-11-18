@@ -56,6 +56,11 @@ pub struct Execution {
     all_canvases: RefCell<Vec<(WindowId, Weak<RefCell<backend::Canvas>>, DispatchRunner<Inner>)>>,
     redraw_pending: RefCell<HashSet<WindowId>>,
     destroy_pending: RefCell<VecDeque<WindowId>>,
+    /// Whether a `run_until_cleared` is on the stack. A handler that runs the
+    /// loop again (a `poll` from inside a frame, a page transition) would take
+    /// the runner borrows the running one holds and panic ("RefCell already
+    /// borrowed"), unwinding the frame loop: the page keeps its last frame.
+    running: Cell<bool>,
     page_transition_event_handle: RefCell<Option<backend::PageTransitionEventHandle>>,
     device_events: Cell<DeviceEvents>,
     on_mouse_move: OnEventHandle<PointerEvent>,
@@ -162,6 +167,7 @@ impl Shared {
                 all_canvases: RefCell::new(Vec::new()),
                 redraw_pending: RefCell::new(HashSet::new()),
                 destroy_pending: RefCell::new(VecDeque::new()),
+                running: Cell::new(false),
                 page_transition_event_handle: RefCell::new(None),
                 device_events: Cell::default(),
                 on_mouse_move: RefCell::new(None),
@@ -557,6 +563,25 @@ impl Shared {
     //
     // This will also process any events that have been queued or that are queued during processing
     fn run_until_cleared<E: Into<EventWrapper>>(&self, events: impl Iterator<Item = E>) {
+        // A handler can re-enter the loop (a `poll` scheduled from inside a
+        // frame, a page transition running `send_event`). The outer call holds
+        // the runner borrow for as long as its handler runs, so the re-entrant
+        // one would panic on it and unwind the frame loop. Its events are
+        // queued instead; the outer call drains them when the handler returns.
+        if self.0.running.replace(true) {
+            self.0.events.borrow_mut().extend(events.into_iter().map(Into::into));
+            return;
+        }
+        // Cleared on the way out, panics included, so the loop is never left
+        // marked running.
+        struct Running<'a>(&'a Cell<bool>);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let _running = Running(&self.0.running);
+
         for event in events {
             self.handle_event(event.into());
         }
@@ -604,6 +629,10 @@ impl Shared {
         // Queueing the re-entrant event instead is what `RunnerEnum::Pending`
         // already does, and the outer call drains the queue (below) as soon as
         // the handler returns.
+        //
+        // A queued event must return here: the outer call still holds the
+        // runner borrow for as long as its handler runs, so the checks below
+        // would panic on it ("already mutably borrowed") and kill the loop.
         match self.0.runner.try_borrow_mut() {
             Ok(mut runner) => match *runner {
                 RunnerEnum::Running(ref mut runner) => {
@@ -611,11 +640,17 @@ impl Shared {
                 },
                 // If an event is being handled without a runner somehow, add it to the event queue so
                 // it will eventually be processed
-                RunnerEnum::Pending => self.0.events.borrow_mut().push_back(event.into()),
+                RunnerEnum::Pending => {
+                    self.0.events.borrow_mut().push_back(event.into());
+                    return;
+                },
                 // If the Runner has been destroyed, there is nothing to do.
                 RunnerEnum::Destroyed => return,
             },
-            Err(_) => self.0.events.borrow_mut().push_back(event.into()),
+            Err(_) => {
+                self.0.events.borrow_mut().push_back(event.into());
+                return;
+            },
         }
 
         let is_closed = self.exiting();
@@ -691,8 +726,14 @@ impl Shared {
             }
         };
 
-        if let RunnerEnum::Running(ref mut runner) = *self.0.runner.borrow_mut() {
-            runner.state = new_state;
+        // `try_borrow_mut`: `handle_unload` runs this from a page transition
+        // handler, which can fire inside a running frame while the runner is
+        // borrowed. The control flow is applied by that frame anyway; panicking
+        // here would unwind the loop and freeze the page.
+        if let Ok(mut runner) = self.0.runner.try_borrow_mut() {
+            if let RunnerEnum::Running(ref mut runner) = *runner {
+                runner.state = new_state;
+            }
         }
     }
 

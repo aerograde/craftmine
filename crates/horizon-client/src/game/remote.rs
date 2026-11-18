@@ -5417,6 +5417,44 @@ impl Game<'_> {
     /// ready the loading screen closes and the server hears `PlayerLoaded`
     /// (`notifyPlayerLoaded`).
     fn tick_client_load(&mut self) {
+        // A loading screen that never closes used to be silent about which wait
+        // it was stuck in. Report it once a second while one is up, and while
+        // a joined server has not placed the player yet: those are different
+        // stalls (the placement never arrived, or the chunks around it never
+        // became ready) and only the line tells them apart.
+        let stalled = self
+            .remote
+            .as_ref()
+            .is_some_and(|r| r.joined && (r.level_load.is_active() || self.player.is_none()));
+        if stalled && horizon_os::env::has("HORIZON_LOAD_DEBUG") {
+            static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now = client_millis();
+            let at = LAST.load(std::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(at) >= 1000 {
+                LAST.store(now, std::sync::atomic::Ordering::Relaxed);
+                let r = self.remote.as_ref().expect("checked above");
+                let player = self.player.as_ref().map(|p| {
+                    let (cx, cz) = (
+                        (p.position.x.floor() as i32) >> 4,
+                        (p.position.z.floor() as i32) >> 4,
+                    );
+                    format!(
+                        "player_chunk=({cx},{cz}) lit={}",
+                        self.streaming.is_lit(cx, cz)
+                    )
+                });
+                log::info!(
+                    "load debug: state={} wants={} sent={} logged_in={} {} stages={:?} {}",
+                    r.level_load.state_name(),
+                    r.level_load.wants_player_section(),
+                    r.loaded_sent,
+                    r.logged_in,
+                    self.streaming.progress_snapshot(&self.world),
+                    self.streaming.stages(),
+                    player.unwrap_or_else(|| "no player".to_owned()),
+                );
+            }
+        }
         let Some(player) = self.player.as_ref() else {
             return;
         };
@@ -5448,20 +5486,6 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return;
         };
-        // A loading screen that never closes used to be silent about which wait
-        // it was stuck in. One line a second, only when it is still up.
-        if horizon_os::env::has("HORIZON_LOAD_DEBUG") {
-            static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let at = LAST.load(std::sync::atomic::Ordering::Relaxed);
-            if now.saturating_sub(at) >= 1000 {
-                LAST.store(now, std::sync::atomic::Ordering::Relaxed);
-                log::info!(
-                    "load debug: state={} section_ready={section_ready} wants={} player_chunk=({cx},{cz}) check={check:?}",
-                    r.level_load.state_name(),
-                    r.level_load.wants_player_section()
-                );
-            }
-        }
         if section_ready && r.level_load.wants_player_section() {
             r.level_load.player_section_ready();
         }

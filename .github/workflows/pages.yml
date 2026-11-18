@@ -28,6 +28,13 @@ jobs:
         with:
           distribution: temurin
           java-version: "25"
+      # Set before stable, which takes over as the default: `web/build.sh`
+      # selects the pin itself with `cargo +nightly-2026-10-14`.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-14
+          targets: wasm32-unknown-unknown
+          components: rust-src
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -50,9 +57,18 @@ jobs:
             --java-home "$JAVA_HOME" \
             --root . \
             --output .local/horizon-client/26.3
-      - name: Build single-threaded web folder
+      - name: Build the web folder
         run: |
-          THREADS=0 PROFILE=fast web/build.sh
+          # `pkg` is the threaded build, which the page runs when it is
+          # cross-origin isolated (`main.js`), as the service worker makes it:
+          # chunk generation, lighting and meshing then run on Web Workers.
+          # `pkg-st` is the fallback for pages that are not isolated.
+          #
+          # Building `THREADS=0` into both slots left every player on the
+          # single-threaded module, whose jobs all run on the page's own thread
+          # a few milliseconds a frame: a world took minutes to load and the
+          # frame rate collapsed, which read as a hang at "Loading terrain".
+          PROFILE=fast web/build.sh
           THREADS=0 PROFILE=fast DIST=web/dist-st CARGO_TARGET_DIR=target/web-st web/build.sh
           python3 web/package.py folder --no-build
           touch web/out/horizon-web/.nojekyll

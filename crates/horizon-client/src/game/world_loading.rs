@@ -286,10 +286,16 @@ impl WorldLoader {
         Self {
             cancelled: true,
             upgrade: self.upgrade.clone(),
-            handle: horizon_os::thread::spawn(move || {
-                drop(self.finish());
-                Err("world initialization cancelled".into())
-            }),
+            // The same name `start` uses: the page's plain build starts green
+            // threads by name, and `start` already started this one, so the
+            // build has it too.
+            handle: horizon_os::thread::Builder::new()
+                .name("World initialization".into())
+                .spawn(move || {
+                    drop(self.finish());
+                    Err("world initialization cancelled".into())
+                })
+                .expect("world initialization"),
         }
     }
 
@@ -342,15 +348,6 @@ pub(super) fn preload_world_data(
     match &mut *preload {
         Preload::Used => {}
         Preload::Idle if on_world_screens => {
-            // The page's single-threaded build has nowhere to run this
-            // optional preload; retrying it every frame only spammed the
-            // console. The world opening reads the same data itself.
-            #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
-            {
-                let _ = (resources, registry);
-                *preload = Preload::Used;
-                return;
-            }
             let resources = resources.to_owned();
             let spawned = horizon_os::thread::Builder::new()
                 .name("World data preload".into())

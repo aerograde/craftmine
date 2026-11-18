@@ -158,6 +158,31 @@ World Options asks with `Integrated::ask` and opens when the answer comes
 Open to LAN says "Unable to host local game": sharing a world needs the
 threaded build's sockets.
 
+Opening a world needs three of them: `World initialization` (the world's own
+preparation), `Server data preload` and `Loot preload`. Without them a world
+never opened at all (`no thread on the page for World initialization`) and the
+loading screen stayed up forever.
+
+**A build with no worker threads still has one worker.** Chunk streaming's
+light and mesh stages only dispatch a bounded trickle each frame, a multiple of
+the worker count; a worker-less build reports the page's own pump as that one
+worker (`streaming.rs`'s `worker_count`). Counting only spawned threads left
+the budget at zero there, so a world generated and decorated its chunks and
+then never lit one, and the loading screen waited on a column nothing had been
+asked to light. `python3 web/serve.py` in front of a `THREADS=0` build shows
+both.
+
+**A re-entrant web event must not fall through.** winit's web runner holds its
+`runner` borrow for as long as a handler runs. A handler that fires another
+event re-enters `handle_event`, which queues it, and then went on to check the
+runner again and panic ("RefCell already mutably borrowed"), unwinding the
+frame loop: the scene stops dead with no message. `run_until_cleared` and
+`apply_control_flow` had the same hazard from `poll` and page transitions, and
+the three together are why a world could sit at "Loading terrain..." with the
+scene frozen behind it (`third_party/winit/src/platform_impl/web/event_loop/runner.rs`).
+A queued event returns now, a nested `run_until_cleared` queues and returns,
+and `apply_control_flow` skips a runner it cannot borrow.
+
 ### Browsers
 
 The game needs WebGPU, and the threaded build a cross-origin isolated page

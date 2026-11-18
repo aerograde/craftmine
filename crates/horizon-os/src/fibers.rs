@@ -121,6 +121,12 @@ type Main = Box<dyn FnOnce() + Send>;
 /// `Condvar::wait`, `park`) can't: without threads they return at once and a
 /// loop on them would hold the page forever. Other threads fail to start, as
 /// std's do, and the game does their work on the page instead.
+///
+/// The world's own opening is in here with them: a world that never opened
+/// left the loading screen up forever, which read as a hang at "Loading
+/// terrain...". Its threads (`World initialization`, the server's data and
+/// loot preloads, the generator's loads) hand their work to the page while
+/// they wait, so the world opens as it does on native, only slower.
 const GREEN: &[&str] = &[
     "Server thread",
     "horizon-local-conn",
@@ -129,6 +135,10 @@ const GREEN: &[&str] = &[
     "Profile fetcher",
     "Worldgen loader",
     "horizon-region-writer",
+    "World initialization",
+    "World data preload",
+    "Server data preload",
+    "Loot preload",
 ];
 
 struct Fiber {

@@ -1345,6 +1345,11 @@ impl Streaming {
     pub fn pending(&self) -> usize {
         horizon_os::sync::lock(&self.shared.queue).unwrap().len()
     }
+    /// How many workers chew the queue: the spawned worker threads, or the
+    /// frame's own pump when the page has no threads to start (one, then).
+    fn worker_count(&self) -> usize {
+        worker_count(self.threads.len())
+    }
     /// Whether any chunk is queued or on its way from generation to a mesh.
     pub fn busy(&self) -> bool {
         !(self.generating.is_empty()
@@ -1370,6 +1375,20 @@ impl Streaming {
             ("lighting", self.lighting.len()),
             ("meshing", self.meshing.len()),
         ]
+    }
+    /// The view distance and how many columns reached each step, for the
+    /// load debug line: a screen still up past the whole view asks whether
+    /// anything is in flight at all.
+    pub fn progress_snapshot(&self, world: &World) -> String {
+        format!(
+            "radius={} center={:?} extra={} decorated={} lit={} dirty_light={}",
+            self.radius,
+            self.center,
+            self.extra.len(),
+            self.decorated.len(),
+            self.lit.len(),
+            world.dirty_light.len(),
+        )
     }
     /// Advance streaming: collect finished work, then schedule more.
     /// Returns meshes ready for upload and columns that were unloaded.
@@ -1619,8 +1638,7 @@ impl Streaming {
         // Decorate chunks whose 3x3 proto neighbourhood is available, in
         // vanilla's order: decoration is order dependent where write regions
         // overlap (see `DecorationOrder`).
-        // Without threads the frame's pump is the one worker.
-        let workers = self.threads.len().max(1);
+        let workers = self.worker_count();
         if self.decorates && self.order_area != Some((self.center, self.radius)) {
             let (decorated, chunks) = (&self.decorated, &world.chunks);
             // The render distance is the server view distance in singleplayer.
@@ -1762,7 +1780,7 @@ impl Streaming {
         for key in gone {
             world.dirty_light.remove(&key);
         }
-        let room = (self.threads.len() * 4).saturating_sub(self.lighting.len());
+        let room = (self.worker_count() * 4).saturating_sub(self.lighting.len());
         nearest_first(&mut light, room);
         for (_, x, z) in light {
             let Some(region) = self.light_region(world, x, z) else {
@@ -1848,7 +1866,7 @@ impl Streaming {
         // jobs went stale long before a worker reached them (#3629). What
         // stays dirty is asked for again, from the current centre, as
         // capacity frees; `requeue` then has a small queue to keep close.
-        let room = (self.threads.len() * 32).saturating_sub(self.meshing.len());
+        let room = (self.worker_count() * 32).saturating_sub(self.meshing.len());
         nearest_first(&mut candidates, room);
         for (_, x, z, sections) in candidates {
             let Some(region) = Self::region(world, x, z) else {
@@ -2661,6 +2679,19 @@ fn light_region_ready(
     }
     true
 }
+/// How many workers chew the queue: the threads this streaming spawned, or the
+/// frame's own pump when the build starts none (`pump`, a page without
+/// workers) — one, then.
+///
+/// The light and mesh stages submit a bounded trickle each `update`, a
+/// multiple of this count. It must never be zero: a worker-less build reported
+/// zero here, so no light or mesh job was *ever* dispatched. A browser's world
+/// generated and decorated its chunks, then waited for a column to light that
+/// nothing had been asked to light: the loading screen sat at "Loading
+/// terrain..." with its chunk map empty.
+fn worker_count(threads: usize) -> usize {
+    threads.max(1)
+}
 /// The nearest `room` of the `candidates`, ordered: the light and mesh
 /// stages submit bounded work, chosen from everything that is ready each
 /// `update`, so what runs is always the nearest of what is left — chosen
@@ -2677,6 +2708,27 @@ fn nearest_first<T: Ord>(candidates: &mut Vec<T>, room: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page's build without worker threads runs the queue on its own
+    /// frame (`pump`), so it spawns none. The light and mesh budgets are
+    /// multiples of the worker count: a plain `threads.len()` was zero there,
+    /// so no light or mesh job was ever dispatched and a browser world waited
+    /// forever for a column nothing was asked to light.
+    #[test]
+    fn a_build_without_worker_threads_still_has_a_worker_budget() {
+        for (spawned, budget) in [(0, 1), (1, 1), (2, 2), (8, 8)] {
+            assert_eq!(worker_count(spawned), budget);
+            // The exact expressions the dispatch uses.
+            assert!(
+                worker_count(spawned) * 4 >= 4,
+                "{spawned} spawned workers left no room to light a column"
+            );
+            assert!(
+                worker_count(spawned) * 32 >= 32,
+                "{spawned} spawned workers left no room to mesh a section"
+            );
+        }
+    }
 
     #[test]
     fn mesh_pool_reuses_capacity_with_clean_geometry_state() {
