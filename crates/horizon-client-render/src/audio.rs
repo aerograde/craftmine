@@ -714,7 +714,20 @@ fn open_device(
         F::U8 => build_stream::<u8>(device, &config, mixer.clone()),
         other => Err(format!("unsupported sample format {other}").into()),
     }?;
-    stream.play()?;
+    // A page may not start audio until the player has clicked or typed
+    // something (its autoplay policy): `play` asks the AudioContext to resume,
+    // and the browser rejects that outside a gesture. Treating it as a failed
+    // open dropped the stream and left the game silent for good, since the game
+    // starts before anyone has touched the page. The stream is built and kept
+    // regardless; `web/audio.js` resumes the context on the first gesture, and
+    // cpal's own timeout closures start producing then.
+    match stream.play() {
+        Ok(()) => {}
+        Err(e) if cfg!(target_arch = "wasm32") => {
+            log::info!("Horizon: audio waits for the first click ({e})");
+        }
+        Err(e) => return Err(e.into()),
+    }
     if let Ok(mut m) = mixer.lock() {
         m.device_name = device.name().unwrap_or_default();
         m.device_lost = false;
