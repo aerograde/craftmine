@@ -277,6 +277,12 @@ async function served() {
         if (packResponse.ok) {
             packs = new Uint8Array(await new Response(
                 packResponse.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+        } else {
+            // The pack carries every shadow and the coloured lighting: without
+            // it the world is drawn flat by the built-in profile, which reads
+            // as "the shadows are broken" rather than "the file is missing".
+            // The site shipped this way because the deploy never copied it.
+            console.error(`Horizon: no bundled shader packs (packs.tar.gz: ${packResponse.status})`);
         }
     } catch (e) {
         console.warn(`Horizon: no bundled shader packs: ${e}`);

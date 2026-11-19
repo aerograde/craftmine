@@ -15810,14 +15810,21 @@ impl Game<'_> {
                 // workers finish them (`worker_count() * 32` in flight) and only
                 // `chunk_updates` leave per frame, so a burst right after spawn
                 // could hold every mesh of the view at once. An 8 GB tab ran out
-                // of memory that way. Keep the nearest ones and drop the rest;
-                // their chunks show when the next edit or a re-entry meshes them
-                // again, which is a visible but survivable fallback.
+                // of memory that way.
+                //
+                // The ones past the cap are marked dirty rather than freed: a
+                // freed mesh is never drawn again until something else edits
+                // that section, which left holes in the world you could see
+                // through. `dirty_sections` asks for them again from the current
+                // centre as the workers free up, so the cap only delays them.
                 if pending.len() > MAX_PENDING_UPLOADS {
                     pending.sort_unstable_by_key(|(k, _)| {
                         std::cmp::Reverse((k.0 - centre.0).pow(2) + (k.2 - centre.1).pow(2))
                     });
-                    spent.extend(pending.split_off(MAX_PENDING_UPLOADS));
+                    for (key, mesh) in pending.split_off(MAX_PENDING_UPLOADS) {
+                        self.world.dirty_sections.insert(key);
+                        spent.push((key, mesh));
+                    }
                 }
                 // The order survives drains and removals: only new meshes or
                 // a moved centre can need another sort.

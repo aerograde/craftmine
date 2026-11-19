@@ -95,6 +95,13 @@ def folder(out: Path) -> None:
         shutil.copy2(WEB / name, site / name)
     shutil.copytree(DIST / "pkg", site / "pkg")
     shutil.copytree(DIST_ST / "pkg", site / "pkg-st")
+    # `web/build.sh` packs the shader packs as one archive, which is what
+    # `main.js` fetches ("packs.tar.gz"). This copied a `packs/` *directory*
+    # that no step writes, so the site shipped without them: the bundled
+    # Miniature XL pack never loaded and the world was drawn by the plain
+    # built-in profile — no shadow pass, no coloured light, flat terrain.
+    if (DIST / "packs.tar.gz").is_file():
+        shutil.copy2(DIST / "packs.tar.gz", site / "packs.tar.gz")
     if (DIST / "packs").is_dir():
         shutil.copytree(DIST / "packs", site / "packs")
     fs = site / "fs"
