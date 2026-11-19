@@ -394,6 +394,12 @@ use winit::{
 const AUTO_UPLOAD_TIME: Duration = Duration::from_millis(2);
 /// A frame's finished meshes up to this many upload at once, unqueued.
 const AUTO_UPLOADS_AT_ONCE: usize = 8;
+/// The most meshes that may wait for an upload. The queue is fed by every mesh
+/// the workers finish and drained by `chunk_updates` a frame, so without a
+/// bound a burst right after spawn held the whole view's meshes in memory at
+/// once — the way an 8 GB browser tab ran out of it. Kept near the view's own
+/// size so the nearest sections, the ones that show, are never the ones dropped.
+const MAX_PENDING_UPLOADS: usize = 512;
 
 #[derive(Clone)]
 struct Options {
@@ -2134,6 +2140,9 @@ struct Game<'a> {
     /// The detail revision, centre, radius and time bucket `Lod::update` last
     /// had covered for. The bucket refreshes the set as chunk fades finish.
     lod_covered_at: Option<(u64, (i32, i32), i32, u64)>,
+    /// The world's column membership and the view `Lod::set_claimed` was last
+    /// given: its input only changes with those, not every frame.
+    lod_claimed_at: Option<(u64, (i32, i32), i32)>,
     options: Options,
     player: Option<PlayerMotion>,
     spawn: Option<Vec3>,
@@ -15595,6 +15604,7 @@ impl Game<'_> {
         self.lod_observe.clear();
         self.far_beacons.clear();
         self.lod_covered_at = None;
+        self.lod_claimed_at = None;
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_lods();
         }
@@ -15710,12 +15720,20 @@ impl Game<'_> {
                     for chunk in &unloaded {
                         lod.observe(chunk.clone(), self.res.facts());
                     }
-                    while lod.observing() < horizon_client::lod::OBSERVE_AHEAD
-                        && let Some(&key) = self.lod_observe.iter().next()
-                    {
+                    // `observe` takes the shared map's lock itself, so the loop
+                    // condition must not take it again: on the page's thread a
+                    // contended lock is a spin, and this asked it up to
+                    // `OBSERVE_AHEAD` times a frame. One read, then a local
+                    // count that only over-estimates (a repeat key adds none).
+                    let mut observing = lod.observing();
+                    while observing < horizon_client::lod::OBSERVE_AHEAD {
+                        let Some(&key) = self.lod_observe.iter().next() else {
+                            break;
+                        };
                         self.lod_observe.remove(&key);
                         if let Some(chunk) = self.world.chunks.get(&key) {
                             lod.observe(chunk.clone(), self.res.facts());
+                            observing += 1;
                         }
                     }
                 });
@@ -15788,6 +15806,19 @@ impl Game<'_> {
                     }
                 }
                 let centre = self.streaming.center;
+                // The queue had no input bound: meshes arrive as fast as the
+                // workers finish them (`worker_count() * 32` in flight) and only
+                // `chunk_updates` leave per frame, so a burst right after spawn
+                // could hold every mesh of the view at once. An 8 GB tab ran out
+                // of memory that way. Keep the nearest ones and drop the rest;
+                // their chunks show when the next edit or a re-entry meshes them
+                // again, which is a visible but survivable fallback.
+                if pending.len() > MAX_PENDING_UPLOADS {
+                    pending.sort_unstable_by_key(|(k, _)| {
+                        std::cmp::Reverse((k.0 - centre.0).pow(2) + (k.2 - centre.1).pow(2))
+                    });
+                    spent.extend(pending.split_off(MAX_PENDING_UPLOADS));
+                }
                 // The order survives drains and removals: only new meshes or
                 // a moved centre can need another sort.
                 if added || self.pending_uploads_sorted_at != Some(centre) {
@@ -15867,15 +15898,28 @@ impl Game<'_> {
                 // The columns the world has loaded, whether their sections are
                 // meshed yet: their coarse stand-ins are hidden so a column that
                 // just arrived is filled by its own terrain, not by a slab of far
-                // cells over it.
-                let claimed: horizon_client::fast_hash::FxHashSet<(i32, i32)> = self
-                    .world
-                    .chunks
-                    .keys()
-                    .copied()
-                    .filter(|&(x, z)| horizon_client::streaming::in_view_distance(at.1, at.2, x, z))
-                    .collect();
-                lod.set_claimed(claimed);
+                // cells over it. `Lod::set_claimed` compares the whole set, and
+                // this used to rebuild it from every loaded column each frame —
+                // several thousand hashes a frame at a wide render distance. It
+                // can only change when the world's columns or the view do.
+                let claimed_at = (
+                    self.world.chunks.membership_revision(),
+                    self.streaming.center,
+                    self.streaming.radius,
+                );
+                if self.lod_claimed_at != Some(claimed_at) {
+                    self.lod_claimed_at = Some(claimed_at);
+                    let claimed: horizon_client::fast_hash::FxHashSet<(i32, i32)> = self
+                        .world
+                        .chunks
+                        .keys()
+                        .copied()
+                        .filter(|&(x, z)| {
+                            horizon_client::streaming::in_view_distance(at.1, at.2, x, z)
+                        })
+                        .collect();
+                    lod.set_claimed(claimed);
+                }
                 let meshes = horizon_client::spans::time("lod_update", || {
                     lod.update(
                         [player.position.x, player.position.y, player.position.z],
@@ -17561,6 +17605,7 @@ impl<'a> Game<'a> {
             far_beacons: HashMap::new(),
             lod_observe: Default::default(),
             lod_covered_at: None,
+            lod_claimed_at: None,
             options,
             player: None,
             spawn: None,

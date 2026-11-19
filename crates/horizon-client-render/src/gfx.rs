@@ -5510,7 +5510,11 @@ impl Renderer {
                 let mut boxed = Vec::new();
                 self.sections
                     .visible(camera, radius, &light, |_| true, |_, _| false, &mut boxed);
-                let seen: std::collections::HashSet<_> =
+                // This runs per frame whenever a shadow view exists, over every
+                // section the light can see: the default hasher (SipHash) cost
+                // thousands of hashes a frame there. The set never leaves this
+                // scope, so the fast hasher is the whole fix.
+                let seen: crate::fast_hash::FxHashSet<_> =
                     shadow_visible.iter().map(|s| s.key).collect();
                 shadow_visible.extend(boxed.into_iter().filter(|s| !seen.contains(&s.key)));
             });

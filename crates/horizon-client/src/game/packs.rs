@@ -167,6 +167,8 @@ impl Game<'_> {
     /// `ReloadableResourceManager.createReload`'s background executor), so
     /// the window keeps drawing; `drive_pack_reload` applies it.
     pub(super) fn reload_packs(&mut self) {
+        // A reload can change what `shaderpacks/` holds, which is cached.
+        super::shader_packs::forget_bundled_pack_exists();
         // Pack reload updates tail-owned mob metadata. Keep menus responsive
         // until those resources exist, then apply the latest selection once.
         // A reload already under its overlay finishes first (vanilla's

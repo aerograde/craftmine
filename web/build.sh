@@ -22,6 +22,11 @@ profile="${PROFILE:-release}"
 resources="${HORIZON_RESOURCES:-.local/horizon-client/26.3}"
 dist="${DIST:-web/dist}"
 
+# The commit the title screen names, so a player (or a screenshot) says which
+# build it is. `option_env!` reads it at compile time; a build with no git
+# (an exported archive) simply has none.
+export HORIZON_COMMIT="${HORIZON_COMMIT:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}"
+
 nightly=nightly-2026-10-14
 cargo=(cargo)
 if [ "${THREADS:-1}" != 0 ]; then

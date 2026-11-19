@@ -1237,15 +1237,29 @@ impl Screen {
                         Row::LanHeader => {
                             // LANHeader's LoadingDotsWidget: the label, then
                             // the dots on its last line, both centred.
-                            let label = crate::lang::get_or(
-                                "lanServer.scanning",
-                                "Scanning for games on your local network",
-                            );
+                            // A browser cannot join the multicast group, so the
+                            // list can never fill there: say that rather than
+                            // spin "scanning" forever over nothing.
+                            let scanning = crate::lan::discovery::discovery_available();
+                            let label = if scanning {
+                                crate::lang::get_or(
+                                    "lanServer.scanning",
+                                    "Scanning for games on your local network",
+                                )
+                            } else {
+                                crate::lang::get_or(
+                                    "lanServer.unavailable",
+                                    "Local network games need a native build",
+                                )
+                            };
                             let middle = cx + ((ROW_WIDTH - 4.0) / 2.0).floor();
                             let lw = HudBatch::text_width(atlas, &label).ceil();
                             let lx = middle - (lw / 2.0).floor();
                             let centre = lx + (lw / 2.0).floor();
                             batch.text(atlas, &label, lx, cy + 2.0, u32::MAX, false);
+                            if !scanning {
+                                continue;
+                            }
                             let dots = loading_dots(millis);
                             let dw = HudBatch::text_width(atlas, dots).ceil();
                             batch.text(

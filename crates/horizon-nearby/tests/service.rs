@@ -436,3 +436,83 @@ fn two_guests_get_independent_links_to_the_host() {
             .all(|session| session.hosting && session.connected)
     );
 }
+
+/// The feature the browser build needed: with no click, a client joins the
+/// open world in its room, and is handed the same secure pipe a manual join
+/// produces. `AutoJoin` is armed before the world is announced, so the arrival
+/// has to be what triggers it.
+#[test]
+fn auto_join_carries_a_guest_into_an_open_world() {
+    let broker = FakeBroker::start();
+    let mut host_config = config("Host", broker.port);
+    host_config.policy = Policy::Open;
+    let host = Service::start(host_config);
+    let guest = Service::start(config("Guest", broker.port));
+
+    guest.command(Command::AutoJoin);
+    // The world is shared only now: the join must follow discovery, not the
+    // command, or the test would only prove the empty case.
+    host.command(Command::ShareWorld {
+        name: "Auto world".into(),
+        players: 1,
+        max: 8,
+    });
+
+    let needed = wait_event(&host, "the server pipe request", |event| {
+        matches!(event, Event::ServerPipeNeeded { .. })
+    });
+    let Event::ServerPipeNeeded { session, .. } = needed else {
+        unreachable!()
+    };
+    let (mut host_game, server_pipe) = Pipe::pair();
+    host.command(Command::ProvideServerPipe {
+        session,
+        pipe: server_pipe,
+    });
+
+    let ready = wait_event(&guest, "the guest's secure pipe", |event| {
+        matches!(event, Event::GuestReady { .. })
+    });
+    let Event::GuestReady { mut pipe, host, .. } = ready else {
+        unreachable!()
+    };
+    assert_eq!(host, "Host", "the pipe names the host it joined, not the world");
+    host_game.write_all(b"joined").unwrap();
+    let mut got = [0u8; 6];
+    pipe.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"joined");
+}
+
+/// An `Ask` world needs its host to accept, which nobody is there to do, so an
+/// automatic join must not sit on it — it waits for an open one instead.
+#[test]
+fn auto_join_waits_for_an_open_world_rather_than_an_ask_one() {
+    let broker = FakeBroker::start();
+    let host = Service::start(config("Host", broker.port));
+    let guest = Service::start(config("Guest", broker.port));
+
+    guest.command(Command::AutoJoin);
+    host.command(Command::ShareWorld {
+        name: "Ask world".into(),
+        players: 1,
+        max: 8,
+    });
+    let world = wait_until("the guest to see the world", || {
+        guest
+            .snapshot()
+            .worlds
+            .into_iter()
+            .find(|world| world.name == "Ask world")
+    });
+    assert!(world.policy == Policy::Ask);
+
+    // No request is made, so the host never sees one.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        assert!(
+            !host.poll().iter().any(|e| matches!(e, Event::Request(_))),
+            "auto-join asked a host who is not at the screen"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}

@@ -1780,7 +1780,14 @@ pub fn decode_proto(
     layout: ColumnLayout,
 ) -> Option<SavedProto> {
     let status = ChunkStatus::parse(&text(root.tag.get("Status"))?).ok()?;
-    if !(ChunkStatus::Terrain..ChunkStatus::Full).contains(&status) {
+    // `ChunkHeightAndBiomeFix` writes `Status: empty` with `below_zero_retrogen`
+    // for a pre-1.18 chunk whose bedrock layer is incomplete. The chunk still
+    // holds the player's blocks (and, for an imported 1.8 world, everything they
+    // built); vanilla resumes it from its `target_status` instead of generating
+    // it again, so dropping it here regenerated their builds from the seed.
+    let retrogen_resumable = status == ChunkStatus::Empty
+        && matches!(root.tag.get("below_zero_retrogen"), Some(Tag::Compound(_)));
+    if !retrogen_resumable && !(ChunkStatus::Terrain..ChunkStatus::Full).contains(&status) {
         return None;
     }
     let mut column = decode_column(root, registry, biomes, tables, layout)?;

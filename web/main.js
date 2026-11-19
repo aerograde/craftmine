@@ -7,19 +7,29 @@ import "./audio.js"; // before the game's glue, which keeps the AudioContext it 
 
 // Device facts the renderer uses to pick its defaults, and the public address
 // Nearby falls back to when the browser has no WebRTC STUN. The lookup never
-// blocks the game; Nearby retries its room until it arrives.
+// blocks the game; Nearby re-resolves its room every few seconds until this
+// lands (a page that starts before it would otherwise sit in the public room
+// where nobody from its own network is).
 const pageParams = new URLSearchParams(location.search);
 globalThis.horizonDeviceMemory = Number(
     pageParams.get("deviceMemory") || navigator.deviceMemory || 0);
 globalThis.horizonHardwareConcurrency = Number(
     pageParams.get("cores") || navigator.hardwareConcurrency || 0);
 globalThis.horizonPublicIp = "";
-fetch("https://api64.ipify.org?format=json", { cache: "no-store" })
-    .then((response) => response.json())
-    .then((value) => {
-        if (typeof value.ip === "string") globalThis.horizonPublicIp = value.ip;
-    })
-    .catch(() => {});
+// Two independent IPv4-only lookups, so one service being down or blocked by the
+// page's COEP does not leave Nearby roomless. They run in parallel; the first
+// to answer sets the value, and the others are ignored.
+for (const url of ["https://api64.ipify.org?format=json", "https://ipv4.icanhazip.com/"]) {
+    fetch(url, { cache: "no-store" })
+        .then((response) => (url.endsWith("json") ? response.json() : response.text()))
+        .then((value) => {
+            const ip = typeof value === "string" ? value.trim() : value.ip;
+            if (typeof ip === "string" && ip && !globalThis.horizonPublicIp) {
+                globalThis.horizonPublicIp = ip;
+            }
+        })
+        .catch(() => {});
+}
 
 const ROOT = ".local/horizon-client/26.3";
 const status = document.getElementById("status");
@@ -276,7 +286,7 @@ async function served() {
 
 async function main() {
     if (!(await webgpu())) return;
-    const { glue, tar, packs, manifest, base } = await (globalThis.horizonOffline ?? served)();
+    let { glue, tar, packs, manifest, base } = await (globalThis.horizonOffline ?? served)();
     status.textContent = "Installing resources…";
     // The single-file archive can be large: let the status paint before the
     // copy into the virtual filesystem blocks this thread.
@@ -288,6 +298,12 @@ async function main() {
     if (packs) glue.horizon_install_tar("/", packs);
     glue.horizon_install_manifest(ROOT, base, manifest);
     console.log(`Horizon: ${installed} files installed in ${Math.round(performance.now() - t0)} ms`);
+    // The archive's bytes are in the virtual filesystem now. Nothing reads these
+    // again, and they are large (a 220 MB store and a ~15 MB boot archive in the
+    // single file), so hand them to the collector before the game allocates its
+    // own: on an 8 GB device they were held for the whole session on top of a
+    // tab that the browser already keeps near its limit.
+    tar = packs = null;
 
     const root = await savedRoot();
     if (root) {

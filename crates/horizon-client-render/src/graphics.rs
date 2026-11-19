@@ -1329,6 +1329,37 @@ mod tests {
         set_auto_visual_quality(VisualQuality::High);
     }
 
+    /// `navigator.deviceMemory` is capped at 8 by the spec, so its report can
+    /// never separate an 8 GB Chromebook from a 32 GB desktop: `8` means "8 or
+    /// more". Anything that reads it as a size rather than a ceiling decides
+    /// wrongly on every machine, which is what disabled the bundled shader pack
+    /// everywhere (its gate compared `<= 8`) and left every browser on the plain
+    /// built-in look. The tier that guards the full shadow and bloom path must
+    /// still catch the intended 8 GB device, since the cap hides it.
+    #[test]
+    fn a_device_memory_report_of_eight_is_a_ceiling_not_a_size() {
+        // The browser's adapter class: what `auto_quality_for` branches on.
+        let browser = |name: &str| wgpu::AdapterInfo {
+            name: name.into(),
+            vendor: 0,
+            device: 0,
+            device_type: wgpu::DeviceType::Other,
+            device_pci_bus_id: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+            backend: wgpu::Backend::BrowserWebGpu,
+            subgroup_min_size: 0,
+            subgroup_max_size: 0,
+            transient_saves_memory: None,
+            limit_bucket: None,
+        };
+        assert_eq!(
+            auto_quality_for(&browser("Mali-G57")),
+            VisualQuality::Medium,
+            "an 8 GB Chromebook is only distinguishable from a 32 GB desktop by its cores"
+        );
+    }
+
     #[test]
     fn lod_distance_defaults_to_96_and_round_trips() {
         assert_eq!(Graphics::default().lod_distance, DEFAULT_LOD_DISTANCE);

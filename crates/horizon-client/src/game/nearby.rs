@@ -35,6 +35,9 @@ pub(super) struct Nearby {
     hosted: usize,
     copied: Option<Instant>,
     auto_share: bool,
+    /// Whether the player asked to be dropped into the first open nearby world
+    /// they can see, instead of picking one from the list.
+    auto_join: bool,
     toast: Option<SystemToast>,
 }
 
@@ -70,6 +73,7 @@ impl Game<'_> {
                 hosted: 0,
                 copied: None,
                 auto_share: false,
+                auto_join: false,
                 toast: None,
             });
             return;
@@ -114,6 +118,9 @@ impl Game<'_> {
         let auto_share = env_flag("HORIZON_NEARBY_SHARE", true)
             && preference("nearbyShare")
                 .is_none_or(|v| !matches!(v.as_str(), "0" | "false" | "off"));
+        let auto_join = env_flag("HORIZON_NEARBY_AUTOJOIN", true)
+            && preference("nearbyAutoJoin")
+                .is_none_or(|v| !matches!(v.as_str(), "0" | "false" | "off"));
         let config = horizon_nearby::Config {
             enabled: true,
             player_name: self.options.player_name(),
@@ -135,6 +142,7 @@ impl Game<'_> {
             hosted: 0,
             copied: None,
             auto_share,
+            auto_join,
             toast: None,
         });
     }
@@ -152,6 +160,7 @@ impl Game<'_> {
         }
         self.nearby_auto_share();
         self.nearby_refresh_hosted();
+        self.arm_nearby_auto_join();
     }
 
     fn nearby_event(&mut self, event: NearbyEvent) {
@@ -200,6 +209,9 @@ impl Game<'_> {
                 if let Some(reason) = reason {
                     self.nearby_notice(format!("The nearby session ended: {reason}"));
                 }
+                // The player is back on their own: look for another world to
+                // drop into, if they asked for automatic joining.
+                self.arm_nearby_auto_join();
             }
             NearbyEvent::Notice(message) => self.nearby_notice(message),
         }
@@ -280,6 +292,25 @@ impl Game<'_> {
                 .command(NearbyCommand::SetPlayerStatus(status));
             nearby.last_status = Some(status);
         }
+    }
+
+    /// Arms automatic joining, if the player asked for it: the service then
+    /// drops them into the first open compatible world it sees, and this is
+    /// called again when a session ends so they can move on.
+    fn arm_nearby_auto_join(&mut self) {
+        let Some(nearby) = &self.nearby else {
+            return;
+        };
+        if !nearby.auto_join {
+            return;
+        }
+        // Only from the title: the player is between worlds and has nowhere of
+        // their own to lose. Joining a world also needs the title, since
+        // `connect_local` replaces the current screen.
+        if self.title.is_none() || self.serving.is_some() {
+            return;
+        }
+        nearby.service.command(NearbyCommand::AutoJoin);
     }
 
     fn nearby_refresh_hosted(&mut self) {

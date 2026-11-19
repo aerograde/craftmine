@@ -2396,10 +2396,11 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 }
                 let version = format!("Minecraft: Browser {}", horizon_core::VANILLA_VERSION);
                 batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
-                // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
-                // scale, so screenshots and reports say which build they come from.
-                if let Some(nightly) = horizon_core::release::nightly_label() {
-                    batch.text(atlas, &nightly, 2.0, 2.0, u32::MAX, true);
+                // The build names itself in the top-left corner, the one spot no button reaches at any
+                // GUI scale, so screenshots and reports say which build they come from: a nightly's
+                // date and commit, or the commit a browser build was packaged from.
+                if let Some(label) = horizon_core::release::build_label() {
+                    batch.text(atlas, &label, 2.0, 2.0, u32::MAX, true);
                 }
                 let notice = "Not affiliated with Mojang or Microsoft";
                 // TitleScreen.init's `PlainTextButton`: the text's width wide, 10

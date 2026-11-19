@@ -1609,31 +1609,37 @@ impl Streaming {
             protos.contains_key(k) || finishing.contains(k) || world.chunks.contains_key(k)
         });
         // Finalize chunks whose neighbourhood is decorated.
-        let candidates: Vec<(i32, i32)> = self.protos.keys().copied().collect();
-        for (x, z) in candidates {
-            if world.chunks.contains_key(&(x, z))
-                || self.finishing.contains(&(x, z))
-                || !self.in_range(x, z, 1)
-            {
-                continue;
-            }
-            let ready = (-1..=1).all(|dz| {
-                (-1..=1).all(|dx| {
-                    self.decorated.contains(&(x + dx, z + dz))
-                        || world.chunks.contains_key(&(x + dx, z + dz))
-                })
-            });
-            if ready && let Some(Some(_)) = self.protos.get(&(x, z)) {
-                let proto = self
-                    .protos
-                    .remove(&(x, z))
-                    .flatten()
-                    .expect("present proto");
-                self.light_views.remove(&(x, z));
-                self.finishing.insert((x, z));
-                self.written.remove(&(x, z));
-                self.submit(Some((x, z)), 0, Job::Finish(proto));
-            }
+        // This runs on every update, and it used to collect every proto key
+        // first — an allocation proportional to all protos, per update, when the
+        // ones that can finish are a small handful. Filter with a shared borrow
+        // and collect only those, since finishing mutates `protos`.
+        let ready: Vec<(i32, i32)> = self
+            .protos
+            .iter()
+            .filter(|&(&(x, z), proto)| {
+                proto.is_some()
+                    && !world.chunks.contains_key(&(x, z))
+                    && !self.finishing.contains(&(x, z))
+                    && self.in_range(x, z, 1)
+                    && (-1..=1).all(|dz| {
+                        (-1..=1).all(|dx| {
+                            self.decorated.contains(&(x + dx, z + dz))
+                                || world.chunks.contains_key(&(x + dx, z + dz))
+                        })
+                    })
+            })
+            .map(|(&(x, z), _)| (x, z))
+            .collect();
+        for (x, z) in ready {
+            let proto = self
+                .protos
+                .remove(&(x, z))
+                .flatten()
+                .expect("present proto");
+            self.light_views.remove(&(x, z));
+            self.finishing.insert((x, z));
+            self.written.remove(&(x, z));
+            self.submit(Some((x, z)), 0, Job::Finish(proto));
         }
         // Decorate chunks whose 3x3 proto neighbourhood is available, in
         // vanilla's order: decoration is order dependent where write regions

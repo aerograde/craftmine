@@ -353,18 +353,26 @@ fn level_dat_to_saved_data(base: &Path) -> io::Result<()> {
     if let Some(mut player) = remove(&mut content, "Player") {
         let from = data_version(&player, -1);
         update(Ty::Player, &mut player, from, V);
+        // `update(Ty::Player)` has just run `PlayerUUIDFix`, so the UUID is the
+        // four-int form here; anything else is a shape this fixer does not know,
+        // and the zero UUID (what the `None` arm always wrote) is the fallback.
         let uuid = match player.get("UUID") {
-            Some(u) => u.clone(),
-            None => {
-                set(&mut player, "DataVersion", Tag::Int(V));
-                write_dat(
-                    &base.join("players/data/00000000-0000-0000-0000-000000000000.dat"),
-                    &player,
-                )?;
-                int_list(&[0, 0, 0, 0])
-            }
+            Some(Tag::IntArray(a)) if a.len() == 4 => [a[0], a[1], a[2], a[3]],
+            _ => [0, 0, 0, 0],
         };
-        set(&mut content, "singleplayer_uuid", uuid);
+        set(&mut player, "DataVersion", Tag::Int(V));
+        write_dat(
+            &base.join(format!(
+                "players/data/{}.dat",
+                super::fixes_b::uuid_text(uuid)
+            )),
+            &player,
+        )?;
+        set(
+            &mut content,
+            "singleplayer_uuid",
+            player.get("UUID").cloned().unwrap_or_else(|| int_list(&uuid)),
+        );
     }
     extract(
         &mut content,
@@ -1142,6 +1150,62 @@ mod upgrade_tests {
         fs::remove_file(region.join("broken.mca")).unwrap();
         assert_eq!(upgrade_world(&base).unwrap(), old);
         assert_eq!(level_version(&base), CURRENT);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// An imported 1.8 world keeps its player only in `level.dat` (`Data.Player`),
+    /// which is the EPK case. The fix must write it to `players/data/<uuid>.dat`
+    /// and keep the inventory: the player used to be removed from `level.dat` and
+    /// dropped whenever it had a UUID, so the imported world came up with an empty
+    /// inventory, and the next save made the loss permanent.
+    #[test]
+    fn an_imported_player_is_written_to_its_uuid_file() {
+        let base = std::env::temp_dir().join(format!("horizon-player-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let uuid = [1, 2, 3, 4];
+        let inventory = Tag::List(vec![Tag::compound([
+            ("id", string("minecraft:stone")),
+            ("Count", Tag::Byte(7)),
+            ("Slot", Tag::Byte(3)),
+        ])]);
+        let level = Tag::compound([(
+            "Data",
+            Tag::compound([
+                ("DataVersion", Tag::Int(1500)),
+                (
+                    "Player",
+                    Tag::compound([
+                        ("UUID", Tag::IntArray(uuid.to_vec())),
+                        ("Inventory", inventory),
+                        ("Health", Tag::Float(20.0f32.to_bits())),
+                    ]),
+                ),
+            ]),
+        )]);
+        write_dat(&base.join("level.dat"), &level).unwrap();
+
+        upgrade_world(&base).unwrap();
+
+        let player_file = base.join(format!(
+            "players/data/{}.dat",
+            crate::datafix::fixes_b::uuid_text(uuid)
+        ));
+        let player = read_dat(&player_file)
+            .unwrap()
+            .expect("the player must be written to its UUID file, not dropped");
+        assert_eq!(player.get("DataVersion"), Some(&Tag::Int(CURRENT)));
+        let Tag::List(items) = player.get("Inventory").expect("the inventory survives") else {
+            panic!("inventory is not a list");
+        };
+        assert_eq!(items.len(), 1);
+        let stored = read_level(&base, CURRENT)
+            .unwrap()
+            .expect("the upgraded level.dat is readable");
+        assert_eq!(
+            stored.get("singleplayer_uuid"),
+            Some(&Tag::IntArray(uuid.to_vec())),
+            "the level must point at the file that was written"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }

@@ -139,6 +139,14 @@ const GREEN: &[&str] = &[
     "World data preload",
     "Server data preload",
     "Loot preload",
+    // Play Nearby: the service loop, one thread per MQTT broker, and the guest,
+    // host, LAN and pump threads of a session. Without these the service
+    // silently stayed off in the browser (`Service::start` reported a disabled
+    // snapshot, with no log line saying why) — which is why nobody was ever
+    // seen nearby on the web.
+    "horizon-nearby",
+    "horizon-friends-auth",
+    "horizon-friends-listen",
 ];
 
 struct Fiber {

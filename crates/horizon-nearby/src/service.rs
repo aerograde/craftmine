@@ -28,6 +28,10 @@ const REQUEST_TTL: Duration = Duration::from_secs(60);
 const INVITE_TTL: Duration = Duration::from_secs(120);
 const SESSION_TTL: Duration = Duration::from_secs(90);
 const EXPIRE_EVERY: Duration = Duration::from_secs(1);
+/// How often the automatic room is re-resolved while it is still the public
+/// fallback. The browser's address lookup is an HTTP call that lands after the
+/// service starts, so without this every page stayed in the public room.
+const ROOM_RECHECK: Duration = Duration::from_secs(5);
 const SEEN_TTL: Duration = Duration::from_secs(120);
 /// Where peers meet when neither STUN nor the browser's HTTP address lookup
 /// gave a public address. The no-auth brokers still carry the room, so a LAN
@@ -130,6 +134,10 @@ pub enum Command {
         pipe: horizon_protocol::connection::Pipe,
     },
     SetRoom(Option<String>),
+    /// Joins the first compatible open world that appears in the room, once.
+    /// The client re-arms it after a session ends, so a list that is empty at
+    /// the moment does not leave the player waiting for a manual refresh.
+    AutoJoin,
     Shutdown,
 }
 
@@ -253,6 +261,10 @@ impl Service {
         if thread.is_none()
             && let Ok(mut snap) = horizon_os::sync::lock(&snapshot)
         {
+            // The browser build only starts the service on a green thread, and
+            // an unknown thread name fails there. Say so: the only other
+            // symptom is a permanently empty list.
+            log::warn!("nearby: the service thread did not start; nearby play is off");
             snap.enabled = false;
             snap.notice = Some("The nearby service could not start".into());
         }
@@ -326,6 +338,8 @@ fn run(
         inner.drain_lan();
         inner.drain_brokers();
         inner.drain_sessions();
+        inner.recheck_room();
+        inner.auto_join();
         if inner.last_presence.elapsed() >= PRESENCE_EVERY {
             inner.publish_presence();
         }
@@ -455,6 +469,17 @@ struct Inner {
     next_session: u64,
     last_presence: Instant,
     last_expire: Instant,
+    /// When the automatic room was last re-resolved. A browser starts the
+    /// service before its public-address lookup (an HTTP call in `web/main.js`)
+    /// has landed, so the first answer is `None` and the client sits in the
+    /// public room — where it sees nobody from its own network, and its world
+    /// is announced to strangers. Vanilla never re-asks; re-resolving once the
+    /// hint arrives is what makes automatic discovery work at all.
+    last_room_check: Instant,
+    /// Set by `Command::AutoJoin`: join the first compatible open world that
+    /// shows up, then clear. Cleared when the world is joined (`guest` set), so
+    /// an empty room at the moment the player asked does not give up.
+    auto_join_pending: bool,
     dirty: bool,
     stop: bool,
     notice: Option<String>,
@@ -504,6 +529,8 @@ impl Inner {
             next_session: u64::from_be_bytes(seed).max(1),
             last_presence: Instant::now(),
             last_expire: Instant::now(),
+            last_room_check: Instant::now(),
+            auto_join_pending: false,
             dirty: true,
             stop: false,
             notice: None,
@@ -534,6 +561,20 @@ impl Inner {
         self.start_brokers();
         self.publish_presence();
         self.write_snapshot();
+        // The room decides whether this client can see anyone at all, and it is
+        // derived (a public address, private subnets, or a code), so say which
+        // one it picked. Without this the only symptom of a wrong room is a
+        // permanently empty list.
+        log::info!(
+            "nearby: room {}, {} broker(s){}",
+            self.room.as_deref().unwrap_or("<none>"),
+            self.links.len(),
+            if self.lan.is_some() {
+                ", local network discovery on"
+            } else {
+                ""
+            },
+        );
     }
 
     fn start_brokers(&mut self) {
@@ -751,6 +792,7 @@ impl Inner {
                     self.provide_pipe(session, pipe)
                 }
                 Ok(Command::SetRoom(code)) => self.set_room(code),
+                Ok(Command::AutoJoin) => self.auto_join_pending = true,
                 Ok(Command::Shutdown) => {
                     self.stop = true;
                     return;
@@ -762,6 +804,22 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Joins the nearest compatible world that is open to anyone, if there is
+    /// one. `Open` only: an `Ask` world needs its host to accept, which a
+    /// player who walked away from the screen cannot give, so auto-joining it
+    /// would hang.
+    fn auto_join(&mut self) {
+        if !self.auto_join_pending || self.guest.is_some() || self.sharing.is_some() {
+            return;
+        }
+        let pick = auto_join_target(self.id.as_str(), &self.config, self.worlds.values());
+        let Some(world_id) = pick else {
+            return;
+        };
+        self.auto_join_pending = false;
+        self.request_join(world_id);
     }
 
     fn request_join(&mut self, world_id: String) {
@@ -799,9 +857,17 @@ impl Inner {
             return;
         };
         self.send_envelope(&host_id, &envelope, world.lan);
+        // The host's *player* record holds their name; the world record's is the
+        // world's. This used to store the world name, so a failed join read
+        // "Could not join My World" instead of naming the person.
+        let host_name = self
+            .people
+            .get(&host_id)
+            .map(|person| person.value.name.clone())
+            .unwrap_or_else(|| world.value.name.clone());
         self.guest = Some(GuestPending {
             host_id,
-            host_name: world.value.name.clone(),
+            host_name,
             world_id,
             eph,
             seen: Instant::now(),
@@ -1664,6 +1730,7 @@ impl Inner {
         };
         let fallback = resolved.is_none();
         self.room = resolved.or_else(|| Some(PUBLIC_ROOM.to_owned()));
+        self.last_room_check = Instant::now();
         self.start_brokers();
         self.publish_presence();
         self.notice = Some(if fallback {
@@ -1671,6 +1738,42 @@ impl Inner {
         } else {
             "Looking for nearby players…".into()
         });
+        self.dirty = true;
+    }
+
+    /// Re-resolves the automatic room once the device's address becomes known.
+    ///
+    /// A page starts Nearby before `web/main.js`'s address lookup has answered,
+    /// and a native client on a network where STUN is slow can miss the first
+    /// probe too. The first resolve then falls back to the public room, where
+    /// the client sees nobody on its own network and announces its world to
+    /// strangers — permanently, since nothing re-asked. Only the *automatic*
+    /// room is revisited: a code the player typed is theirs to keep.
+    fn recheck_room(&mut self) {
+        if self.config.room.as_deref().and_then(room::custom).is_some() {
+            return;
+        }
+        if self.last_room_check.elapsed() < ROOM_RECHECK {
+            return;
+        }
+        self.last_room_check = Instant::now();
+        let Some(automatic) = room::automatic(probe_public_ip(&self.config.stun)) else {
+            return;
+        };
+        if self.room.as_deref() == Some(automatic.as_str()) {
+            return;
+        }
+        // The address just arrived: move to the real room, clearing the public
+        // room's records the same way a code change does.
+        self.stop_brokers();
+        self.worlds.clear();
+        self.people.clear();
+        self.requests.clear();
+        self.invites.clear();
+        self.room = Some(automatic);
+        self.start_brokers();
+        self.publish_presence();
+        self.notice = Some("Looking for nearby players…".into());
         self.dirty = true;
     }
 
@@ -1706,6 +1809,33 @@ fn compatible(inner: &Inner, presence: &Presence) -> bool {
     presence.proto == inner.config.proto && presence.game == inner.config.game
 }
 
+/// The world `Command::AutoJoin` should drop the player into, if any.
+///
+/// Only worlds open to anyone are eligible: an `Ask` world waits for its host
+/// to accept a request, and auto-joining means nobody is watching the screen to
+/// approve it — the player would sit on "Connecting…" until it timed out. The
+/// same version is required (a mismatched world cannot be joined at all), a
+/// world already full is skipped, and the host's own world is never picked. The
+/// lowest `world_id` wins, which is stable for a given room so two clients do
+/// not race each other onto the same world at the same moment.
+fn auto_join_target<'a>(
+    self_id: &str,
+    config: &Config,
+    worlds: impl Iterator<Item = &'a Seen<Presence>>,
+) -> Option<String> {
+    worlds
+        .filter(|seen| {
+            let world = &seen.value;
+            world.proto == config.proto
+                && world.game == config.game
+                && world.policy == Some(Policy::Open)
+                && world.host_id.as_deref() != Some(self_id)
+                && world.players.unwrap_or(0) < world.max.unwrap_or(u8::MAX)
+        })
+        .filter_map(|seen| seen.value.world_id.clone())
+        .min()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn probe_public_ip(stun: &[String]) -> Option<std::net::IpAddr> {
     horizon_friends::stun::public_ip(stun, Duration::from_secs(2))
@@ -1739,6 +1869,11 @@ fn probe_public_ip(_stun: &[String]) -> Option<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::default_brokers;
+    use super::{Config, PresenceKind, Seen, auto_join_target};
+    use crate::Policy;
+    use crate::proto::Presence;
+    use crate::proto::PlayerStatus;
+    use horizon_os::time::{Duration, Instant};
 
     #[test]
     fn nearby_uses_the_live_emqx_and_eclipse_mosquitto_brokers() {
@@ -1757,5 +1892,77 @@ mod tests {
                 .any(|url| url.contains("hivemq") || url.contains("eclipseprojects")),
             "dead or disallowed broker in {brokers:?}"
         );
+    }
+
+    /// Auto-join must not drop a player into a world they cannot get into, and
+    /// must not join the world they are hosting themselves.
+    #[test]
+    fn auto_join_picks_only_an_open_world_that_can_be_joined() {
+        fn world(id: &str, host: &str, policy: Policy, players: u8, max: u8) -> Seen<Presence> {
+            Seen {
+                value: Presence {
+                    v: 1,
+                    kind: PresenceKind::World,
+                    id: id.to_owned(),
+                    name: "W".into(),
+                    host_id: Some(host.to_owned()),
+                    world_id: Some(id.to_owned()),
+                    players: Some(players),
+                    max: Some(max),
+                    policy: Some(policy),
+                    status: PlayerStatus::Hosting,
+                    key: String::new(),
+                    proto: 777,
+                    game: "26.3".into(),
+                    room: "auto-x".into(),
+                    ts: 0,
+                },
+                lan: None,
+                seen: Instant::now(),
+            }
+        }
+        let config = Config {
+            enabled: true,
+            player_name: "me".into(),
+            proto: 777,
+            game: "26.3".into(),
+            policy: Policy::Ask,
+            brokers: Vec::new(),
+            room: None,
+            stun: Vec::new(),
+            lan: false,
+            ice_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            loopback: false,
+        };
+        let me = "aaaaaaaaaaaaaaaa";
+        let pick = |worlds: Vec<Seen<Presence>>| auto_join_target(me, &config, worlds.iter());
+
+        // An open world with room is joined even if another is nearer by id.
+        assert_eq!(
+            pick(vec![
+                world("bbbbbbbbbbbbbbbb", "other", Policy::Open, 0, 8),
+                world("aaaaaaaaaaaaaaab", "other", Policy::Ask, 0, 8),
+            ]),
+            Some("bbbbbbbbbbbbbbbb".to_owned()),
+            "an Ask world would wait for a host who is not at the screen"
+        );
+        // Invite-only and full worlds are not eligible either.
+        assert_eq!(
+            pick(vec![
+                world("cccccccccccccccc", "other", Policy::InviteOnly, 0, 8),
+                world("dddddddddddddddd", "other", Policy::Open, 8, 8),
+            ]),
+            None
+        );
+        // Never the world this client is hosting.
+        assert_eq!(
+            pick(vec![world("eeeeeeeeeeeeeeee", me, Policy::Open, 0, 8)]),
+            None
+        );
+        // Another Horizon version cannot be joined at all.
+        let mut old = world("ffffffffffffffff", "other", Policy::Open, 0, 8);
+        old.value.game = "26.2".into();
+        assert_eq!(pick(vec![old]), None);
     }
 }

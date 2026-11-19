@@ -22,15 +22,44 @@ use std::collections::{BTreeMap, HashMap};
 /// built-in profile stays as the fallback when the folder is absent.
 const BUNDLED_PACK: &str = "MiniatureXL";
 
+/// Whether the bundled pack is installed, as an atomic because it has to be
+/// forgettable: `shader_pack_inputs` runs every frame, and this used to check
+/// the filesystem each time. On the web that takes the global
+/// virtual-filesystem lock (a spin on the page's thread) and builds the path
+/// string, for an answer that only a pack install can change.
+/// `UNKNOWN` is "not asked yet".
+static BUNDLED_EXISTS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
+const UNKNOWN: u8 = 2;
+
 fn bundled_pack_exists() -> bool {
-    Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists()
+    match BUNDLED_EXISTS.load(std::sync::atomic::Ordering::Relaxed) {
+        UNKNOWN => {
+            let exists =
+                u8::from(Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists());
+            BUNDLED_EXISTS.store(exists, std::sync::atomic::Ordering::Relaxed);
+            exists == 1
+        }
+        known => known == 1,
+    }
+}
+
+/// Forgets the cached answer above, so the next frame asks the filesystem again.
+pub(super) fn forget_bundled_pack_exists() {
+    BUNDLED_EXISTS.store(UNKNOWN, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Whether this device should keep the built-in profile rather than pay for a
-/// pack's compile at every world load. The browser reports both figures from the
-/// page; off it, the answer is always no.
+/// pack's compile at every world load. Off the browser the answer is always no.
+///
+/// The bundled pack is the default look the game is meant to ship with, so this
+/// only gives up on a device that is genuinely too small: the smallest
+/// Chromebooks (a memory report of 4 GB or less) and two-thread machines. It
+/// used to test `<= 8` GB, which caught every 8 GB Chromebook — the common case
+/// — and left them with the plain built-in look and vanilla water.
 fn too_small_for_pack() -> bool {
-    horizon_client::graphics::web_low_memory()
+    let memory = horizon_os::device_memory_gib();
+    let small_memory = memory > 0.0 && memory <= 4.0;
+    small_memory || horizon_os::hardware_threads() <= 2
 }
 
 /// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`); with no

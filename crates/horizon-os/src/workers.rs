@@ -22,6 +22,16 @@ pub use std::thread::Result;
 
 #[wasm_bindgen(inline_js = r#"
 let pageModule, pageMemory;
+// The device facts the page recorded (`web/main.js`). A worker has its own
+// `globalThis`, so they are copied across with every spawn: the worldgen and
+// meshing threads read them for their defaults, and Nearby reads the public IP
+// to pick its room. Without this they are undefined in every worker.
+const pageFacts = ["horizonDeviceMemory", "horizonHardwareConcurrency", "horizonPublicIp"];
+function facts() {
+    const out = {};
+    for (const key of pageFacts) if (globalThis[key] !== undefined) out[key] = globalThis[key];
+    return out;
+}
 function start(ptr, name, stack) {
     const worker = new Worker(new URL("worker.js", location.href), { type: "module", name });
     // A thread this worker starts: the page starts it. Its sockets live on
@@ -29,11 +39,11 @@ function start(ptr, name, stack) {
     worker.onmessage = ({ data }) =>
         data.socket ? globalThis.horizonSocket(data) : start(data.ptr, data.name, data.stack);
     worker.onerror = (e) => console.error(`Horizon: thread ${name} failed: ${e.message ?? e}`);
-    worker.postMessage({ module: pageModule, memory: pageMemory, ptr, name, stack });
+    worker.postMessage({ module: pageModule, memory: pageMemory, ptr, name, stack, ...facts() });
 }
 export function horizon_spawn_worker(module, memory, ptr, name, stack) {
     if (typeof window === "undefined") {
-        self.postMessage({ ptr, name, stack });
+        self.postMessage({ ptr, name, stack, ...facts() });
     } else {
         pageModule = module;
         pageMemory = memory;

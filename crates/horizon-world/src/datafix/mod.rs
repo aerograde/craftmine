@@ -15,7 +15,7 @@ mod chunk_leaves;
 pub mod dynamic;
 pub mod files;
 mod fixes_a;
-mod fixes_b;
+pub(crate) mod fixes_b;
 mod fixes_c;
 mod fixes_cliffs;
 mod fixes_flat;

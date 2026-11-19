@@ -131,11 +131,29 @@ impl Drop for ScanInner {
         self.stop.store(true, Ordering::Relaxed);
     }
 }
+/// Whether this build can discover worlds on the local network at all.
+///
+/// A page cannot bind a UDP socket, join a multicast group or announce itself:
+/// `bind_listener`/`Pinger::start` return `Unsupported` in the browser. The
+/// multiplayer screen uses this to say so, instead of spinning "Scanning for
+/// games on your local network" over a list that can never fill.
+pub const fn discovery_available() -> bool {
+    !cfg!(target_arch = "wasm32")
+}
 impl Scanner {
     /// Bind the discovery port; without it the list simply stays empty.
     pub fn start() -> Self {
         let games: Games = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
+        if !discovery_available() {
+            return Self {
+                inner: Arc::new(ScanInner {
+                    games,
+                    stop,
+                    taken: Mutex::new(0),
+                }),
+            };
+        }
         if let Ok(socket) = bind_listener() {
             let (games, stop) = (games.clone(), stop.clone());
             let _ = horizon_os::thread::Builder::new()

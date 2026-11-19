@@ -220,7 +220,7 @@ pub(super) fn feature_flag_remove(cx: &mut Cx, flags: &[&str]) {
 
 // ------------------------------------------------------------------ 3945
 
-fn uuid_text(u: [i32; 4]) -> String {
+pub(super) fn uuid_text(u: [i32; 4]) -> String {
     let most = (i64::from(u[0]) << 32) | (i64::from(u[1]) & 0xFFFF_FFFF);
     let least = (i64::from(u[2]) << 32) | (i64::from(u[3]) & 0xFFFF_FFFF);
     let (m, l) = (most as u64, least as u64);
