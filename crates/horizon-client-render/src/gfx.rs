@@ -5099,9 +5099,20 @@ impl Renderer {
         let views = self.views(frame);
         let pose = frame.bob * frame.spin;
         let view_proj = views.primary().view_proj(pose);
-        let builtin_visuals = frame.visual[0] > 0.0
-            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && self.native.as_ref().is_none_or(|n| n.post.is_none());
+        // A pack replaces our grade and lighting, but only where it has a stage. MiniatureXL is
+        // post-only (4 composite programs, no terrain or shadow program), so it cannot light the
+        // terrain itself: it *samples* `shadowtex1` from its composite (`getLightStrength.fsh`),
+        // which is our near cascade. Turning the built-in visuals off because a pack owns post
+        // then leaves that map undrawn — every lookup reads a cleared texture, and the pack's own
+        // `shadowProjection` has nothing to match, which shades in hard stepped bands. So a pack
+        // without a terrain or shadow stage keeps the built-in lighting and shadow map; one with
+        // its own takes over both (`other_shadow_view` below).
+        let pack_lights = self
+            .pack_post
+            .as_ref()
+            .is_some_and(|p| p.1.as_ref().is_some_and(|p| p.has_terrain() || p.has_shadow()))
+            || self.native.as_ref().is_some_and(|n| n.post.is_some());
+        let builtin_visuals = frame.visual[0] > 0.0 && !pack_lights;
         // A pack's own shadow stage takes the draw list when it has one; the
         // built-in near cascade only runs otherwise.
         let other_shadow_view = self
@@ -5133,6 +5144,35 @@ impl Renderer {
         } else {
             shadow_plan.distance
         };
+        // A post-only pack samples `shadowtex0/1` with **its own** `shadowProjection` and
+        // `shadowModelView` (its `shadowDistance`, `shadowIntervalSize`, `sunPathRotation`, `fov`).
+        // The map has to be written with that same camera, or the pack resolves a world point to
+        // different texels than the terrain pass wrote it at: every receiver then reads a depth
+        // from blocks away and the light lands in hard stepped bands. Only the reach and the
+        // resolution stay ours (they size what the tier pays for); the projection is the pack's.
+        if let Some(pack) = self
+            .pack_post
+            .as_ref()
+            .and_then(|p| p.1.as_ref())
+            .filter(|p| !p.has_shadow())
+        {
+            let pack = pack.shadow_settings();
+            shadow_settings.interval = pack.interval;
+            shadow_settings.euclidean_snap = pack.euclidean_snap;
+            shadow_settings.sun_path_rotation = pack.sun_path_rotation;
+            shadow_settings.fov = pack.fov;
+            shadow_settings.near = pack.near;
+            // The reach is the pack's too: its map coordinates span `distance` each side, so a
+            // map written over a shorter reach samples at the centre-half only.
+            //
+            // The texel density follows (the map is allocated once, so it cannot): ours is
+            // resolution / distance, the pack's its own. A pack whose reach we can cover keeps
+            // its density exactly; one reaching further than the map has texels for gets the
+            // coarser map rather than a clipped one, which is the stepped shading either way.
+            if pack.distance > 0.0 {
+                shadow_settings.distance = pack.distance;
+            }
+        }
         shadow_settings.far = pack_uniforms::SHADOW_EYE + 2.0 * shadow_settings.distance + 384.0;
         let visual_passes = crate::visual::passes(
             crate::visual::Tier::from_quality(frame.visual_tier),

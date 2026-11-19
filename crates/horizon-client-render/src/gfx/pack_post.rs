@@ -3298,6 +3298,19 @@ impl PackPost {
         self.terrain.is_some()
     }
 
+    /// Whether the pack draws the shadow map itself. A pack that only owns post still samples
+    /// `shadowtex1`, so it needs ours (`draw_shadow_pass`) rather than an undrawn buffer.
+    pub fn has_shadow(&self) -> bool {
+        self.shadow_terrain.is_some() || self.shadow_water.is_some()
+    }
+
+    /// The shadow camera the pack's own programs sample `shadowtex0/1` with
+    /// (`shadowProjection`, `shadowModelView`). The map has to be *drawn* with this same camera,
+    /// or the pack resolves a world point to different texels than the one it was written at.
+    pub fn shadow_settings(&self) -> &horizon_shaders::Shadow {
+        &self.uniforms.shadow
+    }
+
     /// Whether the pack draws the sky (disc, sunset, stars, void) itself.
     /// What the world's background is when the pack draws the sky: colortex0's clear colour
     /// (`None`: the fog colour, its default).
