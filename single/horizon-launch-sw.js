@@ -7,7 +7,7 @@
 const DB_NAME = "horizon-launcher";
 const DB_VERSION = 1;
 const GAME_NAME = "__horizon.html";
-const BUILD = "314be32532e9";
+const BUILD = "30bdc9e0c7fa";
 const GAME_PATH = new URL(GAME_NAME, self.registration.scope).pathname;
 
 const POLICY = {

@@ -14,13 +14,28 @@ anyone-with-link, and the API key in `launch.svg` is restricted to the
 is why the jsDelivr URL above is the way in.
 
 - file id: `1GTf4LaN75PMx2_-i4UO30JfYOCLbKUf_`
-- build: `314be32532e9` (first 12 hex digits of the file's SHA-256)
-- size: 358,806,371 bytes
+- build: `30bdc9e0c7fa` (first 12 hex digits of the file's SHA-256)
+- size: 355,479,889 bytes
 
-This build samples a cell's centre as well as its four corners, so terrain finer
-than a coarse LOD cell — a knoll, a gully, a cliff edge — is drawn instead of
-merging into a smooth ramp. It also opens single-player worlds in the browser:
-before it, a world sat at "Loading terrain..." with the scene frozen behind the
+The title screen names the commit it was built from in its top-left corner
+(`Build b4fdbfd2c0d7`), so a screenshot says which build it is.
+
+This build has sound: `cpal` asks the `AudioContext` to resume as soon as the
+game opens its stream, which is before the player has clicked or typed
+anything, and the browser refuses that. The refusal used to fail the open and
+drop the stream, so every browser build was silent for good. The stream is kept
+now, and `web/audio.js` resumes the context on the first gesture.
+
+Play Nearby works too. `horizon-nearby` was not a green thread, so the service
+quietly never started on the single-threaded build and no one was ever seen
+nearby; it also re-resolves its room once the page's address lookup lands
+(previously it stayed in the public room, where nobody from its own network
+is), and auto-joins the first open world it finds.
+
+It samples a cell's centre as well as its four corners, so terrain finer than a
+coarse LOD cell — a knoll, a gully, a cliff edge — is drawn instead of merging
+into a smooth ramp. And it opens single-player worlds in the browser: before
+that, a world sat at "Loading terrain..." with the scene frozen behind the
 loader (see `web/README.md`).
 
 The launcher downloads the file once, keeps it in that origin's IndexedDB, and
