@@ -16,6 +16,155 @@ use horizon_client::gfx::pack_draw::EntitySpan;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
+/// A pack's programs being translated on a worker, and what it returned.
+///
+/// The translation (`load_post`: GLSL to naga) is the seconds-long half of a pack's load and
+/// needs nothing from the GPU, so it runs off the frame thread; the game polls it and uploads
+/// what it returns. Every type it touches is plain data, which is why it can move.
+pub(super) struct PackTranslation {
+    handle: Option<horizon_os::thread::JoinHandle<Result<Translated, String>>>,
+    dimension: i32,
+    result: Option<Result<Translated, String>>,
+}
+
+/// What the worker hands back: everything `set_shader_pack` needs that is not the renderer.
+struct Translated {
+    folder: String,
+    post: horizon_shaders::Post,
+    ids: BlockIds,
+    entities: BlockIds,
+    items: BlockIds,
+    items_had_file: bool,
+    far_lod: bool,
+    /// `oldHandLight` (3.2): on unless the pack turns it off.
+    old_hand_light: bool,
+    /// `oldLighting`: off unless the pack turns it on.
+    old_lighting: bool,
+    elapsed_ms: u128,
+}
+
+impl PackTranslation {
+    /// Takes the translated pack once the worker has one, without waiting for it: on the web
+    /// `join` spins the page's thread, so a frame must never block here.
+    fn poll(&mut self) -> Option<Result<Translated, String>> {
+        if self.result.is_some() {
+            return self.result.take();
+        }
+        if !self.handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return None;
+        }
+        // `join` takes the handle, so the job holds it in an `Option`.
+        let Some(handle) = self.handle.take() else {
+            return self.result.take();
+        };
+        self.result = Some(
+            handle
+                .join()
+                .unwrap_or_else(|_| Err("the worker died".into())),
+        );
+        self.result.take()
+    }
+}
+
+/// Translates the picked pack's programs on a worker.
+///
+/// Nothing here may touch the renderer: `wgpu` handles cannot cross threads, so the worker only
+/// produces the plain data `Renderer::set_shader_pack` is later handed.
+fn start_pack_translation(
+    name: &str,
+    path: std::path::PathBuf,
+    chosen: BTreeMap<String, String>,
+    dimension: i32,
+    mut macros: Macros,
+    inputs: horizon_shaders::GameInputs,
+    biomes: Vec<String>,
+) -> std::io::Result<PackTranslation> {
+    let name = name.to_owned();
+    let handle = horizon_os::thread::Builder::new()
+        .name("Shader pack translation".into())
+        .spawn(move || -> Result<Translated, String> {
+            let started = horizon_os::time::Instant::now();
+            // A pack is not the game's own code: one that makes the translation panic is turned
+            // off instead of crashing every world load (#3525). `contain` reports the panic
+            // itself; the closure's own `Result` is the pack's error.
+            let translated = horizon_client::crash::contain(|| {
+                let pack = Pack::open(&path)
+                    .map(|p| p.with_chosen(chosen))
+                    .map_err(|e| e.to_string())?;
+                let text = pack.read_text("shaders.properties").unwrap_or_default();
+                // Its conditionals test the pack's options too.
+                let properties =
+                    Properties::parse(&text, &horizon_shaders::with_options(&pack, &macros));
+                for note in macros.define_features(&properties) {
+                    log::warn!("shader pack {name}: {note}");
+                }
+                for note in &properties.notes {
+                    log::warn!(
+                        "shader pack {name}: shaders.properties:{}: {}",
+                        note.line,
+                        note.message
+                    );
+                }
+                let folder = dimension_folder(&pack, dimension);
+                let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
+                // The pack's `SHADOWS` switch (the potato profile has it off) also controls
+                // whether its shadow programs run.
+                if !horizon_shaders::switches_on(&pack).contains("SHADOWS") {
+                    post.shadow_pass = false;
+                    post.shadow = None;
+                    post.shadow_water = None;
+                    post.shadow_entities = None;
+                    post.shadow_block = None;
+                    post.shadow_comp.clear();
+                }
+                let names: Vec<&str> = biomes.iter().map(String::as_str).collect();
+                post.custom.set_biomes(&names);
+                let text = pack.read_text("block.properties").unwrap_or_default();
+                let ids = BlockIds::parse(&Properties::parse(&text, &macros));
+                for note in &ids.notes {
+                    log::warn!("shader pack {name}: block.properties: {note}");
+                }
+                let entities_text = pack.read_text("entity.properties");
+                let entities = BlockIds::parse_kind(
+                    &Properties::parse(entities_text.as_deref().unwrap_or_default(), &macros),
+                    "entity",
+                );
+                let items_text = pack.read_text("item.properties");
+                let items = BlockIds::parse_kind(
+                    &Properties::parse(items_text.as_deref().unwrap_or_default(), &macros),
+                    "item",
+                );
+                let far_lod = pack
+                    .read_text("program/gbuffers_main.glsl")
+                    .is_some_and(|t| t.contains("encodeNormal") && t.contains("outData1"));
+                Ok(Translated {
+                    folder,
+                    post,
+                    ids,
+                    entities,
+                    items,
+                    items_had_file: items_text.is_some(),
+                    far_lod,
+                    // OQ-21: on unless the pack turns it off.
+                    old_hand_light: properties
+                        .get("oldHandLight")
+                        .is_none_or(|v| v.trim() != "false"),
+                    // Off unless the pack turns it on (Iris shades no faces by default).
+                    old_lighting: properties
+                        .get("oldLighting")
+                        .is_some_and(|v| v.trim() == "true"),
+                    elapsed_ms: started.elapsed().as_millis(),
+                })
+            });
+            translated.map_err(|panic| format!("the shader compiler failed: {panic}"))?
+        })?;
+    Ok(PackTranslation {
+        handle: Some(handle),
+        dimension,
+        result: None,
+    })
+}
+
 /// The pack shipped with Horizon: the MIT-licensed Miniature XL, a fork of
 /// Miniature Shader that adds a voxel coloured-light volume, per-material
 /// emissive glow and day-night shadow strength. It is the default look; the
@@ -172,9 +321,8 @@ impl Game<'_> {
     /// Loads the pack for the current dimension when it changed, and returns this frame's
     /// inputs to the pack's uniforms.
     pub(super) fn shader_pack_inputs(&mut self, camera: glam::DVec3, partial: f32) -> PackInputs {
-        // A pack's first load translates every program synchronously. Do that
-        // only in a world: during title startup the browser's event loop still
-        // has a winit borrow active, and a long nested pass re-enters it.
+        // A pack is translated only in a world: during title startup the browser's event loop
+        // still has a winit borrow active, and a long nested pass re-enters it.
         if !matches!(self.screen, super::Screen::Playing) {
             return PackInputs::default();
         }
@@ -185,31 +333,21 @@ impl Game<'_> {
             self.streaming.shader_pack_lighting = pack_lighting;
             self.all_sections_changed();
         }
-        static DEV_PACK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-        let dev = DEV_PACK.get_or_init(|| std::env::var("HORIZON_SHADER_PACK").ok());
-        let configured = dev.as_deref().unwrap_or(&self.settings.horizon.shader_pack);
-        let mut picked = active_pack(configured, &self.settings.mods).to_owned();
-        // The bundled pack is the default look, but it is a whole shader pack:
-        // 173 files and four compute programs, translated and compiled on the
-        // frame thread at every world load (6.9 s on a desktop GPU, which is
-        // minutes on a small laptop). A device that reports little memory or
-        // few cores keeps the built-in profile instead; picking the pack on the
-        // Shader Options page still runs it, so this only decides the default.
-        if dev.is_none() && picked.is_empty() && bundled_pack_exists() && !too_small_for_pack() {
-            picked = BUNDLED_PACK.to_owned();
-        }
-        if self.native_shaders.picked != picked {
+        let picked = self.picked_shader_pack();
+        let name = picked.clone().unwrap_or_default();
+        if self.native_shaders.picked != name {
             // Another pack, or none: drop what ran.
-            self.native_shaders = super::native_shaders::NativeShaders::picking(&picked);
+            self.native_shaders = super::native_shaders::NativeShaders::picking(&name);
             self.pack_ids = None;
+            self.pack_translation = None;
+            self.pack_failed = None;
             if let Some(renderer) = &mut self.renderer {
                 renderer.drop_shader_packs();
             }
         }
-        if picked.is_empty() {
+        let Some(name) = picked else {
             return PackInputs::default();
-        }
-        let name = picked;
+        };
         let dimension = match self.dim {
             Dim::Overworld => 0,
             Dim::Nether => -1,
@@ -217,122 +355,29 @@ impl Game<'_> {
         };
         let path = Self::shader_packs_dir().join(&name);
         if horizon_shader_api::package::is_pack(&path) {
-            // One of Horizon's own packs (game/native_shaders.rs).
+            // One of Horizon's own packs (game/native_shaders.rs): no GLSL to translate.
             self.tick_native_shader_pack(&path);
-        } else if let Some(renderer) = &mut self.renderer
+        } else if self.pack_translation.is_none()
+            && self.pack_failed != Some(dimension)
+            && let Some(renderer) = &mut self.renderer
             && renderer.shader_pack_dimension() != Some(dimension)
         {
-            let name = name.as_str();
-            let started = horizon_os::time::Instant::now();
-            // A pack is not the game's own code: one that makes the shader compiler (or our
-            // translation of it) panic is turned off instead of crashing every world load (#3525).
-            let loaded = horizon_client::crash::contain(|| {
-                match Pack::open(&path).map(|p| {
-                    let chosen = chosen_shader_options(name);
-                    p.with_chosen(chosen)
-                }) {
-                    Ok(pack) => {
-                        let mut macros = Macros::standard();
-                        renderer.define_pack_macros(&mut macros);
-                        let text = pack.read_text("shaders.properties").unwrap_or_default();
-                        // Its conditionals test the pack's options too.
-                        let properties = Properties::parse(
-                            &text,
-                            &horizon_shaders::with_options(&pack, &macros),
-                        );
-                        for note in macros.define_features(&properties) {
-                            log::warn!("shader pack {name}: {note}");
-                        }
-                        for note in &properties.notes {
-                            log::warn!(
-                                "shader pack {name}: shaders.properties:{}: {}",
-                                note.line,
-                                note.message
-                            );
-                        }
-                        let folder = dimension_folder(&pack, dimension);
-                        let inputs = renderer.pack_inputs();
-                        let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
-                        // The pack's `SHADOWS` switch (the potato profile has it off) also
-                        // controls whether its shadow programs run.
-                        if !horizon_shaders::switches_on(&pack).contains("SHADOWS") {
-                            post.shadow_pass = false;
-                            post.shadow = None;
-                            post.shadow_water = None;
-                            post.shadow_entities = None;
-                            post.shadow_block = None;
-                            post.shadow_comp.clear();
-                        }
-                        let biomes = world_biomes!(self);
-                        let names: Vec<&str> =
-                            biomes.list.iter().map(|b| b.name.as_str()).collect();
-                        post.custom.set_biomes(&names);
-                        let text = pack.read_text("block.properties").unwrap_or_default();
-                        let ids = BlockIds::parse(&Properties::parse(&text, &macros));
-                        for note in &ids.notes {
-                            log::warn!("shader pack {name}: block.properties: {note}");
-                        }
-                        let text = pack.read_text("entity.properties");
-                        let entities = BlockIds::parse_kind(
-                            &Properties::parse(text.as_deref().unwrap_or_default(), &macros),
-                            "entity",
-                        );
-                        let text = pack.read_text("item.properties");
-                        let items = BlockIds::parse_kind(
-                            &Properties::parse(text.as_deref().unwrap_or_default(), &macros),
-                            "item",
-                        );
-                        self.pack_ids = Some(PackIds {
-                            items: items.plain(),
-                            missing_item: if text.is_some() { -1 } else { 0 },
-                            // OQ-21: on unless the pack turns it off.
-                            old_hand_light: properties
-                                .get("oldHandLight")
-                                .is_none_or(|v| v.trim() != "false"),
-                            // Off unless the pack turns it on (Iris shades no faces by default).
-                            old_lighting: properties
-                                .get("oldLighting")
-                                .is_some_and(|v| v.trim() == "true"),
-                            entities: entities.plain(),
-                            missing_entity: if text.is_some() { 65535 } else { 0 },
-                            missing_block: if ids.is_empty() { 0 } else { 65535 },
-                            blocks: ids.clone(),
-                            block_states: RefCell::default(),
-                        });
-                        let started_ids = horizon_os::time::Instant::now();
-                        let table = block_id_table(&self.pack, &ids);
-                        log::info!(
-                            "shader pack {name}: mc_Entity for {} of {} block sprites in {} ms",
-                            table.chunks(2).filter(|p| p[0] != -1).count(),
-                            table.len() / 2,
-                            started_ids.elapsed().as_millis()
-                        );
-                        let far_lod = pack
-                            .read_text("program/gbuffers_main.glsl")
-                            .is_some_and(|t| t.contains("encodeNormal") && t.contains("outData1"));
-                        if let Some((programs, notes)) =
-                            renderer.set_shader_pack(dimension, Some(post), &table, far_lod)
-                        {
-                            for note in notes {
-                                log::warn!("shader pack {name}: {note}");
-                            }
-                            log::info!(
-                                "shader pack {name}: folder `{folder}`, {} programs ({}) in {} ms",
-                                programs.len(),
-                                programs.join(" "),
-                                started.elapsed().as_millis()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        self.pack_ids = None;
-                        log::warn!("shader pack {name}: {e}");
-                        renderer.set_shader_pack(dimension, None, &[], false);
-                    }
+            let mut macros = Macros::standard();
+            renderer.define_pack_macros(&mut macros);
+            let inputs = renderer.pack_inputs();
+            let chosen = chosen_shader_options(&name);
+            let biomes = world_biomes!(self)
+                .list
+                .iter()
+                .map(|b| b.name.clone())
+                .collect::<Vec<String>>();
+            match start_pack_translation(&name, path, chosen, dimension, macros, inputs, biomes) {
+                Ok(job) => self.pack_translation = Some(job),
+                Err(e) => {
+                    log::warn!("shader pack {name}: {e}");
+                    self.pack_ids = None;
+                    renderer.set_shader_pack(dimension, None, &[], false);
                 }
-            });
-            if let Err(panic) = loaded {
-                self.shader_pack_failed(name, dimension, &panic);
             }
         }
         let lerp = |(old, new): (f32, f32)| old + (new - old) * partial;
@@ -372,60 +417,69 @@ impl Game<'_> {
             mod_params: self.native_shader_params_now(partial),
         }
     }
-
-    /// Whether `name` is a `shaders/` pack this dimension has not compiled yet: the renderer
-    /// then has no program to draw and the first frame that does pays for the whole translation.
-    fn shader_pack_needs_compile(&self, name: &str) -> bool {
-        let dimension = match self.dim {
-            Dim::Overworld => 0,
-            Dim::Nether => -1,
-            Dim::End => 1,
+    /// Applies the pack the worker finished translating. The translation itself is on a worker,
+    /// so this waits on nothing: the frame asks `pack_translation.is_some()` for its overlay.
+    pub(super) fn drive_pack_translation(&mut self) {
+        let Some(job) = &mut self.pack_translation else {
+            return;
         };
-        let path = Self::shader_packs_dir().join(name);
-        if horizon_shader_api::package::is_pack(&path) {
-            // One of Horizon's own packs: no GLSL to translate.
-            return false;
-        }
-        self.renderer
-            .as_ref()
-            .is_some_and(|r| r.shader_pack_dimension() != Some(dimension))
-    }
-
-    /// Compiles this world's picked shader pack now, so the frame that first draws it does not
-    /// stall: returns the overlay's line when there was one to compile.
-    ///
-    /// The pick is the one `shader_pack_inputs` makes (`active_pack`, then the bundled pack on
-    /// a device with room for it). A pack another dimension already compiled is not translated
-    /// again, and one of Horizon's own `.hshader` packs is not GLSL at all.
-    pub(super) fn compile_pending_shader_pack(&mut self) -> Option<&'static str> {
-        if self.renderer.is_none() || !matches!(self.screen, super::Screen::Playing) {
-            return None;
-        }
-        let Some(picked) = self.picked_shader_pack() else {
-            self.pack_compile_after_overlay = false;
-            return None;
+        let Some(outcome) = job.poll() else {
+            return;
         };
-        if !self.shader_pack_needs_compile(&picked) {
-            self.pack_compile_after_overlay = false;
-            return None;
+        let dimension = job.dimension;
+        self.pack_translation = None;
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        match outcome {
+            Ok(translated) => {
+                let Translated {
+                    folder,
+                    post,
+                    ids,
+                    entities,
+                    items,
+                    items_had_file,
+                    far_lod,
+                    old_hand_light,
+                    old_lighting,
+                    elapsed_ms,
+                } = translated;
+                self.pack_ids = Some(PackIds {
+                    items: items.plain(),
+                    missing_item: if items_had_file { -1 } else { 0 },
+                    old_hand_light,
+                    old_lighting,
+                    entities: entities.plain(),
+                    missing_entity: 65535,
+                    missing_block: if ids.is_empty() { 0 } else { 65535 },
+                    blocks: ids.clone(),
+                    block_states: RefCell::default(),
+                });
+                let table = block_id_table(&self.pack, &ids);
+                if let Some((programs, notes)) =
+                    renderer.set_shader_pack(dimension, Some(post), &table, far_lod)
+                {
+                    for note in notes {
+                        log::warn!("shader pack: {note}");
+                    }
+                    log::info!(
+                        "shader pack: folder `{folder}`, {} programs ({}) translated on a worker in {elapsed_ms} ms",
+                        programs.len(),
+                        programs.join(" ")
+                    );
+                }
+            }
+            Err(e) => {
+                self.pack_ids = None;
+                log::warn!("shader pack: {e}");
+                // The translation is deterministic, so retrying it fails the same way: without
+                // this the guard's `shader_pack_dimension` stays unset, and every frame would
+                // spawn a worker behind a permanent overlay.
+                self.pack_failed = Some(dimension);
+                renderer.set_shader_pack(dimension, None, &[], false);
+            }
         }
-        // The frame before compiles nothing: it puts the overlay up and is presented, so the
-        // pause below happens on a screen that says it is loading rather than on a frozen one.
-        if !self.pack_compile_after_overlay {
-            self.pack_compile_after_overlay = true;
-            return Some("Compiling the shader pack");
-        }
-        // The same call a frame makes; the uniforms it returns are this frame's, recomputed by
-        // the next one.
-        let started = horizon_os::time::Instant::now();
-        let at = glam::DVec3::from_array(self.view.eye);
-        let _ = self.shader_pack_inputs(at, 0.0);
-        log::info!(
-            "shader pack {picked}: compiled for this world in {} ms, under the loading overlay",
-            started.elapsed().as_millis()
-        );
-        self.pack_compile_after_overlay = false;
-        Some("Compiling the shader pack")
     }
 
     /// The pack `shader_pack_inputs` picks this frame: what the player chose, else the bundled

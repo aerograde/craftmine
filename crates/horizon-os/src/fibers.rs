@@ -142,6 +142,8 @@ const GREEN: &[&str] = &[
     // Loads the world tables the title waits behind: on the page's own thread
     // it was a many-second freeze before the first frame.
     "world-rest-loader",
+    // A shader pack's GLSL translation: seconds of CPU that must stay off the frame thread.
+    "Shader pack translation",
     // Play Nearby: the service loop, one thread per MQTT broker, and the guest,
     // host, LAN and pump threads of a session. Without these the service
     // silently stayed off in the browser (`Service::start` reported a disabled
@@ -241,7 +243,10 @@ impl<T> JoinHandle<T> {
         }
     }
     pub fn is_finished(&self) -> bool {
-        self.result.lock().is_ok_and(|result| result.is_some())
+        // `lock`, not `lock()`: a green thread may hold this while the page asks, and std's
+        // own wait traps there ("Atomics.wait cannot be called in this context") — winit then
+        // swallows it and the frame loop stops with no message.
+        crate::sync::lock(&self.result).is_ok_and(|result| result.is_some())
     }
     pub fn thread(&self) -> &Thread {
         &self.thread

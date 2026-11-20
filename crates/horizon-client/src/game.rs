@@ -2113,10 +2113,11 @@ struct Game<'a> {
     /// Single player's server while it loads its world (`Minecraft.doWorldLoad`).
     integrated_starting: Option<integrated::Starting>,
     world_renderer_ready: bool,
-    /// The frame before a shader pack's first compile: it shows the loading overlay, which is
-    /// then the last presented picture while the compile blocks. See
-    /// `Game::compile_pending_shader_pack`.
-    pack_compile_after_overlay: bool,
+    /// A pack's programs being translated on a worker; the frame shows the loading overlay while
+    /// one is. The translation is off this thread, so waiting on it costs nothing.
+    pack_translation: Option<shader_packs::PackTranslation>,
+    /// A dimension whose pack failed to translate, so it is not retried every frame.
+    pack_failed: Option<i32>,
     collision: &'a BlockCollisionRegistry<'a>,
     motion: &'a MotionResources,
     /// This game's resource packs (`reload_packs` replaces them).
@@ -14626,16 +14627,20 @@ impl Game<'_> {
             }
             return Ok(false);
         }
-        // The frame that first draws a newly picked shader pack compiles it, which takes
-        // seconds: cover that with the loading overlay rather than freezing a live frame under
-        // the player. Nothing to compile is the usual case, and cheap to tell.
-        if let Some(line) = self.compile_pending_shader_pack() {
+        // A pack's programs are translated on a worker, which takes seconds: the world under
+        // the player comes back when they land, so the overlay covers the wait.
+        // `shader_pack_inputs` applies what landed, so this only asks whether to cover the
+        // frame — and polls first, or the early return would never collect the worker's result.
+        if self.pack_translation.is_some() {
+            self.drive_pack_translation();
+        }
+        if self.pack_translation.is_some() {
             if let Some(renderer) = &mut self.renderer {
                 let mut hud = HudBatch::new([renderer.config.width, renderer.config.height]);
                 horizon_client::level_loading::draw_loading_overlay(
                     &mut hud,
                     &self.gui.atlas,
-                    line,
+                    "Compiling the shader pack",
                     1.0,
                     self.settings.file.bool("darkMojangStudiosBackground"),
                 );
@@ -17656,7 +17661,8 @@ impl<'a> Game<'a> {
             dialogs: Default::default(),
             integrated_starting: None,
             world_renderer_ready: false,
-            pack_compile_after_overlay: false,
+            pack_translation: None,
+            pack_failed: None,
             collision: res.collision(),
             motion: res.motion(),
             pack,
