@@ -18939,8 +18939,11 @@ fn load_resources(
     // The block entity renderer's face visibility: the meshes' own, whose
     // shapes already hold their faces, not a second load of the same tables.
     let visibility = pack.context.tables.visibility.clone();
-    // The page has no thread for it: the rest loads now, as without a menu.
-    let rest_loader = if menu && cfg!(not(target_arch = "wasm32")) {
+    // Loaded on its own thread while the title stays usable. The page runs it
+    // as a green thread (`horizon-os`'s fibers), which is safe here because
+    // `WorldRestLoader::ready` only polls `is_finished` and `finish` joins
+    // after that.
+    let rest_loader = if menu {
         let resources = resources.clone();
         let root = root.clone();
         let rest_progress = progress.clone();

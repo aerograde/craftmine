@@ -139,6 +139,9 @@ const GREEN: &[&str] = &[
     "World data preload",
     "Server data preload",
     "Loot preload",
+    // Loads the world tables the title waits behind: on the page's own thread
+    // it was a many-second freeze before the first frame.
+    "world-rest-loader",
     // Play Nearby: the service loop, one thread per MQTT broker, and the guest,
     // host, LAN and pump threads of a session. Without these the service
     // silently stayed off in the browser (`Service::start` reported a disabled
