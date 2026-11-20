@@ -178,6 +178,25 @@ const RESULTS_USAGE: wgpu::BufferUsages =
 const READBACK_USAGE: wgpu::BufferUsages =
     wgpu::BufferUsages::MAP_READ.union(wgpu::BufferUsages::COPY_DST);
 
+/// Where `backend` runs the test, given what its device supports. A browser's
+/// GPU is usually weak, and drawing every section of every visible chunk —
+/// hidden ones included — is what makes the frame long enough that the driver
+/// resets the context, which the page shows as a black screen until it is
+/// refreshed. WebGPU takes `InShader`, which reads the depth as a texture in a
+/// pass of its own and needs no early-depth feature.
+fn depth_test_for(
+    backend: wgpu::Backend,
+    supports: impl Fn(wgpu::Features) -> bool,
+) -> Option<DepthTest> {
+    match backend {
+        wgpu::Backend::Vulkan if supports(wgpu::Features::SHADER_EARLY_DEPTH_TEST) => {
+            Some(DepthTest::Early)
+        }
+        wgpu::Backend::Metal | wgpu::Backend::BrowserWebGpu => Some(DepthTest::InShader),
+        _ => None,
+    }
+}
+
 impl Cull {
     /// The device feature culling needs, where the adapter has it.
     pub fn features(adapter: &wgpu::Adapter) -> wgpu::Features {
@@ -188,17 +207,9 @@ impl Cull {
     /// with the instance counts the GPU wrote, with fragment shaders that
     /// write storage.
     pub fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Option<DepthTest> {
-        let depth_test = match adapter.get_info().backend {
-            wgpu::Backend::Vulkan
-                if device
-                    .features()
-                    .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST) =>
-            {
-                DepthTest::Early
-            }
-            wgpu::Backend::Metal => DepthTest::InShader,
-            _ => return None,
-        };
+        let depth_test = depth_test_for(adapter.get_info().backend, |f| {
+            device.features().contains(f)
+        })?;
         (device
             .features()
             .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
@@ -666,5 +677,34 @@ mod tests {
                 .validate(&module)
                 .unwrap_or_else(|e| panic!("{depth_test:?}: {e:?}"));
         }
+    }
+
+    /// The browser culls like Metal, and a ChromeOS device's GPU has no
+    /// early-depth feature to offer. Before this, a browser drew every section
+    /// of every visible chunk — hidden ones included — which made the frame
+    /// long enough that the driver reset the context, and the page showed a
+    /// black screen until it was refreshed.
+    #[test]
+    fn a_browser_culls_where_a_native_device_does() {
+        let all = |_| true;
+        let none = |_| false;
+        assert_eq!(
+            depth_test_for(wgpu::Backend::BrowserWebGpu, all),
+            Some(DepthTest::InShader),
+            "the browser's WebGPU runs the test in its shader"
+        );
+        // It needs no early-depth feature: the InShader test reads the depth
+        // as a texture, so a device without one still culls.
+        assert_eq!(
+            depth_test_for(wgpu::Backend::BrowserWebGpu, none),
+            Some(DepthTest::InShader),
+            "a browser device without early depth tests still culls"
+        );
+        assert_eq!(
+            depth_test_for(wgpu::Backend::Vulkan, all),
+            Some(DepthTest::Early)
+        );
+        // Vulkan without early depth tests does not cull: its path needs them.
+        assert_eq!(depth_test_for(wgpu::Backend::Vulkan, none), None);
     }
 }

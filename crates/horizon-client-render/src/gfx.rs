@@ -5114,11 +5114,10 @@ impl Renderer {
         // `shadowProjection` has nothing to match, which shades in hard stepped bands. So a pack
         // without a terrain or shadow stage keeps the built-in lighting and shadow map; one with
         // its own takes over both (`other_shadow_view` below).
-        let pack_lights = self
-            .pack_post
-            .as_ref()
-            .is_some_and(|p| p.1.as_ref().is_some_and(|p| p.has_terrain() || p.has_shadow()))
-            || self.native.as_ref().is_some_and(|n| n.post.is_some());
+        let pack_lights = self.pack_post.as_ref().is_some_and(|p| {
+            p.1.as_ref()
+                .is_some_and(|p| p.has_terrain() || p.has_shadow())
+        }) || self.native.as_ref().is_some_and(|n| n.post.is_some());
         let builtin_visuals = frame.visual[0] > 0.0 && !pack_lights;
         // A pack's own shadow stage takes the draw list when it has one; the
         // built-in near cascade only runs otherwise.
