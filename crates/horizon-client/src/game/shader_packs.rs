@@ -34,8 +34,7 @@ const UNKNOWN: u8 = 2;
 fn bundled_pack_exists() -> bool {
     match BUNDLED_EXISTS.load(std::sync::atomic::Ordering::Relaxed) {
         UNKNOWN => {
-            let exists =
-                u8::from(Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists());
+            let exists = u8::from(Game::shader_packs_dir().join(BUNDLED_PACK).fs_exists());
             BUNDLED_EXISTS.store(exists, std::sync::atomic::Ordering::Relaxed);
             exists == 1
         }
@@ -372,6 +371,74 @@ impl Game<'_> {
             held_light,
             mod_params: self.native_shader_params_now(partial),
         }
+    }
+
+    /// Whether `name` is a `shaders/` pack this dimension has not compiled yet: the renderer
+    /// then has no program to draw and the first frame that does pays for the whole translation.
+    fn shader_pack_needs_compile(&self, name: &str) -> bool {
+        let dimension = match self.dim {
+            Dim::Overworld => 0,
+            Dim::Nether => -1,
+            Dim::End => 1,
+        };
+        let path = Self::shader_packs_dir().join(name);
+        if horizon_shader_api::package::is_pack(&path) {
+            // One of Horizon's own packs: no GLSL to translate.
+            return false;
+        }
+        self.renderer
+            .as_ref()
+            .is_some_and(|r| r.shader_pack_dimension() != Some(dimension))
+    }
+
+    /// Compiles this world's picked shader pack now, so the frame that first draws it does not
+    /// stall: returns the overlay's line when there was one to compile.
+    ///
+    /// The pick is the one `shader_pack_inputs` makes (`active_pack`, then the bundled pack on
+    /// a device with room for it). A pack another dimension already compiled is not translated
+    /// again, and one of Horizon's own `.hshader` packs is not GLSL at all.
+    pub(super) fn compile_pending_shader_pack(&mut self) -> Option<&'static str> {
+        if self.renderer.is_none() || !matches!(self.screen, super::Screen::Playing) {
+            return None;
+        }
+        let Some(picked) = self.picked_shader_pack() else {
+            self.pack_compile_after_overlay = false;
+            return None;
+        };
+        if !self.shader_pack_needs_compile(&picked) {
+            self.pack_compile_after_overlay = false;
+            return None;
+        }
+        // The frame before compiles nothing: it puts the overlay up and is presented, so the
+        // pause below happens on a screen that says it is loading rather than on a frozen one.
+        if !self.pack_compile_after_overlay {
+            self.pack_compile_after_overlay = true;
+            return Some("Compiling the shader pack");
+        }
+        // The same call a frame makes; the uniforms it returns are this frame's, recomputed by
+        // the next one.
+        let started = horizon_os::time::Instant::now();
+        let at = glam::DVec3::from_array(self.view.eye);
+        let _ = self.shader_pack_inputs(at, 0.0);
+        log::info!(
+            "shader pack {picked}: compiled for this world in {} ms, under the loading overlay",
+            started.elapsed().as_millis()
+        );
+        self.pack_compile_after_overlay = false;
+        Some("Compiling the shader pack")
+    }
+
+    /// The pack `shader_pack_inputs` picks this frame: what the player chose, else the bundled
+    /// one on a device with room for it. `None`: no pack.
+    fn picked_shader_pack(&self) -> Option<String> {
+        static DEV_PACK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let dev = DEV_PACK.get_or_init(|| std::env::var("HORIZON_SHADER_PACK").ok());
+        let configured = dev.as_deref().unwrap_or(&self.settings.horizon.shader_pack);
+        let mut picked = active_pack(configured, &self.settings.mods).to_owned();
+        if dev.is_none() && picked.is_empty() && bundled_pack_exists() && !too_small_for_pack() {
+            picked = BUNDLED_PACK.to_owned();
+        }
+        (!picked.is_empty()).then_some(picked)
     }
 
     /// The Shader Options page opened: the picked pack's options, screens and names.

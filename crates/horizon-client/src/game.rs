@@ -2113,6 +2113,10 @@ struct Game<'a> {
     /// Single player's server while it loads its world (`Minecraft.doWorldLoad`).
     integrated_starting: Option<integrated::Starting>,
     world_renderer_ready: bool,
+    /// The frame before a shader pack's first compile: it shows the loading overlay, which is
+    /// then the last presented picture while the compile blocks. See
+    /// `Game::compile_pending_shader_pack`.
+    pack_compile_after_overlay: bool,
     collision: &'a BlockCollisionRegistry<'a>,
     motion: &'a MotionResources,
     /// This game's resource packs (`reload_packs` replaces them).
@@ -14622,6 +14626,23 @@ impl Game<'_> {
             }
             return Ok(false);
         }
+        // The frame that first draws a newly picked shader pack compiles it, which takes
+        // seconds: cover that with the loading overlay rather than freezing a live frame under
+        // the player. Nothing to compile is the usual case, and cheap to tell.
+        if let Some(line) = self.compile_pending_shader_pack() {
+            if let Some(renderer) = &mut self.renderer {
+                let mut hud = HudBatch::new([renderer.config.width, renderer.config.height]);
+                horizon_client::level_loading::draw_loading_overlay(
+                    &mut hud,
+                    &self.gui.atlas,
+                    line,
+                    1.0,
+                    self.settings.file.bool("darkMojangStudiosBackground"),
+                );
+                return renderer.render(&loading_frame(&hud));
+            }
+            return Ok(false);
+        }
         // A pack reload covers the frame with its progress
         // (`LoadingOverlay`) until `drive_pack_reload` applies it.
         if let Some(reload) = &self.pack_reload {
@@ -15136,7 +15157,11 @@ impl Game<'_> {
         };
         let result = match self.renderer.as_mut() {
             Some(renderer) => {
-                renderer.set_pass_timing(self.debug);
+                // `HORIZON_SHADER_PACK_TIMING` is a start-up request from the environment and
+                // outlives the overlay: closing F3 must not stop the log it asked for.
+                renderer.set_pass_timing(
+                    self.debug || horizon_client::gfx::Renderer::pass_timing_logged(),
+                );
                 horizon_client::spans::time("renderer", || renderer.render(&frame))
             }
             None => Err("renderer".into()),
@@ -17631,6 +17656,7 @@ impl<'a> Game<'a> {
             dialogs: Default::default(),
             integrated_starting: None,
             world_renderer_ready: false,
+            pack_compile_after_overlay: false,
             collision: res.collision(),
             motion: res.motion(),
             pack,

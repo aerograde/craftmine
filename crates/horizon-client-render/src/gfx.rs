@@ -4690,6 +4690,11 @@ impl Renderer {
     pub fn set_pass_timing(&mut self, on: bool) {
         self.pass_timing = on || pack_timing::PassTiming::logging();
     }
+    /// Whether `HORIZON_SHADER_PACK_TIMING` asked for the passes' times in the log, which the
+    /// F3 overlay's own switch must not turn off: it is set once by the environment.
+    pub fn pass_timing_logged() -> bool {
+        pack_timing::PassTiming::logging()
+    }
     /// The running shader pack's timer, of either kind.
     fn pass_timer<'a>(
         pack: &'a mut Option<(i32, Option<pack_post::PackPost>)>,
