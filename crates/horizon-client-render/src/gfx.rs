@@ -1538,7 +1538,15 @@ const NO_GPU_DRIVER: &str = "No Vulkan or OpenGL graphics driver found: Horizon 
 /// only sign of where the game stopped. The log file is written unbuffered;
 /// the flush is for loggers that buffer.
 fn startup_step(step: std::fmt::Arguments) {
-    log::info!("Horizon renderer: {step}");
+    // The time since the first step, so a slow start says which one it was.
+    // A browser's device request and its shader compilation are the two that
+    // take seconds there.
+    static START: std::sync::OnceLock<horizon_os::time::Instant> = std::sync::OnceLock::new();
+    let at = START.get_or_init(horizon_os::time::Instant::now);
+    log::info!(
+        "Horizon renderer: {step} (+{} ms)",
+        at.elapsed().as_millis()
+    );
     log::logger().flush();
 }
 /// How far the first frame on a new device got, for `startup_step`.
