@@ -73,7 +73,10 @@ jobs:
           python3 web/package.py folder --no-build
           touch web/out/horizon-web/.nojekyll
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      # v3 uploads through the legacy artifact backend, which `deploy-pages@v4` cannot see: the
+      # artifact is uploaded (the run lists `github-pages`, 68 MB) and the deploy still reports
+      # "Found 0 artifact(s)". Both must be the v4 API.
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: web/out/horizon-web
       - id: deployment
