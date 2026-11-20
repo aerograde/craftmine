@@ -4996,6 +4996,13 @@ impl Renderer {
         if self.suspended {
             return Ok(false);
         }
+        // A device lost mid-world (a Chromebook's driver reclaiming memory under pressure) used
+        // to fall through to the acquire below and fail every frame silently: the canvas kept its
+        // last presented image, which reads as a black screen that only a refresh clears. Report
+        // it so the caller can rebuild; the loop above reconfigures the surface either way.
+        if self.device_lost.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("the graphics device was lost".into());
+        }
         let started = Instant::now();
         if self.first_frame == FirstFrame::Acquire {
             // Once: a minimized window acquires nothing for a while.

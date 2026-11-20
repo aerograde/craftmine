@@ -15141,6 +15141,17 @@ impl Game<'_> {
             }
             None => Err("renderer".into()),
         };
+        // A lost device is not a frame that failed: it is the end of the old one. The wgpu device,
+        // its queues and every texture built on them are gone, so every later frame failed the same
+        // way and the canvas kept its last presented image — the black screen that only a refresh
+        // cleared on the Chromebook. Rebuild from scratch, keeping the window and resources.
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.to_string().contains("device was lost"))
+        {
+            self.rebuild_renderer_after_device_loss();
+        }
         // Restore storage even when rendering fails (for example, a lost surface).
         self.entity_vertices = entities;
         *self.entity_spans.get_mut() = entity_spans;
@@ -15151,6 +15162,30 @@ impl Game<'_> {
         self.hand_vertices = hand;
         self.celestial_vertices = celestial;
         result
+    }
+    /// Rebuilds the renderer after the graphics device was lost, so the game keeps drawing
+    /// instead of presenting its last frame for ever. The window, resources and settings are
+    /// already here; only the device's objects are gone, and `build_renderer` makes them again
+    /// (`previous` carries what survives, such as the pipeline cache).
+    fn rebuild_renderer_after_device_loss(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        log::warn!("Horizon: the graphics device was lost, rebuilding the renderer");
+        // The old renderer's surface belongs to the dead device, so hand the window back first.
+        if let Some(renderer) = &mut self.renderer {
+            renderer.release_surface();
+        }
+        match self.new_renderer(window) {
+            Ok(renderer) => {
+                self.renderer = Some(renderer);
+                // A new renderer has none of the old one's state: sizes, the pack's programs.
+                self.apply_ui_settings();
+                self.all_sections_changed();
+                log::info!("Horizon: the renderer is back after the lost device");
+            }
+            Err(e) => log::error!("Horizon: the renderer did not come back: {e}"),
+        }
     }
     /// The frame shows the title's panorama, not a level: the title screen, or a
     /// LevelLoadingScreen (Reason.OTHER), which draws it too.
