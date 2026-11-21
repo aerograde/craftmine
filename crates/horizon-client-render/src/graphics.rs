@@ -1404,6 +1404,17 @@ mod tests {
         for text in ["farDetail:full\n", "farDetail:other\n", ""] {
             assert_eq!(Graphics::parse(text).far_detail, FarDetail::Full);
         }
+        // A saved file's values are its own: only `apply_preset` decides what a preset means,
+        // and the values a preset used to write are left exactly as written.
+        for text in [
+            "preset:performance\nlodInfinite:false\nfarDetail:reduced\n",
+            "preset:custom\nlodInfinite:false\nfarDetail:reduced\n",
+        ] {
+            let g = Graphics::parse(text);
+            assert!(!g.lod_infinite);
+            assert_eq!(g.far_detail, FarDetail::Reduced);
+        }
+
         // A preset never coarsens the far cells or drops the horizon: `Reduced` measured only
         // 20-33% cheaper a tile, and infinite terrain's plan is the same node count at any reach.
         for preset in Preset::ALL {
