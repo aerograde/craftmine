@@ -528,6 +528,11 @@ pub struct Renderer {
     /// this one on the same device: reused, not created again, as a new
     /// surface for the window can come back lost (Wayland on Mesa).
     spare_surface: std::sync::Mutex<Option<wgpu::Surface<'static>>>,
+    /// The tier the near shadow map was **allocated** at, from the adapter class. Its resolution
+    /// cannot change once built, so the per-frame projection is planned from this and not from
+    /// `Frame::visual_tier`: a pack that owns post forces that to `Low`, and a 512 reach over a
+    /// 1024 map samples texels the terrain pass never wrote.
+    shadow_quality: crate::graphics::VisualQuality,
     /// The offscreen colour target, sized like `config`.
     offscreen: Option<wgpu::Texture>,
     /// Offscreen submissions still on the GPU: at most two frames run ahead.
@@ -3421,6 +3426,7 @@ impl Renderer {
             adapter,
             surface,
             spare_surface: std::sync::Mutex::new(None),
+            shadow_quality,
             offscreen,
             in_flight: std::collections::VecDeque::new(),
             paced_elsewhere: false,
@@ -5147,22 +5153,15 @@ impl Renderer {
             });
         // The sun shadow map is a second terrain pass: worth it on a discrete
         // or Apple GPU, not on the integrated path the Low tier exists for.
-        let visual_tier = if builtin_visuals {
-            frame.visual_tier
-        } else {
-            crate::graphics::VisualQuality::Low
-        };
         // The player's tier, not only the adapter's, decides the reach and the
         // filter: pinning High on an integrated GPU used to keep the near,
         // single-tap map, and pinning Medium on a discrete one kept High's.
         //
-        // A pack that owns post still samples this map, so it must be planned at the tier the map
-        // was allocated for (`shadow_quality`), not at the `Low` the pack's grade forces: a 512
-        // reach over a 1024 map put every lookup on texels the terrain pass never wrote, which is
-        // the stepped banding.
+        // A pack that owns post still samples this map, so it is planned at the tier the map was
+        // allocated for, never at a `Low` the pack's grade forced: a 512 reach over a 1024 map put
+        // every lookup on texels the terrain pass never wrote, which is the stepped banding.
         let mut shadow_settings = self.visual_shadow_settings.clone();
-        let shadow_plan =
-            crate::visual::Tier::from_quality(crate::graphics::auto_visual_quality()).shadow();
+        let shadow_plan = crate::visual::Tier::from_quality(self.shadow_quality).shadow();
         let visual_taps = shadow_plan.taps;
         shadow_settings.distance = if shadow_plan.resolution == 0 {
             128.0

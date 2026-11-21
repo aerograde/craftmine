@@ -2073,8 +2073,12 @@ impl Lod {
         });
         self.camera_at = Some(camera);
         if jumped {
+            // Drop the queued samples but keep their keys in `pending`: those jobs' slots are
+            // still occupied by threads that will deliver, and clearing the set let
+            // `request_samples` admit a new view's tiles on top of them while `receive` applied
+            // results for tiles it no longer tracked. A sample that lands is dropped by `receive`
+            // when its tile has left the plan, so a stale key here costs only its wait.
             lock(&self.shared.jobs).retain(|job| !matches!(job, Job::Sample(_)));
-            self.pending.clear();
             self.wanted_stale = true;
         }
         // Replan at chunk boundaries, not on every camera movement.
