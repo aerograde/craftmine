@@ -1763,15 +1763,10 @@ mod tests {
         let item = Item::Horizon(H::LodDistance);
         let infinite = Item::Horizon(H::LodInfinite);
         let near = s.render_distance;
-        // The default is a bounded horizon: 96 chunks, not infinite.
-        assert_eq!(
-            item.label(&s).plain(),
-            format!(
-                "LOD Distance: {} chunks",
-                crate::graphics::DEFAULT_LOD_DISTANCE
-            )
-        );
-        assert_eq!(infinite.label(&s).plain(), "Infinite Terrain: Off");
+        // The default is the wide horizon; the finite slider is what turning it
+        // off hands back.
+        assert_eq!(item.label(&s).plain(), "LOD Distance: Infinite");
+        assert_eq!(infinite.label(&s).plain(), "Infinite Terrain: On");
         // 96 sits between the 64 and 128 stops, and the slider shows the stop it
         // rounds up to (the same rule a hand-edited file takes).
         assert_eq!(item.slider(&s), Some(2.0 / 17.0));

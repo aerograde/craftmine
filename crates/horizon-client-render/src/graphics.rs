@@ -590,13 +590,14 @@ impl Default for Graphics {
             visuals: true,
             visual_quality: VisualQuality::Auto,
             lod_distance: DEFAULT_LOD_DISTANCE,
-            // Far terrain is a *fallback* horizon, not a second world: past
-            // `DEFAULT_LOD_DISTANCE` chunks the cells are wider than a block and
-            // read as ridges rather than as the ground. A bounded distance keeps
-            // every cell inside the rings that still hold detail, which is what
-            // the default is for; `lod_infinite` stays available for a horizon
-            // that never ends.
-            lod_infinite: false,
+            // The horizon reaches 4096 chunks (65,536 blocks). Its plan is
+            // camera-centred and its cells grow in fixed steps, so replanning
+            // costs a few hundred microseconds and the tile count is a quarter
+            // more than the bounded horizon's, not forty times. The far rings
+            // used to read as one flat quad per cell, which is what the bounded
+            // default was waiting for; each cell's top is a step now
+            // (`lod::mesh`), so the horizon holds shape.
+            lod_infinite: true,
             // Full detail everywhere it fits. `Reduced` is a visible change
             // (coarser far cells), so it is only the 4 GB devices': there the
             // choice is that or the browser killing the tab. An 8 GB machine
@@ -1188,22 +1189,23 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_install_draws_a_bounded_lod_horizon() {
-        // The default used to be infinite: a horizon to 4096 chunks, whose last
-        // rings are 8192-block cells drawn as one flat quad each — the soft blob
-        // at the edge of the world. 96 chunks keeps the coarsest roots inside
-        // the rings that still carry shape.
+    fn a_fresh_install_draws_the_wide_lod_horizon() {
+        // The horizon reaches 4096 chunks (65,536 blocks) out of the box. Its
+        // plan is camera-centred and its cells grow in fixed steps, so the tile
+        // count is a quarter more than a 96-chunk horizon's at any distance,
+        // and each cell's top is a step rather than the one flat quad per
+        // 8192-block cell that made the far edge a soft blob (`lod::mesh`).
         let g = Graphics::default();
         assert_eq!(g.lod_distance, DEFAULT_LOD_DISTANCE);
         assert_eq!(DEFAULT_LOD_DISTANCE, 96);
-        assert!(!g.lod_infinite, "the default horizon is bounded");
+        assert!(g.lod_infinite, "the default horizon is the wide one");
         assert!(
             DEFAULT_LOD_DISTANCE <= 128,
             "an integrated GPU's cap must not lower the default"
         );
-        // Infinite is still reachable, and still what an explicit choice gets.
-        let endless = Graphics {
-            lod_infinite: true,
+        // The finite slider is what a player gets by turning it off.
+        let bounded = Graphics {
+            lod_infinite: false,
             ..Graphics::default()
         };
         let discrete = wgpu::AdapterInfo {
@@ -1220,12 +1222,8 @@ mod tests {
             transient_saves_memory: None,
             limit_bucket: None,
         };
-        assert_eq!(
-            endless.lod_distance_on(&discrete),
-            crate::lod::INFINITE_CHUNKS
-        );
-        // The bounded default is what a discrete GPU is actually asked for.
-        assert_eq!(g.lod_distance_on(&discrete), DEFAULT_LOD_DISTANCE);
+        assert_eq!(g.lod_distance_on(&discrete), crate::lod::INFINITE_CHUNKS);
+        assert_eq!(bounded.lod_distance_on(&discrete), DEFAULT_LOD_DISTANCE);
     }
 
     #[test]
@@ -1288,16 +1286,12 @@ mod tests {
             limit_bucket: None,
         };
         let g = Graphics::default();
-        // The default is a bounded horizon now: infinite reaches 8192-block
-        // cells, whose last rings are one flat quad each — the soft blob.
-        assert!(!g.lod_infinite);
-        assert_eq!(g.lod_distance, DEFAULT_LOD_DISTANCE);
-        assert_eq!(g.lod_distance_on(&hd620), DEFAULT_LOD_DISTANCE);
-        // Infinite is still what an explicit choice gets, with no distance cap.
-        let on = Graphics::parse("lodInfinite:true\n");
-        assert!(on.lod_infinite);
-        assert_eq!(on.lod_distance_on(&hd620), crate::lod::INFINITE_CHUNKS);
-        // Explicit Off persists, and the finite slider returns.
+        // The default horizon is the wide one: its plan is camera-centred and
+        // its cells grow in fixed steps, so it costs a quarter more tiles than
+        // the bounded one at any distance, on every adapter.
+        assert!(g.lod_infinite);
+        assert_eq!(g.lod_distance_on(&hd620), crate::lod::INFINITE_CHUNKS);
+        // The slider still returns when a player turns it off.
         let off = Graphics::parse("lodInfinite:false\nlodDistance:256\n");
         assert!(!off.lod_infinite);
         assert_eq!(off.lod_distance_on(&hd620), INTEGRATED_LOD_DISTANCE);
