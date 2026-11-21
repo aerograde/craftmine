@@ -50,32 +50,50 @@ const SAMPLE_JOBS: usize = 4;
 /// Threads that sample far tiles beside the mesher. Sampling is the cold-load
 /// bottleneck (each task evaluates a shared density lattice for 256 columns),
 /// so medium machines use half their cores, not a quarter.
+///
+/// Every one is a Web Worker in the browser, and the page's frame, its chunk pool and the server
+/// pool each want a core: a 6-core Chromebook was running 4 sample workers, 2 mesh workers and
+/// those three, so nine threads on six cores. The frame thread then waited for a core while no
+/// game code was running at all — a 100 ms `requestAnimationFrame` stall the profiler reported as
+/// zero slow frames — which is the "laggy, and worse when it fills in". The pools below share what
+/// is left after those three.
 fn sampling_threads(cores: usize) -> usize {
     let threads = if cores >= 8 {
         (cores / 2).min(8)
     } else {
         (cores / 2).clamp(1, 3)
     };
-    // Every one is a Web Worker in the browser: leave the page's frame, the
-    // chunk pool and the server a core each on small machines, but use what a
-    // larger one can spare so the horizon fills in seconds rather than minutes.
-    if cfg!(target_arch = "wasm32") {
-        threads.min(if cores >= 8 { 4 } else { 3 })
-    } else {
-        threads
-    }
+    // The mesher keeps one worker whatever this says (`meshing_threads`), so sampling takes
+    // strictly what is left of the budget above it: never more than that. Native runs the same
+    // pools, and a frame thread starved of a core is a stall on either.
+    let spare = worker_budget(cores).saturating_sub(1);
+    threads
+        .min(spare.max(1))
+        .min(if cores >= 8 { 4 } else { 3 })
+}
+/// Far-terrain workers this machine may run at once.
+///
+/// The page's frame, its chunk pool and the server pool each want a core, so the far pools split
+/// what is left. Without this the frame thread waited for a core while no game code was running —
+/// a 100 ms `requestAnimationFrame` stall an eight-core Chromebook saw as "laggy, and worse when
+/// it fills in", with the profiler reporting zero slow frames. Two cores are reserved rather than
+/// three on a machine with four or fewer, where three would leave the far rings a single worker.
+fn worker_budget(cores: usize) -> usize {
+    let reserved = if cores <= 4 { 2 } else { 3 };
+    cores.saturating_sub(reserved).max(1)
 }
 /// Tile meshing used to be one worker with a whole selection batch at a time.
-/// It now has its own pool, sized so ticks and the frame keep a core.
+/// It now has its own pool, sized out of what sampling left of `worker_budget`.
 fn meshing_threads(cores: usize) -> usize {
-    let threads = cores
-        .saturating_sub(sampling_threads(cores) + 1)
-        .clamp(1, 16);
-    if cfg!(target_arch = "wasm32") {
-        threads.min(2)
-    } else {
-        threads
-    }
+    // At least one, always: `dispatch_meshes` gates on `outstanding_meshes >= mesh_workers * 4`,
+    // so a zero-worker pool would queue nothing and no far tile would ever reach the screen.
+    //
+    // Two, even where the budget could spare more: a mesh is a few hundred microseconds and the
+    // pool dispatches coalesced batches, so past a second worker the third only competes with the
+    // sampler for the same cores.
+    worker_budget(cores)
+        .saturating_sub(sampling_threads(cores))
+        .clamp(1, 2)
 }
 /// While the near terrain loads on a machine with four threads or fewer, far
 /// terrain starts one sample job at most this often and no detail: it would
@@ -1464,7 +1482,10 @@ impl Lod {
             detail_request_pending: false,
             detail_request_at: horizon_os::time::Instant::now(),
             small: cores <= 4,
-            sample_jobs: SAMPLE_JOBS.max(sampling_threads(cores) + 1),
+            // One job a worker, plus one so a finished tile is replaced without a gap. The old
+            // floor of four admitted four jobs on a two-worker pool, so two tiles sat queued behind
+            // running ones and the nearest ring waited behind a tile nobody was drawing yet.
+            sample_jobs: SAMPLE_JOBS.min(sampling_threads(cores) + 1).max(1),
             near_loading: false,
             held_sample_at: horizon_os::time::Instant::now(),
             ready: FxHashMap::default(),
@@ -2965,6 +2986,37 @@ fn retiring_detail<'a>(
 mod tests {
     use super::*;
     use crate::mesher::TerrainVertex;
+
+    /// The far pools plus the page's own three threads must fit the machine. A 6-core Chromebook
+    /// ran four sample workers, two mesh workers, the frame, the chunk pool and the server: nine
+    /// threads on six cores. The frame thread then waited for a core while no game code ran at all,
+    /// which is a 100 ms `requestAnimationFrame` stall and reads as "laggy".
+    #[test]
+    fn the_far_pools_fit_the_machine() {
+        for cores in 2..=16 {
+            let far = sampling_threads(cores) + meshing_threads(cores);
+            // The far pools share `worker_budget`, which is what is left after the frame, the chunk
+            // pool and the server. A two-core machine has nothing left below its floor of one
+            // sampler and one mesher, so it may exceed the budget by exactly that floor.
+            let floor = 2;
+            assert!(
+                far <= worker_budget(cores).max(floor),
+                "{cores} cores: {far} far workers against a budget of {}",
+                worker_budget(cores)
+            );
+            assert!(
+                meshing_threads(cores) >= 1,
+                "{cores} cores stranded the mesher"
+            );
+            assert!(
+                sampling_threads(cores) >= 1,
+                "{cores} cores lost the sampler"
+            );
+        }
+        // A six-core machine is the one that was over budget: exactly its budget now.
+        assert_eq!(sampling_threads(6) + meshing_threads(6), worker_budget(6));
+    }
+
     #[test]
     fn retiring_fine_stand_ins_request_detail_before_their_gpu_meshes_can_retire() {
         let column = (12, 0);
@@ -4162,9 +4214,12 @@ mod tests {
 
     #[test]
     fn extra_sampling_threads_only_on_large_machines() {
-        assert_eq!([1, 2, 4, 8, 11].map(sampling_threads), [1, 1, 2, 4, 5]);
-        assert_eq!([12, 16, 64].map(sampling_threads), [6, 8, 8]);
-        assert_eq!([2, 8, 12, 16].map(meshing_threads), [1, 3, 5, 7]);
+        // Skewed toward sampling, which is the cold-load bottleneck, out of `worker_budget` (what
+        // the frame, the chunk pool and the server leave). The pools used to add up to more threads
+        // than the machine had, and the frame thread then waited for a core.
+        assert_eq!([1, 2, 4, 8, 11].map(sampling_threads), [1, 1, 1, 4, 4]);
+        assert_eq!([12, 16, 64].map(sampling_threads), [4, 4, 4]);
+        assert_eq!([2, 8, 12, 16].map(meshing_threads), [1, 1, 2, 2]);
     }
 
     /// Review point 3 on #4747: a result from a batch that is no longer the
