@@ -118,8 +118,20 @@ def folder(out: Path) -> None:
         (fs / "res" / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(res / rel, fs / "res" / rel)
         count += 1
-    files = ("pkg/horizon-client_bg.wasm", "pkg-st/horizon-client_bg.wasm", "fs/boot.tar.gz")
-    (site / "build.json").write_text("{" + ", ".join(f'"{f}": "{digest(site / f)}"' for f in files) + "}\n")
+    # The glue is versioned beside the module it instantiates: `main.js` imports it by this hash.
+    # Unhashed, a redeploy could pair the browser's HTTP-cached `horizon-client.js` from the last
+    # build with the new `?v=` wasm, and the page ran to the title screen and stayed black while
+    # its log reported frame after frame presenting.
+    files = (
+        "pkg/horizon-client.js",
+        "pkg/horizon-client_bg.wasm",
+        "pkg-st/horizon-client.js",
+        "pkg-st/horizon-client_bg.wasm",
+        "fs/boot.tar.gz",
+    )
+    (site / "build.json").write_text(
+        "{" + ", ".join(f'"{f}": "{digest(site / f)}"' for f in files if (site / f).is_file()) + "}\n"
+    )
     size = sum(p.stat().st_size for p in site.rglob("*") if p.is_file())
     print(f"{site}: {size / 1e6:.0f} MB ({count} files fetched when read)")
 

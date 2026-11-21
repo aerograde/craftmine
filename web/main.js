@@ -96,7 +96,11 @@ async function versioned() {
         .catch(() => ({}));
     const at = (path) => (files[path] ? `${path}?v=${files[path]}` : path);
     const pkg = !window.crossOriginIsolated && files["pkg-st/horizon-client_bg.wasm"] ? "pkg-st" : "pkg";
-    return { pkg, wasm: at(`${pkg}/horizon-client_bg.wasm`), boot: at("fs/boot.tar.gz") };
+    return {
+        glue: at(`${pkg}/horizon-client.js`),
+        wasm: at(`${pkg}/horizon-client_bg.wasm`),
+        boot: at("fs/boot.tar.gz"),
+    };
 }
 
 async function download(url, label) {
@@ -262,7 +266,10 @@ async function served() {
     await cacheWorker();
     const files = await versioned();
     status.textContent = "Loading the game…";
-    const glue = await import(`./${files.pkg}/horizon-client.js`);
+    // The glue and the module it instantiates come from the same build: the glue is fetched by its
+    // own hash too, so a redeploy cannot pair the HTTP-cached glue of the last build with the new
+    // module (the page ran to the title screen and stayed black).
+    const glue = await import(`./${files.glue}`);
     // Runs the game's main, which only registers the game to start.
     await glue.default({ module_or_path: files.wasm });
     const gz = await download(files.boot, "Downloading resources");
