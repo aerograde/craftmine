@@ -634,11 +634,7 @@ impl Default for Graphics {
             battery: false,
             shadow_cache: false,
             api: GraphicsApi::Auto,
-            shader_pack: if cfg!(target_arch = "wasm32") {
-                String::new()
-            } else {
-                "MiniatureXL".into()
-            },
+            shader_pack: "MiniatureXL".into(),
         }
     }
 }
@@ -971,6 +967,19 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bundled pack is the default look on every platform, the browser included.
+    ///
+    /// It used to default to none on wasm, so a fresh browser install drew the built-in
+    /// profile and the pack only appeared for someone who picked it by hand.
+    #[test]
+    fn the_bundled_pack_is_on_by_default() {
+        assert_eq!(Graphics::default().shader_pack, "MiniatureXL");
+        assert_eq!(
+            Graphics::parse("").shader_pack,
+            Graphics::default().shader_pack
+        );
+    }
 
     /// Reusing the last shadow map is off by default, deliberately.
     ///

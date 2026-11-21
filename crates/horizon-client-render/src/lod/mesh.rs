@@ -652,11 +652,22 @@ fn mesh_heightfield(
                     [px, key.size() as f32 - pz]
                 }
             };
+            // A cell's top is one flat quad at one height, so its edges read as
+            // steps between cells instead of a continuous slope: the shared
+            // corner grid interpolated a hill smaller than a cell into a ramp,
+            // which is what made the far rings look like smooth blobs. The
+            // lowest corner is the step a neighbouring cell drops to, so a
+            // cliff stays a cliff rather than a slab floating over it. Each
+            // cell pushes its own four vertices, so flattening one cannot tear
+            // a neighbour's edge; the vertex, tile and draw counts are those of
+            // the one-quad path.
+            let h = a.height.min(b.height).min(c.height).min(d.height);
+            let y = h as f32;
             let mut points = [
-                ([x0, d.height as f32, z1], uv(x0, z1)),
-                ([x1, c.height as f32, z1], uv(x1, z1)),
-                ([x1, b.height as f32, z0], uv(x1, z0)),
-                ([x0, a.height as f32, z0], uv(x0, z0)),
+                ([x0, y, z1], uv(x0, z1)),
+                ([x1, y, z1], uv(x1, z1)),
+                ([x1, y, z0], uv(x1, z0)),
+                ([x0, y, z0], uv(x0, z0)),
             ];
             let mut values = [d, c, b, a];
             // The shared index buffer always splits a quad along its 0-2
@@ -688,6 +699,8 @@ fn mesh_heightfield(
             // (m,c,d,a): the shared index buffer splits each on its own
             // diagonal, so no index or pipeline change is needed.
             let centre = centres.get(z * CELLS + x).copied().flatten();
+            // Still the corners' mean, not the plateau: the fan's trigger must
+            // stay at its old rate, or the cell would gain vertices (and cost).
             let flat = (a.height + b.height + c.height + d.height) as f32 / 4.0;
             if let Some(centre) =
                 centre.filter(|centre| (centre.height as f32 - flat).abs() >= CENTRE_SUBDIVIDE)
@@ -2629,6 +2642,55 @@ mod tests {
             assert!(
                 (t0 > 0.0) == (t1 > 0.0),
                 "both triangles of a quad must wind the same way"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "the heightfield emitted no top quads");
+    }
+
+    /// A far cell's top is one flat quad, so its edges step between cells
+    /// instead of interpolating into a ramp. The shared corner grid turned a
+    /// hill smaller than a cell into a smooth slope, which is what made the far
+    /// rings read as blobs; the plateau is the cell's lowest corner, so a cliff
+    /// stays a cliff. Vertex count must not change, or the fix costs speed.
+    #[test]
+    fn a_far_cell_top_is_flat_rather_than_interpolated() {
+        let key = TileKey {
+            x: 0,
+            z: 0,
+            level: 9,
+        };
+        assert!(
+            key.size() / CELLS as i32 >= HEIGHTFIELD_CELL,
+            "this pins the heightfield path"
+        );
+        // A slope: every corner sits four blocks above its neighbour in x, so an
+        // interpolated quad would be visibly sloped inside every cell.
+        let mut sloped = columns();
+        for (i, column) in sloped.iter_mut().enumerate() {
+            let height = 64 + (i % (CELLS + 1)) as i32 * 4;
+            column.surface = Some(Surface {
+                height,
+                state: BlockStateId(1),
+                water: None,
+                biome: 0,
+            });
+            column.spans = vec![span(0, 3, 1)].into();
+        }
+        let mesh = mesh_columns(key, &sloped, &FxHashSet::default(), None, material);
+        // Top quads span a rectangle in x/z; walls are vertical and have none.
+        let mut checked = 0;
+        for quad in mesh.solid.as_chunks::<4>().0 {
+            let p: Vec<[f32; 3]> = quad.iter().map(|v| v.position()).collect();
+            let area = (p[1][0] - p[0][0]) * (p[3][2] - p[0][2])
+                - (p[3][0] - p[0][0]) * (p[1][2] - p[0][2]);
+            if area.abs() < 1.0 {
+                continue;
+            }
+            let h: Vec<f32> = p.iter().map(|v| v[1]).collect();
+            assert!(
+                h.iter().all(|y| (y - h[0]).abs() < f32::EPSILON),
+                "a cell top must be one flat plateau, not a ramp: {h:?}"
             );
             checked += 1;
         }
