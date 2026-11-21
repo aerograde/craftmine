@@ -634,7 +634,13 @@ impl Default for Graphics {
             battery: false,
             shadow_cache: false,
             api: GraphicsApi::Auto,
-            shader_pack: "MiniatureXL".into(),
+            // Empty here, and `picked_shader_pack` falls back to the bundled pack: naming it
+            // outright would bypass `too_small_for_pack`, forcing it onto 4 GB/2-thread devices.
+            shader_pack: if cfg!(target_arch = "wasm32") {
+                String::new()
+            } else {
+                "MiniatureXL".into()
+            },
         }
     }
 }
@@ -968,17 +974,23 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
 mod tests {
     use super::*;
 
-    /// The bundled pack is the default look on every platform, the browser included.
+    /// The bundled pack is the look on every platform, but it is reached through the
+    /// fallback in `picked_shader_pack`, never by naming it here.
     ///
-    /// It used to default to none on wasm, so a fresh browser install drew the built-in
-    /// profile and the pack only appeared for someone who picked it by hand.
+    /// Naming it outright made the setting non-empty, so `picked_shader_pack`'s
+    /// `picked.is_empty() && !too_small_for_pack()` fallback never ran and a 4 GB or
+    /// 2-thread device was handed a pack it was deliberately gated off from.
     #[test]
-    fn the_bundled_pack_is_on_by_default() {
-        assert_eq!(Graphics::default().shader_pack, "MiniatureXL");
+    fn the_bundled_pack_is_reached_through_the_size_gate() {
+        let wants_wasm = cfg!(target_arch = "wasm32");
         assert_eq!(
-            Graphics::parse("").shader_pack,
-            Graphics::default().shader_pack
+            Graphics::default().shader_pack.is_empty(),
+            wants_wasm,
+            "wasm leaves the pick empty so the size gate decides; native names the pack"
         );
+        if !wants_wasm {
+            assert_eq!(Graphics::default().shader_pack, "MiniatureXL");
+        }
     }
 
     /// Reusing the last shadow map is off by default, deliberately.
