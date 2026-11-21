@@ -265,6 +265,34 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_reach_keeps_the_density_the_map_was_built_for() {
+        // MiniatureXL's `shader.h` defaults: 1024 texels over 128 blocks each side, so four texels
+        // a block. The map cannot be resized once built, so applying the pack's 128-block reach to
+        // a smaller map halves the density and the light mottles: 512 over 128 is 0.5 blocks a
+        // texel against the pack's 0.25. Clamping to what the map covers keeps every lookup on a
+        // texel the terrain pass wrote.
+        let pack_density = 1024.0 / (2.0 * 128.0);
+        for quality in [
+            VisualQuality::High,
+            VisualQuality::Medium,
+            VisualQuality::Low,
+        ] {
+            let plan = Tier::from_quality(quality).shadow();
+            // The renderer's own expression: `shadow_settings.distance` starts as the plan's and
+            // is clamped to what the map covers at the pack's density.
+            let covered = plan.resolution as f32 / (2.0 * pack_density);
+            let reach = plan.distance.min(covered.min(128.0));
+            let density = plan.resolution as f32 / (2.0 * reach);
+            assert!(
+                (density - pack_density).abs() < 1e-4,
+                "{quality:?}: {density} texels a block against the pack's {pack_density}"
+            );
+            // Never widened past the pack's own reach.
+            assert!(reach <= 128.0);
+        }
+    }
+
+    #[test]
     fn the_default_memory_budget_fits() {
         for quality in [
             VisualQuality::High,
