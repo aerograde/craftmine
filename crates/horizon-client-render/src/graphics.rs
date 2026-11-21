@@ -940,23 +940,19 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
     // both alone, which is why it barely helped on the 8 GB browser tabs that
     // need it most: the horizon cost the same as on Ultra.
     //
-    // None of them turn infinite back on: the default horizon is bounded (96
-    // chunks) because past it the cells are wider than a block and read as one
-    // flat quad, and a preset that silently restored an 8192-block ring undid
-    // the setting the player is looking at. Infinite is an explicit choice.
+    // A preset never costs the player the horizon. Turning infinite off left the far plane on the
+    // resident ring (a 64-chunk preset: 128 blocks of real terrain, then nothing), which is the
+    // "blocky up close" a Performance preset produced and the reduced cells are the "blocky in the
+    // distance": the plan is camera-centred and its node count is the same at any reach, so the
+    // cheap presets spend their budget on far detail, not on a nearer edge. `Reduced` also measured
+    // only 20-33% cheaper a tile (`lod_grid_bench`), which does not buy back a horizon.
     match preset {
-        Preset::Performance => {
-            g.lod_infinite = false;
-            g.lod_distance = 64;
-            g.far_detail = FarDetail::Reduced;
-        }
-        Preset::Balanced => {
-            g.lod_infinite = false;
-            g.lod_distance = 96;
-            g.far_detail = FarDetail::Reduced;
+        Preset::Performance | Preset::Balanced => {
+            g.lod_infinite = true;
+            g.far_detail = FarDetail::Full;
         }
         Preset::Quality | Preset::Ultra => {
-            g.lod_infinite = false;
+            g.lod_infinite = true;
             g.lod_distance = 128;
             g.far_detail = FarDetail::Full;
         }
@@ -1408,17 +1404,13 @@ mod tests {
         for text in ["farDetail:full\n", "farDetail:other\n", ""] {
             assert_eq!(Graphics::parse(text).far_detail, FarDetail::Full);
         }
-        // Far terrain is most of the frame's geometry, so the cheap presets
-        // draw it coarser and the expensive ones keep every cell.
-        for (preset, detail) in [
-            (Preset::Performance, FarDetail::Reduced),
-            (Preset::Balanced, FarDetail::Reduced),
-            (Preset::Quality, FarDetail::Full),
-            (Preset::Ultra, FarDetail::Full),
-        ] {
+        // A preset never coarsens the far cells or drops the horizon: `Reduced` measured only
+        // 20-33% cheaper a tile, and infinite terrain's plan is the same node count at any reach.
+        for preset in Preset::ALL {
             let mut s = crate::settings::Settings::default();
             apply_preset(preset, &mut s);
-            assert_eq!(s.horizon.far_detail, detail, "{preset:?}");
+            assert_eq!(s.horizon.far_detail, FarDetail::Full, "{preset:?}");
+            assert!(s.horizon.lod_infinite, "{preset:?} dropped the horizon");
         }
         // Custom leaves whatever the player picked alone.
         let mut s = crate::settings::Settings::default();
