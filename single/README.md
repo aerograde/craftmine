@@ -14,11 +14,18 @@ anyone-with-link, and the API key in `launch.svg` is restricted to the
 is why the jsDelivr URL above is the way in.
 
 - file id: `1GTf4LaN75PMx2_-i4UO30JfYOCLbKUf_`
-- build: `30bdc9e0c7fa` (first 12 hex digits of the file's SHA-256)
-- size: 355,479,889 bytes
+- build: `56b3ee752040` (first 12 hex digits of the file's SHA-256)
+- size: 355,503,474 bytes
 
 The title screen names the commit it was built from in its top-left corner
-(`Build b4fdbfd2c0d7`), so a screenshot says which build it is.
+(`Build 24c6431e01f7`), so a screenshot says which build it is. A shader pack's
+GLSL translation now runs on a worker instead of the frame's thread: it used to
+compile inside the first in-world frame, so a world went live and then froze for
+6-10 seconds on a desktop (minutes on a small laptop) with nothing drawing. The
+loading overlay stays up while it translates. It also culls occluded sections in
+the browser (the `InShader` test was limited to Vulkan and Metal, so every
+browser drew every hidden section of terrain), and loads the world tables off
+the page's own thread.
 
 This build has sound: `cpal` asks the `AudioContext` to resume as soon as the
 game opens its stream, which is before the player has clicked or typed
