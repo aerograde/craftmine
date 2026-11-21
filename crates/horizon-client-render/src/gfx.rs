@@ -5155,8 +5155,14 @@ impl Renderer {
         // The player's tier, not only the adapter's, decides the reach and the
         // filter: pinning High on an integrated GPU used to keep the near,
         // single-tap map, and pinning Medium on a discrete one kept High's.
+        //
+        // A pack that owns post still samples this map, so it must be planned at the tier the map
+        // was allocated for (`shadow_quality`), not at the `Low` the pack's grade forces: a 512
+        // reach over a 1024 map put every lookup on texels the terrain pass never wrote, which is
+        // the stepped banding.
         let mut shadow_settings = self.visual_shadow_settings.clone();
-        let shadow_plan = crate::visual::Tier::from_quality(visual_tier).shadow();
+        let shadow_plan =
+            crate::visual::Tier::from_quality(crate::graphics::auto_visual_quality()).shadow();
         let visual_taps = shadow_plan.taps;
         shadow_settings.distance = if shadow_plan.resolution == 0 {
             128.0
@@ -5193,9 +5199,14 @@ impl Renderer {
             }
         }
         shadow_settings.far = pack_uniforms::SHADOW_EYE + 2.0 * shadow_settings.distance + 384.0;
+        // The frame's visuals, not `builtin_visuals`: a post-only pack still samples
+        // `shadowtex1` from its composite, so the near cascade has to be drawn for it even though
+        // the pack owns the grade. Passing the pack's own "no visuals" here returned an empty
+        // pass set and left the map cleared — a shadow missing where the pack looks it up, and a
+        // stale band wherever it does not.
         let visual_passes = crate::visual::passes(
             crate::visual::Tier::from_quality(frame.visual_tier),
-            builtin_visuals,
+            frame.visual[0] > 0.0,
             false,
         );
         let visual_shadow = (visual_passes.shadow && !frame.title && other_shadow_view.is_none())

@@ -139,6 +139,16 @@ const INFINITE_LEVEL: u8 = 9;
 /// reads as a smooth blob where a hill should be — the rings that small keep
 /// their voxel columns and their block detail.
 const HEIGHTFIELD_CELL: i32 = 16;
+/// From this cell width up a heightfield cell's top is one flat plateau
+/// instead of a ramp interpolated between its corners.
+///
+/// Every heightfield ring below this one is still tens of pixels a cell, and
+/// flattening one there reads as the blocky plateau a player picks out instead
+/// of a hill — the 16-block ring is the first the LOD draws at all. Above it a
+/// cell is a few pixels wide, where the ramp over a hill smaller than the cell
+/// is exactly the soft blob the step removes. The step costs nothing: a cell
+/// emits the same four vertices either way.
+const STEPPED_CELL: i32 = 64;
 /// Main-thread result budget per update. Workers can finish hundreds of tiles
 /// in a burst; taking them all in one frame is a hitch. Accepting a mesh is
 /// cheap (it is only moved into the upload queue), so take enough that the
@@ -2112,7 +2122,11 @@ impl Lod {
             return;
         }
         let started = horizon_os::time::Instant::now();
-        let deadline = started + horizon_os::time::Duration::from_millis(4);
+        // The slice runs on the frame's own thread, and one sample covers a whole tile (~18 ms), so
+        // the old 4 ms finished less than one tile per frame and the horizon crawled in while the
+        // player watched — worst flying, when every tile is new. 8 ms is half a 60 Hz frame's
+        // budget and stops between tiles, so one tile lands per frame instead of one every fifth.
+        let deadline = started + horizon_os::time::Duration::from_millis(8);
         loop {
             let job = lock(&self.shared.jobs).pop_front();
             let Some(job) = job else { break };

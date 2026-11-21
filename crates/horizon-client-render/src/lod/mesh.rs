@@ -1,5 +1,5 @@
 //! Exposed voxel-column faces, merged without changing their block-scale UVs.
-use super::{Column, HEIGHTFIELD_CELL, Span, Spans, Surface, TileKey};
+use super::{Column, HEIGHTFIELD_CELL, STEPPED_CELL, Span, Spans, Surface, TileKey};
 use crate::{
     fast_hash::{FxHashMap, FxHashSet},
     mesher::{OPAQUE_LAYER, SectionMesh, TILED_UV_STEPS, TerrainVertex, fluid_face},
@@ -652,23 +652,32 @@ fn mesh_heightfield(
                     [px, key.size() as f32 - pz]
                 }
             };
-            // A cell's top is one flat quad at one height, so its edges read as
-            // steps between cells instead of a continuous slope: the shared
-            // corner grid interpolated a hill smaller than a cell into a ramp,
-            // which is what made the far rings look like smooth blobs. The
-            // lowest corner is the step a neighbouring cell drops to, so a
-            // cliff stays a cliff rather than a slab floating over it. Each
-            // cell pushes its own four vertices, so flattening one cannot tear
-            // a neighbour's edge; the vertex, tile and draw counts are those of
-            // the one-quad path.
-            let h = a.height.min(b.height).min(c.height).min(d.height);
-            let y = h as f32;
-            let mut points = [
-                ([x0, y, z1], uv(x0, z1)),
-                ([x1, y, z1], uv(x1, z1)),
-                ([x1, y, z0], uv(x1, z0)),
-                ([x0, y, z0], uv(x0, z0)),
-            ];
+            // A cell's top is one flat quad where the cell is a few pixels wide, so its edges
+            // read as steps between cells instead of the smooth ramp the shared corner grid made
+            // of a hill smaller than a cell. Nearer rings keep their interpolation: a 16-block
+            // cell a kilometre out is still tens of pixels wide, and flattening one there reads
+            // as the blocky plateau the eye picks out instead of a hill. The lowest corner is the
+            // step a neighbouring cell drops to, so a cliff stays a cliff instead of a slab
+            // floating over it. Each cell pushes its own four vertices, so flattening one cannot
+            // tear a neighbour's edge; the vertex, tile and draw counts are those of the
+            // one-quad path.
+            let stepped = stride >= STEPPED_CELL;
+            let mut points = if stepped {
+                let y = a.height.min(b.height).min(c.height).min(d.height) as f32;
+                [
+                    ([x0, y, z1], uv(x0, z1)),
+                    ([x1, y, z1], uv(x1, z1)),
+                    ([x1, y, z0], uv(x1, z0)),
+                    ([x0, y, z0], uv(x0, z0)),
+                ]
+            } else {
+                [
+                    ([x0, d.height as f32, z1], uv(x0, z1)),
+                    ([x1, c.height as f32, z1], uv(x1, z1)),
+                    ([x1, b.height as f32, z0], uv(x1, z0)),
+                    ([x0, a.height as f32, z0], uv(x0, z0)),
+                ]
+            };
             let mut values = [d, c, b, a];
             // The shared index buffer always splits a quad along its 0-2
             // diagonal, so the pair of corners on that diagonal is the edge the
@@ -2646,6 +2655,53 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "the heightfield emitted no top quads");
+    }
+
+    /// Only the rings a few pixels wide get a flat top. A 16-block cell a
+    /// kilometre out is tens of pixels wide, and flattening one there reads as
+    /// the blocky plateau a player picks out instead of a hill, so those keep
+    /// their interpolated ramp and their shape.
+    #[test]
+    fn the_near_heightfield_rings_keep_their_ramp() {
+        let key = TileKey {
+            x: 0,
+            z: 0,
+            level: 5,
+        };
+        let stride = key.size() / CELLS as i32;
+        assert!(
+            stride >= HEIGHTFIELD_CELL && stride < STEPPED_CELL,
+            "level 5 is a heightfield ring below the stepped ones, not {stride}"
+        );
+        let mut sloped = columns();
+        for (i, column) in sloped.iter_mut().enumerate() {
+            let height = 64 + (i % (CELLS + 1)) as i32 * 4;
+            column.surface = Some(Surface {
+                height,
+                state: BlockStateId(1),
+                water: None,
+                biome: 0,
+            });
+            column.spans = vec![span(0, 3, 1)].into();
+        }
+        let mesh = mesh_columns(key, &sloped, &FxHashSet::default(), None, material);
+        let mut sloped_tops = 0;
+        for quad in mesh.solid.as_chunks::<4>().0 {
+            let p: Vec<[f32; 3]> = quad.iter().map(|v| v.position()).collect();
+            let area = (p[1][0] - p[0][0]) * (p[3][2] - p[0][2])
+                - (p[3][0] - p[0][0]) * (p[1][2] - p[0][2]);
+            if area.abs() < 1.0 {
+                continue;
+            }
+            let h: Vec<f32> = p.iter().map(|v| v[1]).collect();
+            if h.iter().any(|y| (y - h[0]).abs() > f32::EPSILON) {
+                sloped_tops += 1;
+            }
+        }
+        assert!(
+            sloped_tops > 0,
+            "a ramp under this ring's cells must survive: every top came out flat"
+        );
     }
 
     /// A far cell's top is one flat quad, so its edges step between cells
