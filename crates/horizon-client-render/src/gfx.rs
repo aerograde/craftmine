@@ -5189,12 +5189,17 @@ impl Renderer {
             // The reach is the pack's too: its map coordinates span `distance` each side, so a
             // map written over a shorter reach samples at the centre-half only.
             //
-            // The texel density follows (the map is allocated once, so it cannot): ours is
-            // resolution / distance, the pack's its own. A pack whose reach we can cover keeps
-            // its density exactly; one reaching further than the map has texels for gets the
-            // coarser map rather than a clipped one, which is the stepped shading either way.
-            if pack.distance > 0.0 {
-                shadow_settings.distance = pack.distance;
+            // The map is allocated once, before the pack loads, so its resolution cannot follow the
+            // pack's `shadowMapResolution`. The reach has to: the pack reads its own map coordinates
+            // as if the texels were its density, so stretching our 1024 map across the pack's
+            // 2048-sized reach halves the density (0.375-block texels) and the light mottles.
+            // Clamping the reach to what the allocated map covers at the pack's density keeps every
+            // lookup on a texel that was written; beyond that the map's edge is the reach, which is
+            // what a smaller `shadowMapResolution` costs in the pack itself.
+            if pack.distance > 0.0 && pack.resolution > 0 {
+                let density = pack.resolution as f32 / (2.0 * pack.distance);
+                let covered = shadow_settings.resolution as f32 / (2.0 * density);
+                shadow_settings.distance = shadow_settings.distance.min(covered);
             }
         }
         shadow_settings.far = pack_uniforms::SHADOW_EYE + 2.0 * shadow_settings.distance + 384.0;
