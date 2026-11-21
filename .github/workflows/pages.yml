@@ -79,5 +79,23 @@ jobs:
       - uses: actions/upload-pages-artifact@v4
         with:
           path: web/out/horizon-web
+      # The artifact API can lag its own finalize line, and `deploy-pages` then fails the whole run
+      # with "Found 0 artifact(s)" a few hundred milliseconds after a 68 MB upload succeeded (runs
+      # 44923532567 and 44935133726). Re-running is not a workaround: it keeps the first run's
+      # artifact, so the deploy refuses with "Multiple artifacts named github-pages". Retry here
+      # instead, once the artifact is queryable.
+      - name: Wait for the artifact to be visible
+        run: |
+          for i in $(seq 1 20); do
+            n=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts \
+              --jq '[.artifacts[]|select(.name=="github-pages")]|length')
+            echo "attempt $i: $n github-pages artifact(s)"
+            [ "$n" -ge 1 ] && exit 0
+            sleep 5
+          done
+          echo "::error::github-pages artifact never became visible"
+          exit 1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - id: deployment
         uses: actions/deploy-pages@v4
