@@ -354,6 +354,30 @@ async function install() {
     say(total ? "Downloading " + bytes(total) : "Downloading the game");
     note(SOURCE);
 
+    // How long one read may go without delivering a byte. Four chunks' worth at the rate
+    // seen so far, never under 20 s (a slow start) nor over 2 min (a long stall).
+    function stallLimit(got, since) {
+      var rate = got / Math.max(1, Date.now() - since);
+      return Math.max(20000, Math.min(120000, (rate > 0 ? CHUNK / rate : 0) * 4 || 60000));
+    }
+    function withDeadline(promise, ms) {
+      return new Promise(function (resolve) {
+        var done = false;
+        var timer = setTimeout(function () { if (!done) { done = true; resolve("stalled"); } }, ms);
+        promise.then(function (value) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(value);
+        }, function (error) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve("stalled");
+        });
+      });
+    }
+
     var attempts = 0;
     for (;;) {
       var response;
@@ -395,7 +419,15 @@ async function install() {
         }
       } else {
         for (;;) {
-          var step = await reader.read();
+          // A response that stops delivering bytes mid-stream never ends, so `read` would wait
+          // for ever and the "Reconnecting at ..." below could never run. Give each read a
+          // deadline sized from the rate so far; a slow-but-moving link is never cut off.
+          var step = await withDeadline(reader.read(), stallLimit(have, started));
+          if (step === "stalled") {
+            try { await reader.cancel(); } catch (e) { /* already gone */ }
+            say("The stream stopped at " + bytes(have) + ", reconnecting...");
+            break;
+          }
           if (step.done) break;
           var value = step.value;
           if (headText.length < 200) headText += new TextDecoder().decode(value.slice(0, 200 - headText.length));
