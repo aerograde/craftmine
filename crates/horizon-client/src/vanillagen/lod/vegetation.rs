@@ -381,9 +381,12 @@ impl Vegetation {
                 if d2 > tree.radius.pow(2) {
                     continue;
                 }
-                let cap = ((tree.radius.pow(2) - d2) as f32).sqrt().ceil() as i32;
-                let top = surface.height + height + cap.min(2);
-                let bottom = surface.height + height - tree.radius;
+                // The crown is the canopy, not the trunk: a span from the treetop down to
+                // `height - radius` covered most of the tree's height, so adjacent cells each drew a
+                // full-height leaf column and a stand of trees read as a striped curtain. The
+                // canopy starts where the leaves do — above the bare trunk — and its depth follows
+                // how near this cell is to the trunk.
+                let (top, bottom) = crown(surface.height, height, tree.radius, d2);
                 if best.as_ref().is_none_or(|&(y, _, _)| top > y) {
                     best = Some((top, bottom, tree));
                 }
@@ -456,9 +459,58 @@ impl Vegetation {
     }
 }
 
+/// One cell's crown: the leaf span `(top, bottom)` it shows for a tree of `radius` whose trunk
+/// ends at `ground + height`, standing `d2` squared blocks from the cell's corner.
+///
+/// The canopy is a cap under the treetop, and how deep it is follows how near the trunk this cell
+/// is — a cell whose corner is at the trunk shows the full crown, one at the rim shows its edge.
+fn crown(ground: i32, height: i32, radius: i32, d2: i32) -> (i32, i32) {
+    let cap = ((radius * radius - d2).max(0) as f32).sqrt().ceil() as i32;
+    let top = ground + height + cap.min(2);
+    // A stand of spruces is wider than it is tall: a crown that deep would start at the ground, so
+    // it is cut to the trunk above it. That keeps a cell's leaves where the tree's own leaves are.
+    let deepest = (top - ground - 1).max(1);
+    let bottom = top - (cap.min(radius) + 1).clamp(1, deepest);
+    (top, bottom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tree's canopy is a cap, not a column: a cell's leaf span has to start above the bare
+    /// trunk's top and stay a few blocks deep. The old span ran from `ground + height - radius`
+    /// (below the treetop) to the treetop, which is most of the tree's height, and every cell of a
+    /// stand drew one, so trees read as a striped curtain of leaf columns.
+    #[test]
+    fn a_crown_is_a_canopy_and_not_the_whole_tree() {
+        for radius in 2..=6 {
+            for height in 5..=12 {
+                let ground = 64;
+                for d2 in 0..=radius * radius {
+                    let (top, bottom) = crown(ground, height, radius, d2);
+                    // Above the trunk, which is the point of the change.
+                    assert!(
+                        bottom > ground,
+                        "radius {radius}, height {height}, d2 {d2}: crown starts at the ground"
+                    );
+                    // The treetop is where the trunk ended, so the cap cannot reach below it by
+                    // more than the tree is wide.
+                    assert!(
+                        top - bottom <= radius + 1,
+                        "radius {radius}, height {height}, d2 {d2}: {} blocks of leaves",
+                        top - bottom
+                    );
+                    assert!(top >= bottom + 1, "an empty crown");
+                    // A farther cell's canopy is no taller than a nearer one's.
+                    if d2 > 0 && (d2 as f32).sqrt() < radius as f32 {
+                        let (_, near) = crown(ground, height, radius, 0);
+                        assert!(bottom >= near, "the canopy grows away from the trunk");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn chorus_density_and_height_follow_the_placements() {
